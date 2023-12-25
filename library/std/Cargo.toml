@@ -57,6 +57,10 @@ wasi = { version = "0.11.0", features = ['rustc-dep-of-std'], default-features =
 r-efi = { version = "4.2.0", features = ['rustc-dep-of-std']}
 r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std']}
 
+[target.'cfg(target_os = "amjad_os")'.dependencies]
+# This is from `https://github.com/Amjad50/OS`, i.e. it must be run from that context
+user_std = { path = "../../../../libraries/user_std" }
+
 [features]
 backtrace = [
   "gimli-symbolize",
