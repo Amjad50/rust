@@ -153,9 +153,8 @@
 //! [`from_wide`]: crate::os::windows::ffi::OsStringExt::from_wide "os::windows::ffi::OsStringExt::from_wide"
 
 #![stable(feature = "rust1", since = "1.0.0")]
-
 #[stable(feature = "alloc_c_string", since = "1.64.0")]
-pub use alloc::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
+pub use alloc_crate::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
 #[stable(feature = "cstr_from_bytes_until_nul", since = "1.73.0")]
 pub use core::ffi::FromBytesUntilNulError;
 #[stable(feature = "core_c_str", since = "1.64.0")]

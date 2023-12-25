@@ -1474,7 +1474,7 @@ impl OsStr {
 }
 
 #[unstable(feature = "slice_concat_ext", issue = "27747")]
-impl<S: Borrow<OsStr>> alloc::slice::Join<&OsStr> for [S] {
+impl<S: Borrow<OsStr>> alloc_crate::slice::Join<&OsStr> for [S] {
     type Output = OsString;
 
     fn join(slice: &Self, sep: &OsStr) -> OsString {

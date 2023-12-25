@@ -285,6 +285,7 @@
 #![feature(exhaustive_patterns)]
 #![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
+#![feature(ip_in_core)]
 #![feature(lang_items)]
 #![feature(let_chains)]
 #![feature(link_cfg)]
@@ -361,7 +362,7 @@
 //
 // Library features (unwind):
 // tidy-alphabetical-start
-#![feature(panic_unwind)]
+// #![feature(panic_unwind)]
 // tidy-alphabetical-end
 //
 // Only for re-exporting:
@@ -415,14 +416,14 @@ extern crate test;
 #[allow(unused_imports)] // macros from `alloc` are not used on all platforms
 #[macro_use]
 extern crate alloc as alloc_crate;
-#[doc(masked)]
-#[allow(unused_extern_crates)]
-extern crate libc;
+// #[doc(masked)]
+// #[allow(unused_extern_crates)]
+// extern crate libc;
 
 // We always need an unwinder currently for backtraces
-#[doc(masked)]
-#[allow(unused_extern_crates)]
-extern crate unwind;
+// #[doc(masked)]
+// #[allow(unused_extern_crates)]
+// extern crate unwind;
 
 // FIXME: #94122 this extern crate definition only exist here to stop
 // miniz_oxide docs leaking into std docs. Find better way to do it.
@@ -603,7 +604,7 @@ pub mod task {
 
     #[doc(inline)]
     #[stable(feature = "wake_trait", since = "1.51.0")]
-    pub use alloc::task::*;
+    pub use alloc_crate::task::*;
 }
 
 #[doc = include_str!("../../stdarch/crates/core_arch/src/core_arch_docs.md")]
