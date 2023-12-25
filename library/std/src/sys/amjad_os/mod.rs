@@ -5,6 +5,7 @@ pub mod args;
 #[path = "../unix/cmath.rs"]
 pub mod cmath;
 pub mod env;
+pub mod fd;
 pub mod fs;
 pub mod io;
 pub mod locks;
@@ -27,3 +28,33 @@ pub mod time;
 
 mod common;
 pub use common::*;
+
+use user_std::SyscallError;
+
+fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
+    match e {
+        SyscallError::CouldNotOpenFile => {
+            crate::io::Error::new(crate::io::ErrorKind::NotFound, "Could not open file")
+        }
+        SyscallError::InvalidFileIndex => {
+            crate::io::Error::new(crate::io::ErrorKind::NotFound, "Invalid file index")
+        }
+        SyscallError::CouldNotWriteToFile => {
+            crate::io::Error::new(crate::io::ErrorKind::PermissionDenied, "Could not write to file")
+        }
+        SyscallError::CouldNotReadFromFile => crate::io::Error::new(
+            crate::io::ErrorKind::PermissionDenied,
+            "Could not read from file",
+        ),
+        SyscallError::InvalidArgument(_, _, _, _, _, _, _) => {
+            // TODO: use args
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "Invalid argument")
+        }
+        // should never happen
+        SyscallError::SyscallNotFound | SyscallError::InvalidErrorCode(_) => unreachable!(),
+        // not applicable
+        SyscallError::CouldNotLoadElf
+        | SyscallError::CouldNotAllocateProcess
+        | SyscallError::HeapRangesExceeded => unreachable!(),
+    }
+}
