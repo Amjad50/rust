@@ -6,6 +6,21 @@ use crate::io;
 use crate::marker::PhantomData;
 use crate::path::{self, PathBuf};
 
+// This function is needed by the panic runtime. The symbol is named in
+// pre-link args for the target specification, so keep that in sync.
+#[no_mangle]
+pub extern "C" fn __rust_abort() -> ! {
+    super::os::exit(0xFF);
+}
+extern "C" {
+    fn main() -> i32;
+}
+
+#[no_mangle]
+pub extern "C" fn _start() {
+    exit(unsafe { main() });
+}
+
 pub fn errno() -> i32 {
     0
 }
