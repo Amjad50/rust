@@ -112,8 +112,8 @@ pub fn home_dir() -> Option<PathBuf> {
     None
 }
 
-pub fn exit(_code: i32) -> ! {
-    crate::intrinsics::abort()
+pub fn exit(code: i32) -> ! {
+    unsafe { user_std::process::exit(code as u64) }
 }
 
 pub fn getpid() -> u32 {

@@ -58,3 +58,10 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
         | SyscallError::HeapRangesExceeded => unreachable!(),
     }
 }
+
+// This function is needed by the panic runtime. The symbol is named in
+// pre-link args for the target specification, so keep that in sync.
+#[no_mangle]
+pub extern "C" fn __rust_abort() -> ! {
+    os::exit(0xFF);
+}
