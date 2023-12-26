@@ -32,7 +32,7 @@ pub fn decode_error_kind(_code: i32) -> crate::io::ErrorKind {
 }
 
 pub fn abort_internal() -> ! {
-    core::intrinsics::abort();
+    super::os::__rust_abort()
 }
 
 pub fn hashmap_random_keys() -> (u64, u64) {
