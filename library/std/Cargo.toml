@@ -14,7 +14,7 @@ crate-type = ["dylib", "rlib"]
 [dependencies]
 # alloc = { path = "../alloc", public = true }
 cfg-if = { version = "1.0" }
-panic_unwind = { path = "../panic_unwind", optional = true }
+# panic_unwind = { path = "../panic_unwind", optional = true }
 panic_abort = { path = "../panic_abort" }
 # core = { path = "../core", public = true }
 # libc = { version = "0.2.150", default-features = false, features = [
@@ -76,7 +76,7 @@ user_std = { path = "../../../../libraries/user_std" }
 # ]
 # gimli-symbolize = []
 
-panic-unwind = ["panic_unwind"]
+panic-unwind = []
 profiler = ["profiler_builtins"]
 # compiler-builtins-c = ["alloc/compiler-builtins-c"]
 # compiler-builtins-mem = ["alloc/compiler-builtins-mem"]
