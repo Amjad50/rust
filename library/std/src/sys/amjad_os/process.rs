@@ -1,9 +1,15 @@
+use core::ffi::c_char;
+use core::ffi::CStr;
+use core::ptr;
+
+use alloc_crate::ffi::CString;
+
 use crate::ffi::OsStr;
 use crate::fmt;
 use crate::io;
-use crate::marker::PhantomData;
 use crate::num::NonZeroI32;
 use crate::path::Path;
+use crate::sys::amjad_os::syscall_to_io_error;
 use crate::sys::fs::File;
 use crate::sys::pipe::AnonPipe;
 use crate::sys::unsupported;
@@ -11,11 +17,16 @@ use crate::sys_common::process::{CommandEnv, CommandEnvs};
 
 pub use crate::ffi::OsString as EnvKey;
 
+struct Argv(Vec<*const c_char>);
+
 ////////////////////////////////////////////////////////////////////////////////
 // Command
 ////////////////////////////////////////////////////////////////////////////////
 
 pub struct Command {
+    program: CString,
+    args: Vec<CString>,
+    argv: Argv,
     env: CommandEnv,
 }
 
@@ -36,11 +47,27 @@ pub enum Stdio {
 }
 
 impl Command {
-    pub fn new(_program: &OsStr) -> Command {
-        Command { env: Default::default() }
+    pub fn new(program: &OsStr) -> Command {
+        let program = CString::new(program.as_encoded_bytes()).unwrap();
+        Command {
+            program: program.clone(),
+            argv: Argv(vec![program.as_ptr(), ptr::null()]),
+            args: vec![program],
+            env: Default::default(),
+        }
     }
 
-    pub fn arg(&mut self, _arg: &OsStr) {}
+    pub fn arg(&mut self, arg: &OsStr) {
+        // Overwrite the trailing null pointer in `argv` and then add a new null
+        // pointer.
+        let arg = CString::new(arg.as_encoded_bytes()).unwrap();
+        self.argv.0[self.args.len()] = arg.as_ptr();
+        self.argv.0.push(ptr::null());
+
+        // Also make sure we keep track of the owned value to schedule a
+        // destructor for this memory.
+        self.args.push(arg);
+    }
 
     pub fn env_mut(&mut self) -> &mut CommandEnv {
         &mut self.env
@@ -55,15 +82,26 @@ impl Command {
     pub fn stderr(&mut self, _stderr: Stdio) {}
 
     pub fn get_program(&self) -> &OsStr {
-        panic!("unsupported")
+        // Safety: we have used `as_encoded_bytes` to create this `CString`, so this is valid
+        unsafe { OsStr::from_encoded_bytes_unchecked(self.program.as_bytes()) }
+    }
+
+    pub fn get_program_cstr(&self) -> &CStr {
+        &self.program
     }
 
     pub fn get_args(&self) -> CommandArgs<'_> {
-        CommandArgs { _p: PhantomData }
+        let mut iter = self.args.iter();
+        iter.next();
+        CommandArgs { iter }
     }
 
     pub fn get_envs(&self) -> CommandEnvs<'_> {
         self.env.iter()
+    }
+
+    fn get_argv(&self) -> &Vec<*const c_char> {
+        &self.argv.0
     }
 
     pub fn get_current_dir(&self) -> Option<&Path> {
@@ -75,7 +113,11 @@ impl Command {
         _default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
-        unsupported()
+        let pid = unsafe {
+            user_std::process::spawn(self.get_program_cstr(), self.get_argv())
+                .map_err(syscall_to_io_error)?
+        };
+        Ok((Process { pid: pid as u32 }, StdioPipes { stdin: None, stdout: None, stderr: None }))
     }
 
     pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
@@ -196,44 +238,54 @@ impl From<u8> for ExitCode {
     }
 }
 
-pub struct Process(!);
+pub struct Process {
+    pid: u32,
+}
 
 impl Process {
     pub fn id(&self) -> u32 {
-        self.0
+        self.pid as u32
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.0
+        todo!()
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.0
+        todo!()
     }
 }
 
 pub struct CommandArgs<'a> {
-    _p: PhantomData<&'a ()>,
+    iter: crate::slice::Iter<'a, CString>,
 }
 
 impl<'a> Iterator for CommandArgs<'a> {
     type Item = &'a OsStr;
     fn next(&mut self) -> Option<&'a OsStr> {
-        None
+        // Safety: these args were created with `as_encoded_bytes`
+        self.iter.next().map(|cs| unsafe { OsStr::from_encoded_bytes_unchecked(cs.as_bytes()) })
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(0))
+        self.iter.size_hint()
     }
 }
 
-impl<'a> ExactSizeIterator for CommandArgs<'a> {}
+impl<'a> ExactSizeIterator for CommandArgs<'a> {
+    fn len(&self) -> usize {
+        self.iter.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.iter.is_empty()
+    }
+}
 
 impl<'a> fmt::Debug for CommandArgs<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().finish()
+        f.debug_list().entries(self.iter.clone()).finish()
     }
 }
