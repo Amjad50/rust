@@ -1,12 +1,18 @@
+use core::ffi::CStr;
+
 use crate::ffi::OsString;
 use crate::fmt;
 use crate::hash::{Hash, Hasher};
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
+use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
 use crate::sys::unsupported;
 
-pub struct File(!);
+use super::fd::FileDesc;
+use super::syscall_to_io_error;
+
+pub struct File(FileDesc);
 
 pub struct FileAttr(!);
 
@@ -29,27 +35,27 @@ pub struct DirBuilder {}
 
 impl FileAttr {
     pub fn size(&self) -> u64 {
-        self.0
+        todo!()
     }
 
     pub fn perm(&self) -> FilePermissions {
-        self.0
+        todo!()
     }
 
     pub fn file_type(&self) -> FileType {
-        self.0
+        todo!()
     }
 
     pub fn modified(&self) -> io::Result<SystemTime> {
-        self.0
+        todo!()
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        self.0
+        todo!()
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        self.0
+        todo!()
     }
 }
 
@@ -182,72 +188,83 @@ impl OpenOptions {
 }
 
 impl File {
-    pub fn open(_path: &Path, _opts: &OpenOptions) -> io::Result<File> {
-        unsupported()
+    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
+        run_path_with_cstr(path, |path| Self::openc(path, opts))
+    }
+
+    pub fn openc(path: &CStr, _opts: &OpenOptions) -> io::Result<File> {
+        let flags = 0;
+        let access_mode = 0;
+
+        let fd = unsafe {
+            user_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
+        }?;
+
+        Ok(File(FileDesc::from_raw_fd(fd as usize)))
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
-        self.0
+        todo!()
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
     pub fn datasync(&self) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
     pub fn truncate(&self, _size: u64) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
-    pub fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
-        self.0
+    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
     }
 
-    pub fn read_vectored(&self, _bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        self.0
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
     }
 
     pub fn is_read_vectored(&self) -> bool {
-        self.0
+        self.0.is_read_vectored()
     }
 
-    pub fn read_buf(&self, _cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        self.0
+    pub fn read_buf(&self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        self.0.read_buf(cursor)
     }
 
-    pub fn write(&self, _buf: &[u8]) -> io::Result<usize> {
-        self.0
+    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
     }
 
-    pub fn write_vectored(&self, _bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.0
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
     }
 
     pub fn is_write_vectored(&self) -> bool {
-        self.0
+        self.0.is_write_vectored()
     }
 
     pub fn flush(&self) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
     pub fn seek(&self, _pos: SeekFrom) -> io::Result<u64> {
-        self.0
+        todo!()
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
-        self.0
+        self.0.duplicate().map(File)
     }
 
     pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
-        self.0
+        todo!()
     }
 
     pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
-        self.0
+        todo!()
     }
 }
 
@@ -263,7 +280,7 @@ impl DirBuilder {
 
 impl fmt::Debug for File {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+        todo!()
     }
 }
 
