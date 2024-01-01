@@ -114,7 +114,7 @@ impl Command {
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
         let pid = unsafe {
-            user_std::process::spawn(self.get_program_cstr(), self.get_argv())
+            user_std::process::spawn(self.get_program_cstr(), self.get_argv(), &[])
                 .map_err(syscall_to_io_error)?
         };
         Ok((Process { pid: pid as u32 }, StdioPipes { stdin: None, stdout: None, stderr: None }))
