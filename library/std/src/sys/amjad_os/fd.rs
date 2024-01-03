@@ -31,6 +31,10 @@ impl FileDesc {
         Self(fd)
     }
 
+    pub fn into_raw_fd(self) -> usize {
+        self.0
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         // let ret = cvt(unsafe {
         //     libc::read(
@@ -58,7 +62,7 @@ impl FileDesc {
         (&mut me).read_to_end(buf)
     }
 
-    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    pub fn read_at(&self, _buf: &mut [u8], _offset: u64) -> io::Result<usize> {
         // unsafe {
         //     cvt(pread64(
         //         self.as_raw_fd(),
@@ -71,7 +75,7 @@ impl FileDesc {
         todo!()
     }
 
-    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, _cursor: BorrowedCursor<'_>) -> io::Result<()> {
         // let ret = cvt(unsafe {
         //     libc::read(
         //         self.as_raw_fd(),
@@ -114,7 +118,7 @@ impl FileDesc {
         false
     }
 
-    pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+    pub fn write_at(&self, _buf: &[u8], _offset: u64) -> io::Result<usize> {
         // #[cfg(not(any(
         //     all(target_os = "linux", not(target_env = "musl")),
         //     target_os = "android",
