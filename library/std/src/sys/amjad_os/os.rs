@@ -128,7 +128,7 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn exit(code: i32) -> ! {
-    unsafe { user_std::process::exit(code as u64) }
+    unsafe { user_std::process::exit(code) }
 }
 
 pub fn getpid() -> u32 {

@@ -280,11 +280,14 @@ impl fmt::Debug for Command {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[non_exhaustive]
-pub struct ExitStatus();
+pub struct ExitStatus(i32);
 
 impl ExitStatus {
     pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
-        Ok(())
+        match self.0 {
+            0 => Ok(()),
+            _ => Err(ExitStatusError(self.0)),
+        }
     }
 
     pub fn code(&self) -> Option<i32> {
@@ -298,39 +301,19 @@ impl fmt::Display for ExitStatus {
     }
 }
 
-pub struct ExitStatusError(!);
-
-impl Clone for ExitStatusError {
-    fn clone(&self) -> ExitStatusError {
-        self.0
-    }
-}
-
-impl Copy for ExitStatusError {}
-
-impl PartialEq for ExitStatusError {
-    fn eq(&self, _other: &ExitStatusError) -> bool {
-        self.0
-    }
-}
-
-impl Eq for ExitStatusError {}
-
-impl fmt::Debug for ExitStatusError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
-    }
-}
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct ExitStatusError(i32);
 
 impl Into<ExitStatus> for ExitStatusError {
     fn into(self) -> ExitStatus {
-        self.0
+        ExitStatus(self.0)
     }
 }
 
 impl ExitStatusError {
     pub fn code(self) -> Option<NonZeroI32> {
-        self.0
+        assert_ne!(self.0, 0);
+        Some(unsafe { NonZeroI32::new_unchecked(self.0) })
     }
 }
 
@@ -361,7 +344,7 @@ pub struct Process {
 
 impl Process {
     pub fn id(&self) -> u32 {
-        self.pid as u32
+        self.pid
     }
 
     pub fn kill(&mut self) -> io::Result<()> {
@@ -369,11 +352,15 @@ impl Process {
     }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        todo!()
+        let status_code = unsafe {
+            user_std::process::wait_for_pid(self.pid as u64).map_err(syscall_to_io_error)?
+        };
+        Ok(ExitStatus(status_code as i32))
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        todo!()
+        let status = self.wait()?;
+        Ok(Some(status))
     }
 }
 
