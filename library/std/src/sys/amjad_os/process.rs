@@ -16,7 +16,6 @@ use crate::path::Path;
 use crate::sys::amjad_os::syscall_to_io_error;
 use crate::sys::fs::File;
 use crate::sys::pipe::AnonPipe;
-use crate::sys::unsupported;
 use crate::sys_common::process::{CommandEnv, CommandEnvs};
 
 pub use crate::ffi::OsString as EnvKey;
@@ -53,6 +52,7 @@ pub enum Stdio {
     Inherit,
     Null,
     MakePipe,
+    Fd(FileDesc),
 }
 
 // used to configure file mappings for the child
@@ -202,7 +202,8 @@ impl Command {
     }
 
     pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-        unsupported()
+        let (proc, pipes) = self.spawn(Stdio::MakePipe, false)?;
+        crate::sys_common::process::wait_with_output(proc, pipes)
     }
 }
 
@@ -210,6 +211,26 @@ impl Stdio {
     pub fn to_child_stdio(&self, readable: bool) -> io::Result<(ChildStdio, Option<AnonPipe>)> {
         match *self {
             Stdio::Inherit => Ok((ChildStdio::Inherit, None)),
+
+            // Make sure that the source descriptors are not an stdio
+            // descriptor, otherwise the order which we set the child's
+            // descriptors may blow away a descriptor which we are hoping to
+            // save. For example, suppose we want the child's stderr to be the
+            // parent's stdout, and the child's stdout to be the parent's
+            // stderr. No matter which we dup first, the second will get
+            // overwritten prematurely.
+            Stdio::Fd(ref fd) => {
+                if fd.as_raw_fd() <= FD_STDERR {
+                    // TODO: add support for passing stdio fds
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "stdio fds are not supported to forward to child process, use inherit instead or makepipe",
+                    ))
+                } else {
+                    // move the fd
+                    Ok((ChildStdio::Owned(fd.clone_fd()?), None))
+                }
+            }
 
             Stdio::MakePipe => {
                 let (reader, writer) = pipe::anon_pipe()?;
@@ -225,7 +246,7 @@ impl Stdio {
 
 impl From<AnonPipe> for Stdio {
     fn from(pipe: AnonPipe) -> Stdio {
-        pipe.diverge()
+        Stdio::Fd(pipe.into_inner())
     }
 }
 
@@ -246,10 +267,8 @@ impl From<io::Stderr> for Stdio {
 }
 
 impl From<File> for Stdio {
-    fn from(_file: File) -> Stdio {
-        // FIXME: This is wrong.
-        // Instead, the Stdio we have here should be a unit struct.
-        panic!("unsupported")
+    fn from(file: File) -> Stdio {
+        Stdio::Fd(file.into_inner())
     }
 }
 

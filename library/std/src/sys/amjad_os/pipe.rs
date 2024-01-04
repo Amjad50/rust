@@ -55,10 +55,6 @@ impl AnonPipe {
     pub fn is_write_vectored(&self) -> bool {
         self.0.is_write_vectored()
     }
-
-    pub fn diverge(&self) -> ! {
-        todo!()
-    }
 }
 
 pub fn read2(_p1: AnonPipe, _v1: &mut Vec<u8>, _p2: AnonPipe, _v2: &mut Vec<u8>) -> io::Result<()> {

@@ -27,11 +27,20 @@ const fn max_iov() -> usize {
 }
 
 impl FileDesc {
+    // TODO: we should add more checks here, to make sure only 1 owner exists
+    pub fn clone_fd(&self) -> io::Result<Self> {
+        Ok(Self(self.0))
+    }
+
     pub fn from_raw_fd(fd: usize) -> Self {
         Self(fd)
     }
 
     pub fn into_raw_fd(self) -> usize {
+        self.0
+    }
+
+    pub fn as_raw_fd(&self) -> usize {
         self.0
     }
 
