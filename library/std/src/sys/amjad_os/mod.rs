@@ -33,6 +33,10 @@ use user_std::SyscallError;
 
 fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
     match e {
+        SyscallError::PidNotFound => crate::io::Error::new(
+            crate::io::ErrorKind::NotFound,
+            "Process with given pid not found",
+        ),
         SyscallError::EndOfFile => {
             crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "Unexpected end of file")
         }
