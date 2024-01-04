@@ -1,12 +1,16 @@
 use crate::io as std_io;
 
+use super::args;
+
 pub mod memchr {
     pub use core::slice::memchr::{memchr, memrchr};
 }
 
 // SAFETY: must be called only once during runtime initialization.
 // NOTE: this is not guaranteed to run, for example when Rust code is called externally.
-pub unsafe fn init(_argc: isize, _argv: *const *const u8, _sigpipe: u8) {}
+pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
+    unsafe { args::init(argc, argv) }
+}
 
 // SAFETY: must be called only once during runtime cleanup.
 // NOTE: this is not guaranteed to run, for example when the program aborts.

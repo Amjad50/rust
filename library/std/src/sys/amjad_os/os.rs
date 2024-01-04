@@ -13,12 +13,12 @@ pub extern "C" fn __rust_abort() -> ! {
     super::os::exit(0xFF);
 }
 extern "C" {
-    fn main() -> i32;
+    fn main(argc: isize, argv: *const *const u8) -> i32;
 }
 
 #[no_mangle]
-pub extern "C" fn _start() {
-    exit(unsafe { main() });
+pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
+    exit(unsafe { main(argc, argv) });
 }
 
 pub fn errno() -> i32 {
