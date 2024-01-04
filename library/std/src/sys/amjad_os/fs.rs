@@ -203,6 +203,10 @@ impl File {
         Ok(File(FileDesc::from_raw_fd(fd as usize)))
     }
 
+    pub fn into_inner(self) -> FileDesc {
+        self.0
+    }
+
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         todo!()
     }
