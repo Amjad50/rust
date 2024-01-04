@@ -56,9 +56,19 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
             crate::io::ErrorKind::PermissionDenied,
             "Could not read from file",
         ),
-        SyscallError::InvalidArgument(_, _, _, _, _, _, _) => {
-            // TODO: use args
-            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, "Invalid argument")
+        SyscallError::InvalidArgument(arg1, arg2, arg3, arg4, arg5, arg6, arg7) => {
+            let errors = [arg1, arg2, arg3, arg4, arg5, arg6, arg7];
+
+            let mut error_str = String::new();
+
+            errors.iter().take_while(|e| e.is_some()).enumerate().for_each(|(i, e)| {
+                if i != 0 {
+                    error_str.push_str(", ");
+                }
+                error_str.push_str(&format!("Arg{i}: {:?}", e.unwrap()));
+            });
+
+            crate::io::Error::new(crate::io::ErrorKind::InvalidInput, error_str)
         }
         // should never happen
         SyscallError::SyscallNotFound | SyscallError::InvalidErrorCode(_) => unreachable!(),
