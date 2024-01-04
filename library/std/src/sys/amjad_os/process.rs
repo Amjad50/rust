@@ -297,7 +297,7 @@ impl ExitStatus {
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<dummy exit status>")
+        write!(f, "code: {}", self.0)
     }
 }
 
