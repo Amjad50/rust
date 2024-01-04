@@ -3,6 +3,10 @@ use core::ffi::CStr;
 use core::ptr;
 
 use alloc_crate::ffi::CString;
+use user_std::io::FD_STDERR;
+use user_std::io::FD_STDIN;
+use user_std::io::FD_STDOUT;
+use user_std::process::SpawnFileMapping;
 
 use crate::ffi::OsStr;
 use crate::fmt;
@@ -17,6 +21,9 @@ use crate::sys_common::process::{CommandEnv, CommandEnvs};
 
 pub use crate::ffi::OsString as EnvKey;
 
+use super::fd::FileDesc;
+use super::pipe;
+
 struct Argv(Vec<*const c_char>);
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -28,6 +35,10 @@ pub struct Command {
     args: Vec<CString>,
     argv: Argv,
     env: CommandEnv,
+
+    stdin: Option<Stdio>,
+    stdout: Option<Stdio>,
+    stderr: Option<Stdio>,
 }
 
 // passed back to std::process with the pipes connected to the child, if any
@@ -38,12 +49,33 @@ pub struct StdioPipes {
     pub stderr: Option<AnonPipe>,
 }
 
-// FIXME: This should be a unit struct, so we can always construct it
-// The value here should be never used, since we cannot spawn processes.
 pub enum Stdio {
     Inherit,
     Null,
     MakePipe,
+}
+
+// used to configure file mappings for the child
+pub struct ChildPipes {
+    pub stdin: ChildStdio,
+    pub stdout: ChildStdio,
+    pub stderr: ChildStdio,
+}
+
+pub enum ChildStdio {
+    Inherit,
+    Owned(FileDesc),
+}
+
+impl ChildStdio {
+    pub fn into_file_mappings(self) -> Option<SpawnFileMapping> {
+        match self {
+            ChildStdio::Inherit => None,
+            ChildStdio::Owned(fd) => {
+                Some(SpawnFileMapping { src_fd: fd.into_raw_fd() as u64, dst_fd: 0 })
+            }
+        }
+    }
 }
 
 impl Command {
@@ -54,6 +86,9 @@ impl Command {
             argv: Argv(vec![program.as_ptr(), ptr::null()]),
             args: vec![program],
             env: Default::default(),
+            stdin: None,
+            stdout: None,
+            stderr: None,
         }
     }
 
@@ -75,11 +110,17 @@ impl Command {
 
     pub fn cwd(&mut self, _dir: &OsStr) {}
 
-    pub fn stdin(&mut self, _stdin: Stdio) {}
+    pub fn stdin(&mut self, stdin: Stdio) {
+        self.stdin = Some(stdin);
+    }
 
-    pub fn stdout(&mut self, _stdout: Stdio) {}
+    pub fn stdout(&mut self, stdout: Stdio) {
+        self.stdout = Some(stdout);
+    }
 
-    pub fn stderr(&mut self, _stderr: Stdio) {}
+    pub fn stderr(&mut self, stderr: Stdio) {
+        self.stderr = Some(stderr);
+    }
 
     pub fn get_program(&self) -> &OsStr {
         // Safety: we have used `as_encoded_bytes` to create this `CString`, so this is valid
@@ -108,20 +149,77 @@ impl Command {
         None
     }
 
+    fn setup_io(&self, default: Stdio, needs_stdin: bool) -> io::Result<(StdioPipes, ChildPipes)> {
+        let null = Stdio::Null;
+        let default_stdin = if needs_stdin { &default } else { &null };
+        let stdin = self.stdin.as_ref().unwrap_or(default_stdin);
+        let stdout = self.stdout.as_ref().unwrap_or(&default);
+        let stderr = self.stderr.as_ref().unwrap_or(&default);
+        let (their_stdin, our_stdin) = stdin.to_child_stdio(true)?;
+        let (their_stdout, our_stdout) = stdout.to_child_stdio(false)?;
+        let (their_stderr, our_stderr) = stderr.to_child_stdio(false)?;
+        let ours = StdioPipes { stdin: our_stdin, stdout: our_stdout, stderr: our_stderr };
+        let theirs = ChildPipes { stdin: their_stdin, stdout: their_stdout, stderr: their_stderr };
+        Ok((ours, theirs))
+    }
+
     pub fn spawn(
         &mut self,
-        _default: Stdio,
-        _needs_stdin: bool,
+        default: Stdio,
+        needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
+        let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+
+        // setup 3 mappings as the max, and only use what's needed
+        let mut file_mappings = [SpawnFileMapping { src_fd: 0, dst_fd: 0 }; 3];
+        let mut mappings_i = 0;
+
+        if let Some(mut file_map) = theirs.stdin.into_file_mappings() {
+            file_map.dst_fd = FD_STDIN as u64;
+            file_mappings[mappings_i] = file_map;
+            mappings_i += 1;
+        }
+        if let Some(mut file_map) = theirs.stdout.into_file_mappings() {
+            file_map.dst_fd = FD_STDOUT as u64;
+            file_mappings[mappings_i] = file_map;
+            mappings_i += 1;
+        }
+        if let Some(mut file_map) = theirs.stderr.into_file_mappings() {
+            file_map.dst_fd = FD_STDERR as u64;
+            file_mappings[mappings_i] = file_map;
+            mappings_i += 1;
+        }
+
         let pid = unsafe {
-            user_std::process::spawn(self.get_program_cstr(), self.get_argv(), &[])
-                .map_err(syscall_to_io_error)?
+            user_std::process::spawn(
+                self.get_program_cstr(),
+                self.get_argv(),
+                &file_mappings[..mappings_i],
+            )
+            .map_err(syscall_to_io_error)?
         };
-        Ok((Process { pid: pid as u32 }, StdioPipes { stdin: None, stdout: None, stderr: None }))
+        Ok((Process { pid: pid as u32 }, ours))
     }
 
     pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
         unsupported()
+    }
+}
+
+impl Stdio {
+    pub fn to_child_stdio(&self, readable: bool) -> io::Result<(ChildStdio, Option<AnonPipe>)> {
+        match *self {
+            Stdio::Inherit => Ok((ChildStdio::Inherit, None)),
+
+            Stdio::MakePipe => {
+                let (reader, writer) = pipe::anon_pipe()?;
+                let (ours, theirs) = if readable { (writer, reader) } else { (reader, writer) };
+                Ok((ChildStdio::Owned(theirs.into_inner()), Some(ours)))
+            }
+
+            // TODO: replace with null device
+            Stdio::Null => Ok((ChildStdio::Inherit, None)),
+        }
     }
 }
 
