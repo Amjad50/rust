@@ -1,5 +1,7 @@
 #![unstable(reason = "not public", issue = "none", feature = "fd")]
 
+use core::cmp;
+
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
 // use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 // use crate::sys_common::{AsInner, FromInner, IntoInner};
@@ -84,21 +86,21 @@ impl FileDesc {
         todo!()
     }
 
-    pub fn read_buf(&self, _cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        // let ret = cvt(unsafe {
-        //     libc::read(
-        //         self.as_raw_fd(),
-        //         cursor.as_mut().as_mut_ptr() as *mut libc::c_void,
-        //         cmp::min(cursor.capacity(), READ_LIMIT),
-        //     )
-        // })?;
+    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        // Safety: `cursor` has `capcity` initialized bytes, so we can use them without issues
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                cursor.as_mut().as_mut_ptr() as *mut u8,
+                cmp::min(cursor.capacity(), READ_LIMIT),
+            )
+        };
+        let ret = unsafe { user_std::io::syscall_read(self.0, buf).map_err(syscall_to_io_error)? };
 
-        // // Safety: `ret` bytes were written to the initialized portion of the buffer
-        // unsafe {
-        //     cursor.advance(ret as usize);
-        // }
-        // Ok(())
-        todo!()
+        // Safety: `ret` bytes were written to the initialized portion of the buffer
+        unsafe {
+            cursor.advance(ret as usize);
+        }
+        Ok(())
     }
 
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
