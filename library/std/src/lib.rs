@@ -285,7 +285,6 @@
 #![feature(exhaustive_patterns)]
 #![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
-#![feature(ip_in_core)]
 #![feature(lang_items)]
 #![feature(let_chains)]
 #![feature(link_cfg)]
