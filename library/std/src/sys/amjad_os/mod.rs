@@ -33,6 +33,12 @@ use user_std::SyscallError;
 
 fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
     match e {
+        SyscallError::EndOfFile => {
+            crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "Unexpected end of file")
+        }
+        SyscallError::FileNotFound => {
+            crate::io::Error::new(crate::io::ErrorKind::NotFound, "File not found")
+        }
         SyscallError::CouldNotOpenFile => {
             crate::io::Error::new(crate::io::ErrorKind::NotFound, "Could not open file")
         }
