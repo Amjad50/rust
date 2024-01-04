@@ -83,10 +83,13 @@ impl io::Write for Stderr {
     }
 }
 
-pub const STDIN_BUF_SIZE: usize = 0;
+pub const STDIN_BUF_SIZE: usize = crate::sys_common::io::DEFAULT_BUF_SIZE;
 
-pub fn is_ebadf(_err: &io::Error) -> bool {
-    true
+pub fn is_ebadf(err: &io::Error) -> bool {
+    match err.kind() {
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::PermissionDenied => true,
+        _ => false,
+    }
 }
 
 pub fn panic_output() -> Option<impl io::Write> {
