@@ -7,6 +7,7 @@ use user_std::io::FD_STDERR;
 use user_std::io::FD_STDIN;
 use user_std::io::FD_STDOUT;
 use user_std::process::SpawnFileMapping;
+use user_std::SyscallError;
 
 use crate::ffi::OsStr;
 use crate::fmt;
@@ -356,14 +357,18 @@ impl Process {
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         let status_code = unsafe {
-            user_std::process::wait_for_pid(self.pid as u64).map_err(syscall_to_io_error)?
+            user_std::process::wait_for_pid(self.pid as u64, true).map_err(syscall_to_io_error)?
         };
         Ok(ExitStatus(status_code as i32))
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let status = self.wait()?;
-        Ok(Some(status))
+        let status_code = unsafe { user_std::process::wait_for_pid(self.pid as u64, false) };
+        match status_code {
+            Ok(status_code) => Ok(Some(ExitStatus(status_code as i32))),
+            Err(SyscallError::ProcessStillRunning) => Ok(None),
+            Err(e) => Err(syscall_to_io_error(e)),
+        }
     }
 }
 
