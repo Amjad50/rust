@@ -37,6 +37,10 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
             crate::io::ErrorKind::NotFound,
             "Process with given pid not found",
         ),
+        SyscallError::ProcessStillRunning => crate::io::Error::new(
+            crate::io::ErrorKind::Other,
+            "Process with given pid is still running",
+        ),
         SyscallError::EndOfFile => {
             crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "Unexpected end of file")
         }
