@@ -199,14 +199,21 @@ impl FileDesc {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        // unsafe {
-        //     let v = nonblocking as libc::c_int;
-        //     cvt(libc::ioctl(self.as_raw_fd(), libc::FIONBIO, &v))?;
-        //     Ok(())
-        // }
-        todo!()
+        let blocking_mode = if nonblocking {
+            user_std::io::BlockingMode::None
+        } else {
+            todo!("Not sure which mode to put here")
+            // user_std::io::BlockingMode::Line
+            // user_std::io::BlockingMode::Block(1)
+        };
+
+        unsafe {
+            user_std::io::syscall_blocking_mode(self.as_raw_fd(), blocking_mode)
+                .map_err(syscall_to_io_error)?
+        }
+
+        Ok(())
     }
 
     #[inline]
