@@ -1,6 +1,9 @@
 use user_std::io::syscall_create_pipe;
 
-use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
+use crate::{
+    io::{self, BorrowedCursor, IoSlice, IoSliceMut},
+    os::amjad_os::io::FromRawFd,
+};
 
 use super::{fd::FileDesc, syscall_to_io_error};
 
@@ -9,8 +12,8 @@ pub struct AnonPipe(FileDesc);
 pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
     let (reader, writer) = unsafe { syscall_create_pipe().map_err(syscall_to_io_error)? };
 
-    let reader = FileDesc::from_raw_fd(reader);
-    let writer = FileDesc::from_raw_fd(writer);
+    let reader = unsafe { FileDesc::from_raw_fd(reader) };
+    let writer = unsafe { FileDesc::from_raw_fd(writer) };
 
     // TODO: set cloexec
     // reader.set_cloexec()?;

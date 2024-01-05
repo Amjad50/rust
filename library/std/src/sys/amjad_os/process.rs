@@ -12,6 +12,9 @@ use crate::ffi::OsStr;
 use crate::fmt;
 use crate::io;
 use crate::num::NonZeroI32;
+use crate::os::amjad_os::io::AsRawFd;
+use crate::os::amjad_os::io::IntoRawFd;
+use crate::os::amjad_os::io::RawFd;
 use crate::path::Path;
 use crate::sys::amjad_os::syscall_to_io_error;
 use crate::sys::fs::File;
@@ -65,15 +68,15 @@ pub struct ChildPipes {
 pub enum ChildStdio {
     Inherit,
     Owned(FileDesc),
+    Explicit(RawFd),
 }
 
 impl ChildStdio {
     pub fn into_file_mappings(self) -> Option<SpawnFileMapping> {
         match self {
             ChildStdio::Inherit => None,
-            ChildStdio::Owned(fd) => {
-                Some(SpawnFileMapping { src_fd: fd.into_raw_fd() as u64, dst_fd: 0 })
-            }
+            ChildStdio::Owned(fd) => Some(SpawnFileMapping { src_fd: fd.into_raw_fd(), dst_fd: 0 }),
+            ChildStdio::Explicit(fd) => Some(SpawnFileMapping { src_fd: fd, dst_fd: 0 }),
         }
     }
 }
@@ -175,17 +178,17 @@ impl Command {
         let mut mappings_i = 0;
 
         if let Some(mut file_map) = theirs.stdin.into_file_mappings() {
-            file_map.dst_fd = FD_STDIN as u64;
+            file_map.dst_fd = FD_STDIN;
             file_mappings[mappings_i] = file_map;
             mappings_i += 1;
         }
         if let Some(mut file_map) = theirs.stdout.into_file_mappings() {
-            file_map.dst_fd = FD_STDOUT as u64;
+            file_map.dst_fd = FD_STDOUT;
             file_mappings[mappings_i] = file_map;
             mappings_i += 1;
         }
         if let Some(mut file_map) = theirs.stderr.into_file_mappings() {
-            file_map.dst_fd = FD_STDERR as u64;
+            file_map.dst_fd = FD_STDERR;
             file_mappings[mappings_i] = file_map;
             mappings_i += 1;
         }
@@ -228,7 +231,7 @@ impl Stdio {
                     ))
                 } else {
                     // move the fd
-                    Ok((ChildStdio::Owned(fd.clone_fd()?), None))
+                    Ok((ChildStdio::Explicit(fd.as_raw_fd()), None))
                 }
             }
 

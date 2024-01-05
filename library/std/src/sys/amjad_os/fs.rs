@@ -4,10 +4,12 @@ use crate::ffi::OsString;
 use crate::fmt;
 use crate::hash::{Hash, Hasher};
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
+use crate::os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
 use crate::path::{Path, PathBuf};
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
 use crate::sys::unsupported;
+use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 
 use super::fd::FileDesc;
 use super::syscall_to_io_error;
@@ -200,7 +202,7 @@ impl File {
             user_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
         }?;
 
-        Ok(File(FileDesc::from_raw_fd(fd as usize)))
+        Ok(File(unsafe { FileDesc::from_raw_fd(fd as usize) }))
     }
 
     pub fn into_inner(self) -> FileDesc {
@@ -269,6 +271,58 @@ impl File {
 
     pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
         todo!()
+    }
+}
+
+impl AsInner<FileDesc> for File {
+    #[inline]
+    fn as_inner(&self) -> &FileDesc {
+        &self.0
+    }
+}
+
+impl AsInnerMut<FileDesc> for File {
+    #[inline]
+    fn as_inner_mut(&mut self) -> &mut FileDesc {
+        &mut self.0
+    }
+}
+
+impl IntoInner<FileDesc> for File {
+    fn into_inner(self) -> FileDesc {
+        self.0
+    }
+}
+
+impl FromInner<FileDesc> for File {
+    fn from_inner(file_desc: FileDesc) -> Self {
+        Self(file_desc)
+    }
+}
+
+impl AsFd for File {
+    #[inline]
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl AsRawFd for File {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl IntoRawFd for File {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_raw_fd()
+    }
+}
+
+impl FromRawFd for File {
+    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
+        Self(unsafe { FromRawFd::from_raw_fd(raw_fd) })
     }
 }
 

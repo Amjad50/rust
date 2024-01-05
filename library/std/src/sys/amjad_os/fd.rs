@@ -2,7 +2,11 @@
 
 use core::cmp;
 
-use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
+use crate::{
+    io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read},
+    os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    sys_common::{AsInner, FromInner, IntoInner},
+};
 // use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 // use crate::sys_common::{AsInner, FromInner, IntoInner};
 
@@ -10,7 +14,7 @@ use super::syscall_to_io_error;
 
 // TODO: add `ownedFd` and other fd types to manage dropping them
 #[derive(Debug)]
-pub struct FileDesc(usize);
+pub struct FileDesc(OwnedFd);
 
 // The maximum read limit on most POSIX-like systems is `SSIZE_MAX`,
 // with the man page quoting that if the count of bytes to read is
@@ -29,23 +33,6 @@ const fn max_iov() -> usize {
 }
 
 impl FileDesc {
-    // TODO: we should add more checks here, to make sure only 1 owner exists
-    pub fn clone_fd(&self) -> io::Result<Self> {
-        Ok(Self(self.0))
-    }
-
-    pub fn from_raw_fd(fd: usize) -> Self {
-        Self(fd)
-    }
-
-    pub fn into_raw_fd(self) -> usize {
-        self.0
-    }
-
-    pub fn as_raw_fd(&self) -> usize {
-        self.0
-    }
-
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         // let ret = cvt(unsafe {
         //     libc::read(
@@ -55,7 +42,9 @@ impl FileDesc {
         //     )
         // })?;
         // Ok(ret as usize)
-        let ret = unsafe { user_std::io::syscall_read(self.0, buf).map_err(syscall_to_io_error)? };
+        let ret = unsafe {
+            user_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+        };
         Ok(ret as usize)
     }
 
@@ -94,7 +83,9 @@ impl FileDesc {
                 cmp::min(cursor.capacity(), READ_LIMIT),
             )
         };
-        let ret = unsafe { user_std::io::syscall_read(self.0, buf).map_err(syscall_to_io_error)? };
+        let ret = unsafe {
+            user_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+        };
 
         // Safety: `ret` bytes were written to the initialized portion of the buffer
         unsafe {
@@ -116,7 +107,9 @@ impl FileDesc {
         //     )
         // })?;
         // Ok(ret as usize)
-        let ret = unsafe { user_std::io::syscall_write(self.0, buf).map_err(syscall_to_io_error)? };
+        let ret = unsafe {
+            user_std::io::syscall_write(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+        };
         Ok(ret as usize)
     }
 
@@ -242,46 +235,46 @@ impl<'a> Read for &'a FileDesc {
     }
 }
 
-// impl AsInner<OwnedFd> for FileDesc {
-//     #[inline]
-//     fn as_inner(&self) -> &OwnedFd {
-//         &self.0
-//     }
-// }
+impl AsInner<OwnedFd> for FileDesc {
+    #[inline]
+    fn as_inner(&self) -> &OwnedFd {
+        &self.0
+    }
+}
 
-// impl IntoInner<OwnedFd> for FileDesc {
-//     fn into_inner(self) -> OwnedFd {
-//         self.0
-//     }
-// }
+impl IntoInner<OwnedFd> for FileDesc {
+    fn into_inner(self) -> OwnedFd {
+        self.0
+    }
+}
 
-// impl FromInner<OwnedFd> for FileDesc {
-//     fn from_inner(owned_fd: OwnedFd) -> Self {
-//         Self(owned_fd)
-//     }
-// }
+impl FromInner<OwnedFd> for FileDesc {
+    fn from_inner(owned_fd: OwnedFd) -> Self {
+        Self(owned_fd)
+    }
+}
 
-// impl AsFd for FileDesc {
-//     fn as_fd(&self) -> BorrowedFd<'_> {
-//         self.0.as_fd()
-//     }
-// }
+impl AsFd for FileDesc {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
 
-// impl AsRawFd for FileDesc {
-//     #[inline]
-//     fn as_raw_fd(&self) -> RawFd {
-//         self.0.as_raw_fd()
-//     }
-// }
+impl AsRawFd for FileDesc {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
 
-// impl IntoRawFd for FileDesc {
-//     fn into_raw_fd(self) -> RawFd {
-//         self.0.into_raw_fd()
-//     }
-// }
+impl IntoRawFd for FileDesc {
+    fn into_raw_fd(self) -> RawFd {
+        self.0.into_raw_fd()
+    }
+}
 
-// impl FromRawFd for FileDesc {
-//     unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
-//         Self(FromRawFd::from_raw_fd(raw_fd))
-//     }
-// }
+impl FromRawFd for FileDesc {
+    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
+        Self(unsafe { FromRawFd::from_raw_fd(raw_fd) })
+    }
+}
