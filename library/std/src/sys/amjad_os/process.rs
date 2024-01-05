@@ -295,7 +295,7 @@ impl ExitStatus {
     }
 
     pub fn code(&self) -> Option<i32> {
-        Some(0)
+        Some(self.0)
     }
 }
 
@@ -322,22 +322,28 @@ impl ExitStatusError {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct ExitCode(bool);
+pub enum ExitCode {
+    Success,
+    Failure,
+}
 
 impl ExitCode {
-    pub const SUCCESS: ExitCode = ExitCode(false);
-    pub const FAILURE: ExitCode = ExitCode(true);
+    pub const SUCCESS: ExitCode = ExitCode::Success;
+    pub const FAILURE: ExitCode = ExitCode::Failure;
 
     pub fn as_i32(&self) -> i32 {
-        self.0 as i32
+        match *self {
+            ExitCode::Success => 0,
+            ExitCode::Failure => 1,
+        }
     }
 }
 
 impl From<u8> for ExitCode {
     fn from(code: u8) -> Self {
         match code {
-            0 => Self::SUCCESS,
-            1..=255 => Self::FAILURE,
+            0 => Self::Success,
+            1..=255 => Self::Failure,
         }
     }
 }
