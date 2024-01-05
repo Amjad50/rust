@@ -3,12 +3,15 @@
 #![stable(feature = "io_safety", since = "1.63.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use core::mem::ManuallyDrop;
+
 use super::raw::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use crate::fmt;
 use crate::fs;
 use crate::io;
 use crate::marker::PhantomData;
 use crate::mem::forget;
+use crate::sys::fd::FileDesc;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 
 /// A borrowed file descriptor.
@@ -83,6 +86,16 @@ impl OwnedFd {
     #[stable(feature = "io_safety", since = "1.63.0")]
     pub fn try_clone(&self) -> crate::io::Result<Self> {
         self.as_fd().try_clone_to_owned()
+    }
+
+    /// Custom method for `amjad_os` to control the blocking of a normal file
+    /// descriptor.
+    #[stable(feature = "io_safety", since = "1.63.0")]
+    pub fn set_nonblocking(&self, nonblocking: bool) -> crate::io::Result<()> {
+        // SAFETY: we are only using it here to use functionality from `FileDesc`
+        //         this is immidiately discarded without dropping (would close the file)
+        let tmp_clone_ref = unsafe { Self::from_raw_fd(self.as_raw_fd()) };
+        ManuallyDrop::new(FileDesc::from_inner(tmp_clone_ref)).set_nonblocking(nonblocking)
     }
 }
 
