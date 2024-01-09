@@ -1,4 +1,3 @@
-use super::unsupported;
 use crate::ffi::CStr;
 use crate::io;
 use crate::num::NonZeroUsize;
@@ -11,7 +10,7 @@ pub const DEFAULT_MIN_STACK_SIZE: usize = 4096;
 impl Thread {
     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
     pub unsafe fn new(_stack: usize, _p: Box<dyn FnOnce()>) -> io::Result<Thread> {
-        unsupported()
+        todo!("Thread::new")
     }
 
     pub fn yield_now() {
@@ -32,7 +31,7 @@ impl Thread {
 }
 
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
-    unsupported()
+    todo!("available_parallelism")
 }
 
 pub mod guard {

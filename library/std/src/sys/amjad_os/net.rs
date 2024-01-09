@@ -1,18 +1,17 @@
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
-use crate::sys::unsupported;
 use crate::time::Duration;
 
 pub struct TcpStream(!);
 
 impl TcpStream {
     pub fn connect(_: io::Result<&SocketAddr>) -> io::Result<TcpStream> {
-        unsupported()
+        todo!("TcpStream::connect")
     }
 
     pub fn connect_timeout(_: &SocketAddr, _: Duration) -> io::Result<TcpStream> {
-        unsupported()
+        todo!("TcpStream::connect_timeout")
     }
 
     pub fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
@@ -122,7 +121,7 @@ pub struct TcpListener(!);
 
 impl TcpListener {
     pub fn bind(_: io::Result<&SocketAddr>) -> io::Result<TcpListener> {
-        unsupported()
+        todo!("TcpListener::bind")
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
@@ -172,7 +171,7 @@ pub struct UdpSocket(!);
 
 impl UdpSocket {
     pub fn bind(_: io::Result<&SocketAddr>) -> io::Result<UdpSocket> {
-        unsupported()
+        todo!("UdpSocket::bind")
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
@@ -321,7 +320,7 @@ impl TryFrom<&str> for LookupHost {
     type Error = io::Error;
 
     fn try_from(_v: &str) -> io::Result<LookupHost> {
-        unsupported()
+        todo!("LookupHost, TryFrom<&str>")
     }
 }
 
@@ -329,7 +328,7 @@ impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
     type Error = io::Error;
 
     fn try_from(_v: (&'a str, u16)) -> io::Result<LookupHost> {
-        unsupported()
+        todo!("LookupHost, TryFrom<(&str, u16)>")
     }
 }
 

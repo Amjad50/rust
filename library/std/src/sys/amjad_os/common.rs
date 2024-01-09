@@ -1,5 +1,3 @@
-use crate::io as std_io;
-
 use super::args;
 
 pub mod memchr {
@@ -15,17 +13,6 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
 // SAFETY: must be called only once during runtime cleanup.
 // NOTE: this is not guaranteed to run, for example when the program aborts.
 pub unsafe fn cleanup() {}
-
-pub fn unsupported<T>() -> std_io::Result<T> {
-    Err(unsupported_err())
-}
-
-pub fn unsupported_err() -> std_io::Error {
-    std_io::const_io_error!(
-        std_io::ErrorKind::Unsupported,
-        "operation not supported on this platform",
-    )
-}
 
 pub fn is_interrupted(_code: i32) -> bool {
     false
