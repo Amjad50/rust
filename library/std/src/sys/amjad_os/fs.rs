@@ -1,8 +1,10 @@
 use core::ffi::CStr;
 
+use user_std::io::FileStat;
+
 use crate::ffi::OsString;
 use crate::fmt;
-use crate::hash::{Hash, Hasher};
+use crate::hash::Hash;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
 use crate::path::{Path, PathBuf};
@@ -13,9 +15,13 @@ use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 use super::fd::FileDesc;
 use super::syscall_to_io_error;
 
-pub struct File(FileDesc);
+pub struct File {
+    path: PathBuf,
+    fd: FileDesc,
+}
 
-pub struct FileAttr(!);
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct FileAttr(FileStat);
 
 pub struct ReadDir(!);
 
@@ -29,14 +35,15 @@ pub struct FileTimes {}
 
 pub struct FilePermissions(!);
 
-pub struct FileType(!);
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FileType(user_std::io::FileType);
 
 #[derive(Debug)]
 pub struct DirBuilder {}
 
 impl FileAttr {
     pub fn size(&self) -> u64 {
-        todo!()
+        self.0.size
     }
 
     pub fn perm(&self) -> FilePermissions {
@@ -57,12 +64,6 @@ impl FileAttr {
 
     pub fn created(&self) -> io::Result<SystemTime> {
         todo!()
-    }
-}
-
-impl Clone for FileAttr {
-    fn clone(&self) -> FileAttr {
-        self.0
     }
 }
 
@@ -103,43 +104,15 @@ impl FileTimes {
 
 impl FileType {
     pub fn is_dir(&self) -> bool {
-        self.0
+        self.0 == user_std::io::FileType::Directory
     }
 
     pub fn is_file(&self) -> bool {
-        self.0
+        self.0 == user_std::io::FileType::File
     }
 
     pub fn is_symlink(&self) -> bool {
-        self.0
-    }
-}
-
-impl Clone for FileType {
-    fn clone(&self) -> FileType {
-        self.0
-    }
-}
-
-impl Copy for FileType {}
-
-impl PartialEq for FileType {
-    fn eq(&self, _other: &FileType) -> bool {
-        self.0
-    }
-}
-
-impl Eq for FileType {}
-
-impl Hash for FileType {
-    fn hash<H: Hasher>(&self, _h: &mut H) {
-        self.0
-    }
-}
-
-impl fmt::Debug for FileType {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+        false
     }
 }
 
@@ -190,10 +163,12 @@ impl OpenOptions {
 
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        run_path_with_cstr(path, |path| Self::openc(path, opts))
+        let fd = run_path_with_cstr(path, |path| Self::openc(path, opts))?;
+
+        Ok(File { path: path.to_owned(), fd })
     }
 
-    pub fn openc(path: &CStr, _opts: &OpenOptions) -> io::Result<File> {
+    fn openc(path: &CStr, _opts: &OpenOptions) -> io::Result<FileDesc> {
         let flags = 0;
         let access_mode = 0;
 
@@ -201,15 +176,16 @@ impl File {
             user_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
         }?;
 
-        Ok(File(unsafe { FileDesc::from_raw_fd(fd as usize) }))
+        Ok(unsafe { FileDesc::from_raw_fd(fd as usize) })
     }
 
     pub fn into_inner(self) -> FileDesc {
-        self.0
+        self.fd
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
-        todo!()
+        // TODO: optimize by having a syscall for `fd`
+        stat(&self.path)
     }
 
     pub fn fsync(&self) -> io::Result<()> {
@@ -225,31 +201,31 @@ impl File {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+        self.fd.read(buf)
     }
 
     pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        self.0.read_vectored(bufs)
+        self.fd.read_vectored(bufs)
     }
 
     pub fn is_read_vectored(&self) -> bool {
-        self.0.is_read_vectored()
+        self.fd.is_read_vectored()
     }
 
     pub fn read_buf(&self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
-        self.0.read_buf(cursor)
+        self.fd.read_buf(cursor)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        self.fd.write(buf)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        self.0.write_vectored(bufs)
+        self.fd.write_vectored(bufs)
     }
 
     pub fn is_write_vectored(&self) -> bool {
-        self.0.is_write_vectored()
+        self.fd.is_write_vectored()
     }
 
     pub fn flush(&self) -> io::Result<()> {
@@ -261,7 +237,8 @@ impl File {
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
-        self.0.duplicate().map(File)
+        let fd = self.fd.duplicate()?;
+        Ok(File { path: self.path.clone(), fd })
     }
 
     pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
@@ -276,52 +253,52 @@ impl File {
 impl AsInner<FileDesc> for File {
     #[inline]
     fn as_inner(&self) -> &FileDesc {
-        &self.0
+        &self.fd
     }
 }
 
 impl AsInnerMut<FileDesc> for File {
     #[inline]
     fn as_inner_mut(&mut self) -> &mut FileDesc {
-        &mut self.0
+        &mut self.fd
     }
 }
 
 impl IntoInner<FileDesc> for File {
     fn into_inner(self) -> FileDesc {
-        self.0
+        self.fd
     }
 }
 
 impl FromInner<FileDesc> for File {
     fn from_inner(file_desc: FileDesc) -> Self {
-        Self(file_desc)
+        Self { path: PathBuf::new(), fd: file_desc }
     }
 }
 
 impl AsFd for File {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
+        self.fd.as_fd()
     }
 }
 
 impl AsRawFd for File {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
+        self.fd.as_raw_fd()
     }
 }
 
 impl IntoRawFd for File {
     fn into_raw_fd(self) -> RawFd {
-        self.0.into_raw_fd()
+        self.fd.into_raw_fd()
     }
 }
 
 impl FromRawFd for File {
     unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
-        Self(unsafe { FromRawFd::from_raw_fd(raw_fd) })
+        File { path: PathBuf::new(), fd: unsafe { FromRawFd::from_raw_fd(raw_fd) } }
     }
 }
 
@@ -381,12 +358,22 @@ pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
     todo!("link")
 }
 
-pub fn stat(_p: &Path) -> io::Result<FileAttr> {
-    todo!("stat")
+pub fn stat(p: &Path) -> io::Result<FileAttr> {
+    run_path_with_cstr(p, |c_path| {
+        // will be overwritten by syscall
+        let mut stat = FileStat::default();
+
+        unsafe {
+            user_std::io::syscall_stat(c_path, &mut stat)
+                .map_err(syscall_to_io_error)
+                .map(|_| FileAttr(stat))
+        }
+    })
 }
 
-pub fn lstat(_p: &Path) -> io::Result<FileAttr> {
-    todo!("lstat")
+pub fn lstat(p: &Path) -> io::Result<FileAttr> {
+    // TODO: add impl to symlink or similar things
+    stat(p)
 }
 
 pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
