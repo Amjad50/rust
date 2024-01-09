@@ -1,4 +1,3 @@
-use super::unsupported;
 use crate::error::Error as StdError;
 use crate::ffi::{OsStr, OsString};
 use crate::fmt;
@@ -30,17 +29,17 @@ pub fn error_string(_errno: i32) -> String {
 }
 
 pub fn getcwd() -> io::Result<PathBuf> {
-    unsupported()
+    todo!("getcwd")
 }
 
 pub fn chdir(_: &path::Path) -> io::Result<()> {
-    unsupported()
+    todo!("chdir")
 }
 
 pub struct SplitPaths<'a>(!, PhantomData<&'a ()>);
 
 pub fn split_paths(_unparsed: &OsStr) -> SplitPaths<'_> {
-    panic!("unsupported")
+    todo!("split_paths")
 }
 
 impl<'a> Iterator for SplitPaths<'a> {
@@ -75,7 +74,7 @@ impl StdError for JoinPathsError {
 }
 
 pub fn current_exe() -> io::Result<PathBuf> {
-    unsupported()
+    todo!("current_exe")
 }
 
 pub struct Env(!);

@@ -8,7 +8,6 @@ use crate::os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, R
 use crate::path::{Path, PathBuf};
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
-use crate::sys::unsupported;
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 
 use super::fd::FileDesc;
@@ -332,7 +331,7 @@ impl DirBuilder {
     }
 
     pub fn mkdir(&self, _p: &Path) -> io::Result<()> {
-        unsupported()
+        todo!("mkdir")
     }
 }
 
@@ -343,15 +342,15 @@ impl fmt::Debug for File {
 }
 
 pub fn readdir(_p: &Path) -> io::Result<ReadDir> {
-    unsupported()
+    todo!("readdir")
 }
 
 pub fn unlink(_p: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("unlink")
 }
 
 pub fn rename(_old: &Path, _new: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("rename")
 }
 
 pub fn set_perm(_p: &Path, perm: FilePermissions) -> io::Result<()> {
@@ -359,41 +358,41 @@ pub fn set_perm(_p: &Path, perm: FilePermissions) -> io::Result<()> {
 }
 
 pub fn rmdir(_p: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("rmdir")
 }
 
 pub fn remove_dir_all(_path: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("remove_dir_all")
 }
 
 pub fn try_exists(_path: &Path) -> io::Result<bool> {
-    unsupported()
+    todo!("try_exists")
 }
 
 pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
-    unsupported()
+    todo!("readlink")
 }
 
 pub fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("symlink")
 }
 
 pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
-    unsupported()
+    todo!("link")
 }
 
 pub fn stat(_p: &Path) -> io::Result<FileAttr> {
-    unsupported()
+    todo!("stat")
 }
 
 pub fn lstat(_p: &Path) -> io::Result<FileAttr> {
-    unsupported()
+    todo!("lstat")
 }
 
 pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
-    unsupported()
+    todo!("canonicalize")
 }
 
 pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
-    unsupported()
+    todo!("copy")
 }

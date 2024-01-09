@@ -106,7 +106,7 @@ impl BorrowedFd<'_> {
     pub fn try_clone_to_owned(&self) -> crate::io::Result<OwnedFd> {
         Err(crate::io::const_io_error!(
             crate::io::ErrorKind::Unsupported,
-            "operation not supported on this platform",
+            "operation not supported on this platform try_clone_to_owned",
         ))
         // // We want to atomically duplicate this file descriptor and set the
         // // CLOEXEC flag, and currently that's done via F_DUPFD_CLOEXEC. This
