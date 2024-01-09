@@ -65,7 +65,7 @@ rustc-demangle = { version = "0.1.21" }
 
 [target.'cfg(target_os = "amjad_os")'.dependencies]
 # This is from `https://github.com/Amjad50/OS`, i.e. it must be run from that context
-user_std = { path = "../../../../libraries/user_std" }
+user_std = { path = "../../../../libraries/user_std", package = "amjad_os_user_std" }
 
 [features]
 # backtrace = [
