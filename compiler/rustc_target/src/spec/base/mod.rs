@@ -1,4 +1,5 @@
 pub(crate) mod aix;
+pub(crate) mod amjad_os;
 pub(crate) mod android;
 pub(crate) mod apple;
 pub(crate) mod avr_gnu;

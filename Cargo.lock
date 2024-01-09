@@ -82,6 +82,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56fc6cf8dc8c4158eed8649f9b8b0ea1518eb62b544fe9490d66fa0b349eafe9"
 
 [[package]]
+name = "amjad_os_kernel_user_link"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12076083220df2c915566fd6f95d681a8897c92aba31d4d833e8248813721238"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "amjad_os_user_std"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d470000a51085a340d91815dc277f86e9a8719173e0d4e76736b60652bdb5e6"
+dependencies = [
+ "amjad_os_kernel_user_link",
+ "compiler_builtins",
+ "increasing_heap_allocator",
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
+]
+
+[[package]]
 name = "ammonia"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1939,6 +1962,17 @@ dependencies = [
  "thread_local",
  "walkdir",
  "winapi-util",
+]
+
+[[package]]
+name = "increasing_heap_allocator"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9bd9bba17d8a67cdb992352ad90e0c5f586cca76c44588339f4378f31ae92b6"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -5076,6 +5110,7 @@ version = "0.0.0"
 dependencies = [
  "addr2line",
  "alloc",
+ "amjad_os_user_std",
  "cfg-if",
  "compiler_builtins",
  "core",
