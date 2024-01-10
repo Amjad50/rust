@@ -60,6 +60,12 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
             crate::io::ErrorKind::PermissionDenied,
             "Could not read from file",
         ),
+        SyscallError::IsNotDirectory => {
+            crate::io::Error::new(crate::io::ErrorKind::NotADirectory, "Is not a directory")
+        }
+        SyscallError::IsDirectory => {
+            crate::io::Error::new(crate::io::ErrorKind::IsADirectory, "Is a directory")
+        }
         SyscallError::InvalidArgument(arg1, arg2, arg3, arg4, arg5, arg6, arg7) => {
             let errors = [arg1, arg2, arg3, arg4, arg5, arg6, arg7];
 

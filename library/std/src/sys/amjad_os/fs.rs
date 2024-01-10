@@ -6,7 +6,8 @@ use crate::ffi::OsString;
 use crate::fmt;
 use crate::hash::Hash;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
-use crate::os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
+use crate::os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use crate::os::amjad_os::prelude::OsStringExt;
 use crate::path::{Path, PathBuf};
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
@@ -23,9 +24,17 @@ pub struct File {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FileAttr(FileStat);
 
-pub struct ReadDir(!);
+pub struct ReadDir {
+    path: PathBuf,
+    fd: OwnedFd,
+    fetched_entries: Vec<DirEntry>,
+    finished: bool,
+}
 
-pub struct DirEntry(!);
+pub struct DirEntry {
+    system_entry: user_std::io::DirEntry,
+    parent_path: PathBuf,
+}
 
 #[derive(Clone, Debug)]
 pub struct OpenOptions {}
@@ -51,7 +60,7 @@ impl FileAttr {
     }
 
     pub fn file_type(&self) -> FileType {
-        todo!()
+        FileType(self.0.file_type)
     }
 
     pub fn modified(&self) -> io::Result<SystemTime> {
@@ -116,9 +125,54 @@ impl FileType {
     }
 }
 
+impl ReadDir {
+    fn new(path: &Path) -> io::Result<ReadDir> {
+        let raw_fd = run_path_with_cstr(path, |path| unsafe {
+            user_std::io::syscall_open_dir(path).map_err(syscall_to_io_error)
+        })?;
+
+        Ok(ReadDir {
+            path: path.to_owned(),
+            fd: unsafe { FromRawFd::from_raw_fd(raw_fd) },
+            fetched_entries: Vec::new(),
+            finished: false,
+        })
+    }
+
+    fn populate_next_entries(&mut self) -> io::Result<bool> {
+        assert!(self.fetched_entries.is_empty());
+
+        let mut entries = [user_std::io::DirEntry::default(); 16];
+        let num_entries = unsafe {
+            user_std::io::syscall_read_dir(self.fd.as_raw_fd(), &mut entries)
+                .map_err(syscall_to_io_error)?
+        };
+
+        if num_entries == 0 {
+            self.finished = true;
+            return Ok(false);
+        }
+
+        // NOTE: this is annoying me, I don't want to `copy` since I know that the value is `taken` here and never used again
+        // would be good to find a better way
+        for entry in &entries[..num_entries] {
+            self.fetched_entries
+                .push(DirEntry { system_entry: *entry, parent_path: self.path.clone() });
+        }
+
+        Ok(true)
+    }
+
+    // This is safe, it just panics if there are no entries, which should never happen
+    // caller must ensure that there are entries
+    fn pop_next_unchecked(&mut self) -> DirEntry {
+        self.fetched_entries.pop().unwrap()
+    }
+}
+
 impl fmt::Debug for ReadDir {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.path, f)
     }
 }
 
@@ -126,25 +180,38 @@ impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
-        self.0
+        if self.finished {
+            return None;
+        }
+
+        if self.fetched_entries.is_empty() {
+            match self.populate_next_entries() {
+                Ok(true) => {}                 // got more data
+                Ok(false) => return None,      // finished
+                Err(e) => return Some(Err(e)), // error
+            }
+        }
+
+        let entry = self.pop_next_unchecked();
+        Some(Ok(entry))
     }
 }
 
 impl DirEntry {
     pub fn path(&self) -> PathBuf {
-        self.0
+        self.parent_path.join(self.file_name())
     }
 
     pub fn file_name(&self) -> OsString {
-        self.0
+        OsString::from_vec(self.system_entry.filename_cstr().to_bytes().to_vec())
     }
 
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        self.0
+        Ok(FileAttr(self.system_entry.stat))
     }
 
     pub fn file_type(&self) -> io::Result<FileType> {
-        self.0
+        Ok(FileType(self.system_entry.stat.file_type))
     }
 }
 
@@ -313,13 +380,13 @@ impl DirBuilder {
 }
 
 impl fmt::Debug for File {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.path, f)
     }
 }
 
-pub fn readdir(_p: &Path) -> io::Result<ReadDir> {
-    todo!("readdir")
+pub fn readdir(p: &Path) -> io::Result<ReadDir> {
+    ReadDir::new(p)
 }
 
 pub fn unlink(_p: &Path) -> io::Result<()> {
