@@ -23,9 +23,7 @@ panic_abort = { path = "../panic_abort" }
 # compiler_builtins = { version = "0.1.103" }
 profiler_builtins = { path = "../profiler_builtins", optional = true }
 # unwind = { path = "../unwind" }
-hashbrown = { path = "../../../hashbrown", default-features = false, features = [
-  'rustc-dep-of-std',
-] }
+hashbrown = { version = "0.14", default-features = false, features = ["rustc-internal-api", "nightly"] }
 std_detect = { path = "../stdarch/crates/std_detect", default-features = false, features = [
   # 'rustc-dep-of-std',
 ] }
