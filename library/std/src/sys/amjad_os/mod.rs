@@ -86,5 +86,6 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
         SyscallError::CouldNotLoadElf
         | SyscallError::CouldNotAllocateProcess
         | SyscallError::HeapRangesExceeded => unreachable!(),
+        _ => crate::io::Error::new(crate::io::ErrorKind::Other, "Unknown error"),
     }
 }
