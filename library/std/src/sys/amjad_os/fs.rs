@@ -155,7 +155,7 @@ impl ReadDir {
 
         // NOTE: this is annoying me, I don't want to `copy` since I know that the value is `taken` here and never used again
         // would be good to find a better way
-        for entry in &entries[..num_entries] {
+        for entry in entries[..num_entries].iter().rev() {
             self.fetched_entries
                 .push(DirEntry { system_entry: *entry, parent_path: self.path.clone() });
         }
