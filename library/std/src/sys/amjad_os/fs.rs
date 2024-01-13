@@ -295,8 +295,9 @@ impl File {
         self.fd.is_write_vectored()
     }
 
+    #[inline]
     pub fn flush(&self) -> io::Result<()> {
-        todo!()
+        Ok(())
     }
 
     pub fn seek(&self, _pos: SeekFrom) -> io::Result<u64> {
@@ -405,13 +406,9 @@ pub fn rmdir(_p: &Path) -> io::Result<()> {
     todo!("rmdir")
 }
 
-pub fn remove_dir_all(_path: &Path) -> io::Result<()> {
-    todo!("remove_dir_all")
-}
+pub use crate::sys_common::fs::remove_dir_all;
 
-pub fn try_exists(_path: &Path) -> io::Result<bool> {
-    todo!("try_exists")
-}
+pub use crate::sys_common::fs::try_exists;
 
 pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
     todo!("readlink")
