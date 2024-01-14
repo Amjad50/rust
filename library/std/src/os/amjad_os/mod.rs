@@ -2,6 +2,7 @@
 
 pub mod ffi;
 pub mod io;
+pub mod process;
 
 /// A prelude for conveniently writing platform-specific code.
 ///
