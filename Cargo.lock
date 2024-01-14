@@ -83,9 +83,9 @@ checksum = "56fc6cf8dc8c4158eed8649f9b8b0ea1518eb62b544fe9490d66fa0b349eafe9"
 
 [[package]]
 name = "amjad_os_kernel_user_link"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c51a6bd8c0a3010c7c31d1649ab81d6c99500087b2a3fba4a4556f3c63c77d1"
+checksum = "a0c160b99e788822b2668c0dbc33dca5d77f45279c6d3ff61c1693b9442e0b10"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-core",
@@ -93,9 +93,9 @@ dependencies = [
 
 [[package]]
 name = "amjad_os_user_std"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea96921b45f4ff59e95d4e895bded745d5b6f0e9a9f2d31498f0b8d705641c2"
+checksum = "829cdb1b3c937cc08902c1d7c477d2ac628e6cdf83e1979dff18c048e9438663"
 dependencies = [
  "amjad_os_kernel_user_link",
  "compiler_builtins",
