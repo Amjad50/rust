@@ -297,6 +297,17 @@ impl ExitStatus {
     pub fn code(&self) -> Option<i32> {
         Some(self.0)
     }
+
+    pub fn into_raw(&self) -> i32 {
+        self.0
+    }
+}
+
+/// Converts a raw `i32` to a type-safe `ExitStatus` by wrapping it without copying.
+impl From<i32> for ExitStatus {
+    fn from(a: i32) -> ExitStatus {
+        ExitStatus(a)
+    }
 }
 
 impl fmt::Display for ExitStatus {
