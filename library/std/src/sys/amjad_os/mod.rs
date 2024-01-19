@@ -81,7 +81,7 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
             crate::io::Error::new(crate::io::ErrorKind::InvalidInput, error_str)
         }
         // should never happen
-        SyscallError::SyscallNotFound | SyscallError::InvalidErrorCode(_) => unreachable!(),
+        SyscallError::SyscallNotFound | SyscallError::InvalidError => unreachable!(),
         // not applicable
         SyscallError::CouldNotLoadElf
         | SyscallError::CouldNotAllocateProcess
