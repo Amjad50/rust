@@ -59,7 +59,7 @@ r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std']}
 
 [target.'cfg(target_os = "amjad_os")'.dependencies]
 # This is from `https://github.com/Amjad50/OS`, i.e. it must be run from that context
-user_std = { version = "0.1.8", package = "amjad_os_user_std", features = ['rustc-dep-of-std'] }
+user_std = { version = "0.2.0", package = "amjad_os_user_std", features = ['rustc-dep-of-std'] }
 
 [features]
 backtrace = [
