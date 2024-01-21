@@ -7,8 +7,8 @@ use crate::{
     os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     sys_common::{AsInner, FromInner, IntoInner},
 };
-// use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-// use crate::sys_common::{AsInner, FromInner, IntoInner};
+
+use user_std::io::FileMeta;
 
 use super::syscall_to_io_error;
 
@@ -209,8 +209,11 @@ impl FileDesc {
         };
 
         unsafe {
-            user_std::io::syscall_blocking_mode(self.as_raw_fd(), blocking_mode)
-                .map_err(syscall_to_io_error)?
+            user_std::io::syscall_set_file_meta(
+                self.as_raw_fd(),
+                FileMeta::BlockingMode(blocking_mode),
+            )
+            .map_err(syscall_to_io_error)?
         }
 
         Ok(())
