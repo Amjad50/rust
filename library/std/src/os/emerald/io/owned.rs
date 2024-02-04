@@ -88,7 +88,7 @@ impl OwnedFd {
         self.as_fd().try_clone_to_owned()
     }
 
-    /// Custom method for `amjad_os` to control the blocking of a normal file
+    /// Custom method for `emerald` targets to control the blocking of a normal file
     /// descriptor.
     #[stable(feature = "io_safety", since = "1.63.0")]
     pub fn set_nonblocking(&self, nonblocking: bool) -> crate::io::Result<()> {

@@ -5,10 +5,10 @@ use crate::ffi::{OsStr, OsString};
 use crate::fmt;
 use crate::io;
 use crate::marker::PhantomData;
-use crate::os::amjad_os::prelude::OsStringExt;
+use crate::os::emerald::prelude::OsStringExt;
 use crate::path::{self, PathBuf};
-use crate::sys::amjad_os::syscall_to_io_error;
 use crate::sys::common::small_c_string::run_path_with_cstr;
+use crate::sys::emerald::syscall_to_io_error;
 
 // This function is needed by the panic runtime. The symbol is named in
 // pre-link args for the target specification, so keep that in sync.

@@ -2,7 +2,7 @@ use core::{io::BorrowedCursor, mem::ManuallyDrop};
 
 use crate::{
     io::{self, IoSlice, IoSliceMut},
-    os::amjad_os::io::FromRawFd,
+    os::emerald::io::FromRawFd,
 };
 
 use super::fd::FileDesc;

@@ -4,7 +4,7 @@ use core::cmp;
 
 use crate::{
     io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read},
-    os::amjad_os::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+    os::emerald::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     sys_common::{AsInner, FromInner, IntoInner},
 };
 

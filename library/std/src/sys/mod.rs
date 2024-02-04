@@ -56,9 +56,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "teeos")] {
         mod teeos;
         pub use self::teeos::*;
-    } else if #[cfg(target_os = "amjad_os")] {
-        mod amjad_os;
-        pub use self::amjad_os::*;
+    } else if #[cfg(target_os = "emerald")] {
+        mod emerald;
+        pub use self::emerald::*;
     } else {
         mod unsupported;
         pub use self::unsupported::*;

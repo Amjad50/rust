@@ -1679,7 +1679,7 @@ supported_targets! {
     ("armv7-unknown-linux-ohos", armv7_unknown_linux_ohos),
     ("x86_64-unknown-linux-ohos", x86_64_unknown_linux_ohos),
 
-    ("x86_64-unknown-amjad_os", x86_64_unknown_amjad_os),
+    ("x86_64-unknown-emerald", x86_64_unknown_emerald),
 }
 
 /// Cow-Vec-Str: Cow<'static, [Cow<'static, str>]>

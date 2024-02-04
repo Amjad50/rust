@@ -82,29 +82,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56fc6cf8dc8c4158eed8649f9b8b0ea1518eb62b544fe9490d66fa0b349eafe9"
 
 [[package]]
-name = "amjad_os_kernel_user_link"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17549aafd3a6df6860b12329aff74941c7669483d0adaaf634f5e6aebff0639e"
-dependencies = [
- "compiler_builtins",
- "rustc-std-workspace-core",
-]
-
-[[package]]
-name = "amjad_os_user_std"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d84fa958dc7be5b9c3a3f213869e53dd18bf8f4abee33f4bb620d94070226ba1"
-dependencies = [
- "amjad_os_kernel_user_link",
- "compiler_builtins",
- "increasing_heap_allocator",
- "rustc-std-workspace-alloc",
- "rustc-std-workspace-core",
-]
-
-[[package]]
 name = "ammonia"
 version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1212,6 +1189,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "848fe615fbb0a74d9ae68dcaa510106d32e37d9416207bbea4bd008bd89c47ed"
 dependencies = [
  "stable_deref_trait",
+]
+
+[[package]]
+name = "emerald_kernel_user_link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0785bd57d8819d6796c5d92f9406c8e83fa3317cf62abfcd9a3f0c48862a7a37"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-core",
+]
+
+[[package]]
+name = "emerald_std"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24cefaf4e212b4da00f133b09e689ecdc1a00ac7f58fe03d530206f315a6eb42"
+dependencies = [
+ "compiler_builtins",
+ "emerald_kernel_user_link",
+ "increasing_heap_allocator",
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -5110,11 +5110,11 @@ version = "0.0.0"
 dependencies = [
  "addr2line",
  "alloc",
- "amjad_os_user_std",
  "cfg-if",
  "compiler_builtins",
  "core",
  "dlmalloc",
+ "emerald_std",
  "fortanix-sgx-abi",
  "hashbrown",
  "hermit-abi",

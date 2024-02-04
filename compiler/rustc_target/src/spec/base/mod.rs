@@ -1,10 +1,10 @@
 pub(crate) mod aix;
-pub(crate) mod amjad_os;
 pub(crate) mod android;
 pub(crate) mod apple;
 pub(crate) mod avr_gnu;
 pub(crate) mod bpf;
 pub(crate) mod dragonfly;
+pub(crate) mod emerald;
 pub(crate) mod freebsd;
 pub(crate) mod fuchsia;
 pub(crate) mod haiku;

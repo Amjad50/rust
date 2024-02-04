@@ -60,7 +60,7 @@ pub mod windows {}
         all(target_vendor = "fortanix", target_env = "sgx")
     )
 )))]
-#[cfg(all(not(target_os = "hermit"), not(target_os = "amjad_os"), any(unix, doc)))]
+#[cfg(all(not(target_os = "hermit"), not(target_os = "emerald"), any(unix, doc)))]
 pub mod unix;
 
 // linux
@@ -99,12 +99,12 @@ pub mod windows;
 // Others.
 #[cfg(target_os = "aix")]
 pub mod aix;
-#[cfg(target_os = "amjad_os")]
-pub mod amjad_os;
 #[cfg(target_os = "android")]
 pub mod android;
 #[cfg(target_os = "dragonfly")]
 pub mod dragonfly;
+#[cfg(target_os = "emerald")]
+pub mod emerald;
 #[cfg(target_os = "emscripten")]
 pub mod emscripten;
 #[cfg(target_os = "espidf")]

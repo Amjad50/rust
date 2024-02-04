@@ -1,7 +1,7 @@
 use crate::mem;
 
-use crate::os::amjad_os::io::{AsFd, AsRawFd};
-use crate::sys::amjad_os::syscall_to_io_error;
+use crate::os::emerald::io::{AsFd, AsRawFd};
+use crate::sys::emerald::syscall_to_io_error;
 use user_std::io::FileMeta;
 
 #[derive(Copy, Clone)]

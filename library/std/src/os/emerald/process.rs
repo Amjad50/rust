@@ -1,4 +1,4 @@
-//! amjad_os-specific extensions to primitives in the [`std::process`] module.
+//! emerald-specific extensions to primitives in the [`std::process`] module.
 //!
 //! [`std::process`]: crate::process
 
@@ -10,7 +10,7 @@ use crate::{
     sys_common::{AsInner, FromInner},
 };
 
-/// amjad_os extension to [`process::ExitStatus`] that is based on unix as below
+/// `emerald` extension to [`process::ExitStatus`] that is based on unix as below
 /// ...
 ///
 /// Unix-specific extensions to [`process::ExitStatus`] and

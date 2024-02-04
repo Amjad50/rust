@@ -46,7 +46,7 @@ pub unsafe fn __rust_start_panic(_payload: &mut dyn PanicPayload) -> u32 {
                             all(target_vendor = "fortanix", target_env = "sgx"),
                             target_os = "xous",
                             target_os = "uefi",
-                            target_os = "amjad_os"
+                            target_os = "emerald"
         ))] {
             unsafe fn abort() -> ! {
                 // call std::sys::abort_internal

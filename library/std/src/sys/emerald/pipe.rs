@@ -2,7 +2,7 @@ use user_std::io::syscall_create_pipe;
 
 use crate::{
     io::{self, BorrowedCursor, IoSlice, IoSliceMut},
-    os::amjad_os::io::FromRawFd,
+    os::emerald::io::FromRawFd,
 };
 
 use super::{fd::FileDesc, syscall_to_io_error};
