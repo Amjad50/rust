@@ -1,4 +1,4 @@
-use user_std::io::syscall_create_pipe;
+use emerald_std::io::syscall_create_pipe;
 
 use crate::{
     io::{self, BorrowedCursor, IoSlice, IoSliceMut},

@@ -3,11 +3,11 @@ use core::ffi::CStr;
 use core::ptr;
 
 use alloc_crate::ffi::CString;
-use user_std::io::FD_STDERR;
-use user_std::io::FD_STDIN;
-use user_std::io::FD_STDOUT;
-use user_std::process::SpawnFileMapping;
-use user_std::SyscallError;
+use emerald_std::io::FD_STDERR;
+use emerald_std::io::FD_STDIN;
+use emerald_std::io::FD_STDOUT;
+use emerald_std::process::SpawnFileMapping;
+use emerald_std::SyscallError;
 
 use crate::ffi::OsStr;
 use crate::fmt;
@@ -195,7 +195,7 @@ impl Command {
         }
 
         let pid = unsafe {
-            user_std::process::spawn(
+            emerald_std::process::spawn(
                 self.get_program_cstr(),
                 self.get_argv(),
                 &file_mappings[..mappings_i],
@@ -374,13 +374,14 @@ impl Process {
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         let status_code = unsafe {
-            user_std::process::wait_for_pid(self.pid as u64, true).map_err(syscall_to_io_error)?
+            emerald_std::process::wait_for_pid(self.pid as u64, true)
+                .map_err(syscall_to_io_error)?
         };
         Ok(ExitStatus(status_code as i32))
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        let status_code = unsafe { user_std::process::wait_for_pid(self.pid as u64, false) };
+        let status_code = unsafe { emerald_std::process::wait_for_pid(self.pid as u64, false) };
         match status_code {
             Ok(status_code) => Ok(Some(ExitStatus(status_code as i32))),
             Err(SyscallError::ProcessStillRunning) => Ok(None),

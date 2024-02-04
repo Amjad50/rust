@@ -8,7 +8,7 @@ use crate::{
     sys_common::{AsInner, FromInner, IntoInner},
 };
 
-use user_std::io::FileMeta;
+use emerald_std::io::FileMeta;
 
 use super::syscall_to_io_error;
 
@@ -43,7 +43,7 @@ impl FileDesc {
         // })?;
         // Ok(ret as usize)
         let ret = unsafe {
-            user_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+            emerald_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
         };
         Ok(ret as usize)
     }
@@ -84,7 +84,7 @@ impl FileDesc {
             )
         };
         let ret = unsafe {
-            user_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+            emerald_std::io::syscall_read(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
         };
 
         // Safety: `ret` bytes were written to the initialized portion of the buffer
@@ -108,7 +108,7 @@ impl FileDesc {
         // })?;
         // Ok(ret as usize)
         let ret = unsafe {
-            user_std::io::syscall_write(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
+            emerald_std::io::syscall_write(self.0.as_raw_fd(), buf).map_err(syscall_to_io_error)?
         };
         Ok(ret as usize)
     }
@@ -201,15 +201,15 @@ impl FileDesc {
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         let blocking_mode = if nonblocking {
-            user_std::io::BlockingMode::None
+            emerald_std::io::BlockingMode::None
         } else {
             todo!("Not sure which mode to put here")
-            // user_std::io::BlockingMode::Line
-            // user_std::io::BlockingMode::Block(1)
+            // emerald_std::io::BlockingMode::Line
+            // emerald_std::io::BlockingMode::Block(1)
         };
 
         unsafe {
-            user_std::io::syscall_set_file_meta(
+            emerald_std::io::syscall_set_file_meta(
                 self.as_raw_fd(),
                 FileMeta::BlockingMode(blocking_mode),
             )

@@ -1,6 +1,6 @@
 use core::ffi::CStr;
 
-use user_std::io::FileStat;
+use emerald_std::io::FileStat;
 
 use crate::ffi::OsString;
 use crate::fmt;
@@ -32,7 +32,7 @@ pub struct ReadDir {
 }
 
 pub struct DirEntry {
-    system_entry: user_std::io::DirEntry,
+    system_entry: emerald_std::io::DirEntry,
     parent_path: PathBuf,
 }
 
@@ -45,7 +45,7 @@ pub struct FileTimes {}
 pub struct FilePermissions(!);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct FileType(user_std::io::FileType);
+pub struct FileType(emerald_std::io::FileType);
 
 #[derive(Debug)]
 pub struct DirBuilder {}
@@ -113,11 +113,11 @@ impl FileTimes {
 
 impl FileType {
     pub fn is_dir(&self) -> bool {
-        self.0 == user_std::io::FileType::Directory
+        self.0 == emerald_std::io::FileType::Directory
     }
 
     pub fn is_file(&self) -> bool {
-        self.0 == user_std::io::FileType::File
+        self.0 == emerald_std::io::FileType::File
     }
 
     pub fn is_symlink(&self) -> bool {
@@ -128,7 +128,7 @@ impl FileType {
 impl ReadDir {
     fn new(path: &Path) -> io::Result<ReadDir> {
         let raw_fd = run_path_with_cstr(path, |path| unsafe {
-            user_std::io::syscall_open_dir(path).map_err(syscall_to_io_error)
+            emerald_std::io::syscall_open_dir(path).map_err(syscall_to_io_error)
         })?;
 
         Ok(ReadDir {
@@ -142,9 +142,9 @@ impl ReadDir {
     fn populate_next_entries(&mut self) -> io::Result<bool> {
         assert!(self.fetched_entries.is_empty());
 
-        let mut entries = [user_std::io::DirEntry::default(); 16];
+        let mut entries = [emerald_std::io::DirEntry::default(); 16];
         let num_entries = unsafe {
-            user_std::io::syscall_read_dir(self.fd.as_raw_fd(), &mut entries)
+            emerald_std::io::syscall_read_dir(self.fd.as_raw_fd(), &mut entries)
                 .map_err(syscall_to_io_error)?
         };
 
@@ -240,7 +240,7 @@ impl File {
         let access_mode = 0;
 
         let fd = unsafe {
-            user_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
+            emerald_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
         }?;
 
         Ok(unsafe { FileDesc::from_raw_fd(fd as usize) })
@@ -428,7 +428,7 @@ pub fn stat(p: &Path) -> io::Result<FileAttr> {
         let mut stat = FileStat::default();
 
         unsafe {
-            user_std::io::syscall_stat(c_path, &mut stat)
+            emerald_std::io::syscall_stat(c_path, &mut stat)
                 .map_err(syscall_to_io_error)
                 .map(|_| FileAttr(stat))
         }

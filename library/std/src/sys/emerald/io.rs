@@ -2,7 +2,7 @@ use crate::mem;
 
 use crate::os::emerald::io::{AsFd, AsRawFd};
 use crate::sys::emerald::syscall_to_io_error;
-use user_std::io::FileMeta;
+use emerald_std::io::FileMeta;
 
 #[derive(Copy, Clone)]
 pub struct IoSlice<'a>(&'a [u8]);
@@ -53,7 +53,7 @@ impl<'a> IoSliceMut<'a> {
 pub fn is_terminal(file: &impl AsFd) -> bool {
     let mut meta = FileMeta::IsTerminal(false);
     unsafe {
-        user_std::io::syscall_get_file_meta(file.as_fd().as_raw_fd(), &mut meta)
+        emerald_std::io::syscall_get_file_meta(file.as_fd().as_raw_fd(), &mut meta)
             .map_err(syscall_to_io_error)
             .expect("syscall_get_file_meta failed");
     }

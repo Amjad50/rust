@@ -176,7 +176,7 @@ impl Drop for OwnedFd {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            user_std::io::syscall_close(self.fd)
+            emerald_std::io::syscall_close(self.fd)
                 .expect("Invalid FD somehow slipped and should not be closed")
         }
         // unsafe {
@@ -428,7 +428,7 @@ impl<T: AsFd> AsFd for Box<T> {
 impl AsFd for io::Stdin {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDIN) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDIN) }
     }
 }
 
@@ -437,7 +437,7 @@ impl<'a> AsFd for io::StdinLock<'a> {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         // SAFETY: user code should not close stdin out from under the standard library
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDIN) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDIN) }
     }
 }
 
@@ -445,7 +445,7 @@ impl<'a> AsFd for io::StdinLock<'a> {
 impl AsFd for io::Stdout {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDOUT) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDOUT) }
     }
 }
 
@@ -454,7 +454,7 @@ impl<'a> AsFd for io::StdoutLock<'a> {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         // SAFETY: user code should not close stdout out from under the standard library
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDOUT) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDOUT) }
     }
 }
 
@@ -462,7 +462,7 @@ impl<'a> AsFd for io::StdoutLock<'a> {
 impl AsFd for io::Stderr {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDERR) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDERR) }
     }
 }
 
@@ -471,6 +471,6 @@ impl<'a> AsFd for io::StderrLock<'a> {
     #[inline]
     fn as_fd(&self) -> BorrowedFd<'_> {
         // SAFETY: user code should not close stderr out from under the standard library
-        unsafe { BorrowedFd::borrow_raw(user_std::io::FD_STDERR) }
+        unsafe { BorrowedFd::borrow_raw(emerald_std::io::FD_STDERR) }
     }
 }

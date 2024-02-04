@@ -29,7 +29,7 @@ pub mod time;
 mod common;
 pub use common::*;
 
-use user_std::SyscallError;
+use emerald_std::SyscallError;
 
 fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
     match e {

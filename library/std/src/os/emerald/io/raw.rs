@@ -174,7 +174,7 @@ impl IntoRawFd for fs::File {
 impl AsRawFd for io::Stdin {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDIN
+        emerald_std::io::FD_STDIN
     }
 }
 
@@ -182,7 +182,7 @@ impl AsRawFd for io::Stdin {
 impl AsRawFd for io::Stdout {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDOUT
+        emerald_std::io::FD_STDOUT
     }
 }
 
@@ -190,7 +190,7 @@ impl AsRawFd for io::Stdout {
 impl AsRawFd for io::Stderr {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDERR
+        emerald_std::io::FD_STDERR
     }
 }
 
@@ -198,7 +198,7 @@ impl AsRawFd for io::Stderr {
 impl<'a> AsRawFd for io::StdinLock<'a> {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDIN
+        emerald_std::io::FD_STDIN
     }
 }
 
@@ -206,7 +206,7 @@ impl<'a> AsRawFd for io::StdinLock<'a> {
 impl<'a> AsRawFd for io::StdoutLock<'a> {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDOUT
+        emerald_std::io::FD_STDOUT
     }
 }
 
@@ -214,7 +214,7 @@ impl<'a> AsRawFd for io::StdoutLock<'a> {
 impl<'a> AsRawFd for io::StderrLock<'a> {
     #[inline]
     fn as_raw_fd(&self) -> RawFd {
-        user_std::io::FD_STDERR
+        emerald_std::io::FD_STDERR
     }
 }
 

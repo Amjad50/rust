@@ -1,4 +1,4 @@
-use user_std::SyscallError;
+use emerald_std::SyscallError;
 
 use crate::error::Error as StdError;
 use crate::ffi::{OsStr, OsString};
@@ -40,7 +40,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
             // Safety: the size is equal to the capacity, I'm setting the length so we can access the slice
             //         its safe to use since the data will be overwritten by getcwd
             buf.set_len(buf.capacity());
-            match user_std::io::syscall_get_cwd(&mut buf) {
+            match emerald_std::io::syscall_get_cwd(&mut buf) {
                 Ok(len) => {
                     // Safety: forcing the length back to the safe space
                     buf.set_len(len);
@@ -61,7 +61,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
 
 pub fn chdir(p: &path::Path) -> io::Result<()> {
     run_path_with_cstr(p, |p| unsafe {
-        user_std::io::syscall_chdir(p).map_err(syscall_to_io_error)
+        emerald_std::io::syscall_chdir(p).map_err(syscall_to_io_error)
     })
 }
 
@@ -168,7 +168,7 @@ pub fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn exit(code: i32) -> ! {
-    unsafe { user_std::process::exit(code) }
+    unsafe { emerald_std::process::exit(code) }
 }
 
 pub fn getpid() -> u32 {
