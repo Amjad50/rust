@@ -1193,9 +1193,9 @@ dependencies = [
 
 [[package]]
 name = "emerald_kernel_user_link"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0785bd57d8819d6796c5d92f9406c8e83fa3317cf62abfcd9a3f0c48862a7a37"
+checksum = "2f12c5d30e528a9a1dbf773e020452dc5339b0167a6fe66c683a02c6bfaffb6c"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-core",
@@ -1203,9 +1203,9 @@ dependencies = [
 
 [[package]]
 name = "emerald_std"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24cefaf4e212b4da00f133b09e689ecdc1a00ac7f58fe03d530206f315a6eb42"
+checksum = "fa6d6034186e8a218cd75e1481bda7981e4c136c46b8fa11c75fdf8c1cfc1d9b"
 dependencies = [
  "compiler_builtins",
  "emerald_kernel_user_link",

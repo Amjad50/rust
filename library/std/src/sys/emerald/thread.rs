@@ -21,8 +21,15 @@ impl Thread {
         // nope
     }
 
-    pub fn sleep(_dur: Duration) {
-        panic!("can't sleep");
+    pub fn sleep(duration: Duration) {
+        let secs = duration.as_secs();
+        let nsecs = duration.subsec_nanos() as _;
+
+        // For now, we don't have signals or interrupts. So the sleep will
+        // be executed normally.
+        unsafe {
+            emerald_std::clock::sleep(secs, nsecs).expect("Failed to sleep");
+        }
     }
 
     pub fn join(self) {
