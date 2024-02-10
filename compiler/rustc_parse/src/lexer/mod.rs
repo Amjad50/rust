@@ -7,7 +7,7 @@ use rustc_ast::ast::{self, AttrStyle};
 use rustc_ast::token::{self, CommentKind, Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::util::unicode::contains_text_flow_control_chars;
-use rustc_errors::{error_code, Applicability, DiagCtxt, Diagnostic, StashKey};
+use rustc_errors::{codes::*, Applicability, DiagCtxt, DiagnosticBuilder, StashKey};
 use rustc_lexer::unescape::{self, EscapeError, Mode};
 use rustc_lexer::{Base, DocStyle, RawStrError};
 use rustc_lexer::{Cursor, LiteralKind};
@@ -42,12 +42,12 @@ pub struct UnmatchedDelim {
     pub candidate_span: Option<Span>,
 }
 
-pub(crate) fn parse_token_trees<'a>(
-    sess: &'a ParseSess,
-    mut src: &'a str,
+pub(crate) fn parse_token_trees<'sess, 'src>(
+    sess: &'sess ParseSess,
+    mut src: &'src str,
     mut start_pos: BytePos,
     override_span: Option<Span>,
-) -> Result<TokenStream, Vec<Diagnostic>> {
+) -> Result<TokenStream, Vec<DiagnosticBuilder<'sess>>> {
     // Skip `#!`, if present.
     if let Some(shebang_len) = rustc_lexer::strip_shebang(src) {
         src = &src[shebang_len..];
@@ -76,13 +76,13 @@ pub(crate) fn parse_token_trees<'a>(
             let mut buffer = Vec::with_capacity(1);
             for unmatched in unmatched_delims {
                 if let Some(err) = make_unclosed_delims_error(unmatched, sess) {
-                    err.buffer(&mut buffer);
+                    buffer.push(err);
                 }
             }
             if let Err(errs) = res {
                 // Add unclosing delimiter or diff marker errors
                 for err in errs {
-                    err.buffer(&mut buffer);
+                    buffer.push(err);
                 }
             }
             Err(buffer)
@@ -90,16 +90,16 @@ pub(crate) fn parse_token_trees<'a>(
     }
 }
 
-struct StringReader<'a> {
-    sess: &'a ParseSess,
+struct StringReader<'sess, 'src> {
+    sess: &'sess ParseSess,
     /// Initial position, read-only.
     start_pos: BytePos,
     /// The absolute offset within the source_map of the current character.
     pos: BytePos,
     /// Source text to tokenize.
-    src: &'a str,
+    src: &'src str,
     /// Cursor for getting lexer tokens.
-    cursor: Cursor<'a>,
+    cursor: Cursor<'src>,
     override_span: Option<Span>,
     /// When a "unknown start of token: \u{a0}" has already been emitted earlier
     /// in this file, it's safe to treat further occurrences of the non-breaking
@@ -107,8 +107,8 @@ struct StringReader<'a> {
     nbsp_is_whitespace: bool,
 }
 
-impl<'a> StringReader<'a> {
-    pub fn dcx(&self) -> &'a DiagCtxt {
+impl<'sess, 'src> StringReader<'sess, 'src> {
+    pub fn dcx(&self) -> &'sess DiagCtxt {
         &self.sess.dcx
     }
 
@@ -250,7 +250,7 @@ impl<'a> StringReader<'a> {
                     if starts_with_number {
                         let span = self.mk_sp(start, self.pos);
                         self.dcx().struct_err("lifetimes cannot start with a number")
-                            .span_mv(span)
+                            .with_span(span)
                             .stash(span, StashKey::LifetimeIsChar);
                     }
                     let ident = Symbol::intern(lifetime_name);
@@ -397,10 +397,10 @@ impl<'a> StringReader<'a> {
                 if !terminated {
                     self.dcx()
                         .struct_span_fatal(self.mk_sp(start, end), "unterminated character literal")
-                        .code_mv(error_code!(E0762))
+                        .with_code(E0762)
                         .emit()
                 }
-                self.cook_quoted(token::Char, Mode::Char, start, end, 1, 1) // ' '
+                self.cook_unicode(token::Char, Mode::Char, start, end, 1, 1) // ' '
             }
             rustc_lexer::LiteralKind::Byte { terminated } => {
                 if !terminated {
@@ -409,10 +409,10 @@ impl<'a> StringReader<'a> {
                             self.mk_sp(start + BytePos(1), end),
                             "unterminated byte constant",
                         )
-                        .code_mv(error_code!(E0763))
+                        .with_code(E0763)
                         .emit()
                 }
-                self.cook_quoted(token::Byte, Mode::Byte, start, end, 2, 1) // b' '
+                self.cook_unicode(token::Byte, Mode::Byte, start, end, 2, 1) // b' '
             }
             rustc_lexer::LiteralKind::Str { terminated } => {
                 if !terminated {
@@ -421,10 +421,10 @@ impl<'a> StringReader<'a> {
                             self.mk_sp(start, end),
                             "unterminated double quote string",
                         )
-                        .code_mv(error_code!(E0765))
+                        .with_code(E0765)
                         .emit()
                 }
-                self.cook_quoted(token::Str, Mode::Str, start, end, 1, 1) // " "
+                self.cook_unicode(token::Str, Mode::Str, start, end, 1, 1) // " "
             }
             rustc_lexer::LiteralKind::ByteStr { terminated } => {
                 if !terminated {
@@ -433,10 +433,10 @@ impl<'a> StringReader<'a> {
                             self.mk_sp(start + BytePos(1), end),
                             "unterminated double quote byte string",
                         )
-                        .code_mv(error_code!(E0766))
+                        .with_code(E0766)
                         .emit()
                 }
-                self.cook_quoted(token::ByteStr, Mode::ByteStr, start, end, 2, 1) // b" "
+                self.cook_unicode(token::ByteStr, Mode::ByteStr, start, end, 2, 1) // b" "
             }
             rustc_lexer::LiteralKind::CStr { terminated } => {
                 if !terminated {
@@ -445,16 +445,16 @@ impl<'a> StringReader<'a> {
                             self.mk_sp(start + BytePos(1), end),
                             "unterminated C string",
                         )
-                        .code_mv(error_code!(E0767))
+                        .with_code(E0767)
                         .emit()
                 }
-                self.cook_c_string(token::CStr, Mode::CStr, start, end, 2, 1) // c" "
+                self.cook_mixed(token::CStr, Mode::CStr, start, end, 2, 1) // c" "
             }
             rustc_lexer::LiteralKind::RawStr { n_hashes } => {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::StrRaw(n_hashes);
-                    self.cook_quoted(kind, Mode::RawStr, start, end, 2 + n, 1 + n) // r##" "##
+                    self.cook_unicode(kind, Mode::RawStr, start, end, 2 + n, 1 + n) // r##" "##
                 } else {
                     self.report_raw_str_error(start, 1);
                 }
@@ -463,7 +463,7 @@ impl<'a> StringReader<'a> {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::ByteStrRaw(n_hashes);
-                    self.cook_quoted(kind, Mode::RawByteStr, start, end, 3 + n, 1 + n) // br##" "##
+                    self.cook_unicode(kind, Mode::RawByteStr, start, end, 3 + n, 1 + n) // br##" "##
                 } else {
                     self.report_raw_str_error(start, 2);
                 }
@@ -472,7 +472,7 @@ impl<'a> StringReader<'a> {
                 if let Some(n_hashes) = n_hashes {
                     let n = u32::from(n_hashes);
                     let kind = token::CStrRaw(n_hashes);
-                    self.cook_c_string(kind, Mode::RawCStr, start, end, 3 + n, 1 + n) // cr##" "##
+                    self.cook_unicode(kind, Mode::RawCStr, start, end, 3 + n, 1 + n) // cr##" "##
                 } else {
                     self.report_raw_str_error(start, 2);
                 }
@@ -526,7 +526,7 @@ impl<'a> StringReader<'a> {
 
     /// Slice of the source text from `start` up to but excluding `self.pos`,
     /// meaning the slice does not include the character `self.ch`.
-    fn str_from(&self, start: BytePos) -> &'a str {
+    fn str_from(&self, start: BytePos) -> &'src str {
         self.str_from_to(start, self.pos)
     }
 
@@ -537,12 +537,12 @@ impl<'a> StringReader<'a> {
     }
 
     /// Slice of the source text spanning from `start` up to but excluding `end`.
-    fn str_from_to(&self, start: BytePos, end: BytePos) -> &'a str {
+    fn str_from_to(&self, start: BytePos, end: BytePos) -> &'src str {
         &self.src[self.src_index(start)..self.src_index(end)]
     }
 
     /// Slice of the source text spanning from `start` until the end
-    fn str_from_to_end(&self, start: BytePos) -> &'a str {
+    fn str_from_to_end(&self, start: BytePos) -> &'src str {
         &self.src[self.src_index(start)..]
     }
 
@@ -582,7 +582,7 @@ impl<'a> StringReader<'a> {
     ) -> ! {
         let mut err =
             self.dcx().struct_span_fatal(self.mk_sp(start, start), "unterminated raw string");
-        err.code(error_code!(E0748));
+        err.code(E0748);
         err.span_label(self.mk_sp(start, start), "unterminated raw string");
 
         if n_hashes > 0 {
@@ -614,7 +614,7 @@ impl<'a> StringReader<'a> {
         };
         let last_bpos = self.pos;
         let mut err = self.dcx().struct_span_fatal(self.mk_sp(start, last_bpos), msg);
-        err.code(error_code!(E0758));
+        err.code(E0758);
         let mut nested_block_comment_open_idxs = vec![];
         let mut last_nested_block_comment_idxs = None;
         let mut content_chars = self.str_from(start).char_indices().peekable();
@@ -735,7 +735,7 @@ impl<'a> StringReader<'a> {
         }
     }
 
-    fn cook_quoted(
+    fn cook_unicode(
         &self,
         kind: token::LitKind,
         mode: Mode,
@@ -745,13 +745,13 @@ impl<'a> StringReader<'a> {
         postfix_len: u32,
     ) -> (token::LitKind, Symbol) {
         self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
-            unescape::unescape_literal(src, mode, &mut |span, result| {
+            unescape::unescape_unicode(src, mode, &mut |span, result| {
                 callback(span, result.map(drop))
             })
         })
     }
 
-    fn cook_c_string(
+    fn cook_mixed(
         &self,
         kind: token::LitKind,
         mode: Mode,
@@ -761,7 +761,7 @@ impl<'a> StringReader<'a> {
         postfix_len: u32,
     ) -> (token::LitKind, Symbol) {
         self.cook_common(kind, mode, start, end, prefix_len, postfix_len, |src, mode, callback| {
-            unescape::unescape_c_string(src, mode, &mut |span, result| {
+            unescape::unescape_mixed(src, mode, &mut |span, result| {
                 callback(span, result.map(drop))
             })
         })

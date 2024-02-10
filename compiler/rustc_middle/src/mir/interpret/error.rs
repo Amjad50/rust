@@ -5,7 +5,9 @@ use crate::mir::{ConstAlloc, ConstValue};
 use crate::ty::{layout, tls, Ty, TyCtxt, ValTree};
 
 use rustc_data_structures::sync::Lock;
-use rustc_errors::{DiagnosticArgValue, DiagnosticMessage, ErrorGuaranteed, IntoDiagnosticArg};
+use rustc_errors::{
+    DiagnosticArgName, DiagnosticArgValue, DiagnosticMessage, ErrorGuaranteed, IntoDiagnosticArg,
+};
 use rustc_macros::HashStable;
 use rustc_session::CtfeBacktrace;
 use rustc_span::{def_id::DefId, Span, DUMMY_SP};
@@ -200,8 +202,6 @@ pub enum InvalidProgramInfo<'tcx> {
     /// (which unfortunately typeck does not reject).
     /// Not using `FnAbiError` as that contains a nested `LayoutError`.
     FnAbiAdjustForForeignAbi(call::AdjustForForeignAbiError),
-    /// We are runnning into a nonsense situation due to ConstProp violating our invariants.
-    ConstPropNonsense,
 }
 
 /// Details of why a pointer had to be in-bounds.
@@ -235,7 +235,7 @@ pub enum InvalidMetaKind {
 }
 
 impl IntoDiagnosticArg for InvalidMetaKind {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
+    fn into_diagnostic_arg(self) -> DiagnosticArgValue {
         DiagnosticArgValue::Str(Cow::Borrowed(match self {
             InvalidMetaKind::SliceTooBig => "slice_too_big",
             InvalidMetaKind::TooBig => "too_big",
@@ -269,7 +269,7 @@ pub struct Misalignment {
 macro_rules! impl_into_diagnostic_arg_through_debug {
     ($($ty:ty),*$(,)?) => {$(
         impl IntoDiagnosticArg for $ty {
-            fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
+            fn into_diagnostic_arg(self) -> DiagnosticArgValue {
                 DiagnosticArgValue::Str(Cow::Owned(format!("{self:?}")))
             }
         }
@@ -369,7 +369,7 @@ pub enum PointerKind {
 }
 
 impl IntoDiagnosticArg for PointerKind {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
+    fn into_diagnostic_arg(self) -> DiagnosticArgValue {
         DiagnosticArgValue::Str(
             match self {
                 Self::Ref => "ref",
@@ -416,14 +416,14 @@ pub enum ValidationErrorKind<'tcx> {
     PartialPointer,
     PtrToUninhabited { ptr_kind: PointerKind, ty: Ty<'tcx> },
     PtrToStatic { ptr_kind: PointerKind },
-    PtrToMut { ptr_kind: PointerKind },
     MutableRefInConst,
+    MutableRefToImmutable,
+    UnsafeCellInImmutable,
     NullFnPtr,
     NeverVal,
     NullablePtrOutOfRange { range: WrappingRange, max_value: u128 },
     PtrOutOfRange { range: WrappingRange, max_value: u128 },
     OutOfRange { value: String, range: WrappingRange, max_value: u128 },
-    UnsafeCell,
     UninhabitedVal { ty: Ty<'tcx> },
     InvalidEnumTag { value: String },
     UninhabitedEnumVariant,
@@ -487,10 +487,7 @@ pub trait MachineStopType: Any + fmt::Debug + Send {
     fn diagnostic_message(&self) -> DiagnosticMessage;
     /// Add diagnostic arguments by passing name and value pairs to `adder`, which are passed to
     /// fluent for formatting the translated diagnostic message.
-    fn add_args(
-        self: Box<Self>,
-        adder: &mut dyn FnMut(Cow<'static, str>, DiagnosticArgValue<'static>),
-    );
+    fn add_args(self: Box<Self>, adder: &mut dyn FnMut(DiagnosticArgName, DiagnosticArgValue));
 }
 
 impl dyn MachineStopType {

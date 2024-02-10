@@ -1,5 +1,6 @@
 use crate::build::expr::as_place::PlaceBuilder;
 use crate::build::scope::DropKind;
+use itertools::Itertools;
 use rustc_apfloat::ieee::{Double, Single};
 use rustc_apfloat::Float;
 use rustc_ast::attr;
@@ -494,7 +495,7 @@ fn construct_fn<'tcx>(
             args.as_coroutine().yield_ty(),
             args.as_coroutine().resume_ty(),
         ))),
-        ty::Closure(..) | ty::FnDef(..) => None,
+        ty::Closure(..) | ty::CoroutineClosure(..) | ty::FnDef(..) => None,
         ty => span_bug!(span_with_body, "unexpected type of body: {ty:?}"),
     };
 
@@ -654,7 +655,7 @@ fn construct_error(tcx: TyCtxt<'_>, def_id: LocalDefId, guar: ErrorGuaranteed) -
                         ty::ClosureKind::FnOnce => closure_ty,
                     };
                     (
-                        [self_ty].into_iter().chain(sig.inputs().to_vec()).collect(),
+                        [self_ty].into_iter().chain(sig.inputs()[0].tuple_fields()).collect(),
                         sig.output(),
                         None,
                     )
@@ -665,7 +666,7 @@ fn construct_error(tcx: TyCtxt<'_>, def_id: LocalDefId, guar: ErrorGuaranteed) -
                     let yield_ty = args.yield_ty();
                     let return_ty = args.return_ty();
                     (
-                        vec![closure_ty, args.resume_ty()],
+                        vec![closure_ty, resume_ty],
                         return_ty,
                         Some(Box::new(CoroutineInfo::initial(
                             tcx.coroutine_kind(def_id).unwrap(),
@@ -674,8 +675,39 @@ fn construct_error(tcx: TyCtxt<'_>, def_id: LocalDefId, guar: ErrorGuaranteed) -
                         ))),
                     )
                 }
-                _ => {
-                    span_bug!(span, "expected type of closure body to be a closure or coroutine");
+                ty::CoroutineClosure(did, args) => {
+                    let args = args.as_coroutine_closure();
+                    let sig = tcx.liberate_late_bound_regions(
+                        def_id.to_def_id(),
+                        args.coroutine_closure_sig(),
+                    );
+                    let self_ty = match args.kind() {
+                        ty::ClosureKind::Fn => {
+                            Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, closure_ty)
+                        }
+                        ty::ClosureKind::FnMut => {
+                            Ty::new_mut_ref(tcx, tcx.lifetimes.re_erased, closure_ty)
+                        }
+                        ty::ClosureKind::FnOnce => closure_ty,
+                    };
+                    (
+                        [self_ty].into_iter().chain(sig.tupled_inputs_ty.tuple_fields()).collect(),
+                        sig.to_coroutine(
+                            tcx,
+                            args.parent_args(),
+                            args.kind_ty(),
+                            tcx.coroutine_for_closure(*did),
+                            Ty::new_error(tcx, guar),
+                        ),
+                        None,
+                    )
+                }
+                ty::Error(_) => (vec![closure_ty, closure_ty], closure_ty, None),
+                kind => {
+                    span_bug!(
+                        span,
+                        "expected type of closure body to be a closure or coroutine, got {kind:?}"
+                    );
                 }
             }
         }
@@ -821,6 +853,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let upvar_args = match closure_ty.kind() {
             ty::Closure(_, args) => ty::UpvarArgs::Closure(args),
             ty::Coroutine(_, args) => ty::UpvarArgs::Coroutine(args),
+            ty::CoroutineClosure(_, args) => ty::UpvarArgs::CoroutineClosure(args),
             _ => return,
         };
 
@@ -835,7 +868,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         self.upvars = tcx
             .closure_captures(self.def_id)
             .iter()
-            .zip(capture_tys)
+            .zip_eq(capture_tys)
             .enumerate()
             .map(|(i, (captured_place, ty))| {
                 let name = captured_place.to_symbol();

@@ -10,15 +10,13 @@
 #![allow(internal_features)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
-#![deny(rustc::diagnostic_outside_of_impl)]
-#![deny(rustc::untranslatable_diagnostic)]
+#![cfg_attr(not(parallel_compiler), feature(cell_leak))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(allocator_api)]
 #![feature(array_windows)]
 #![feature(auto_traits)]
-#![feature(cell_leak)]
 #![feature(cfg_match)]
 #![feature(core_intrinsics)]
 #![feature(extend_one)]
@@ -93,6 +91,7 @@ pub mod aligned;
 pub mod frozen;
 mod hashes;
 pub mod owned_slice;
+pub mod packed;
 pub mod sso;
 pub mod steal;
 pub mod tagged_ptr;
@@ -147,7 +146,7 @@ pub fn make_display(f: impl Fn(&mut fmt::Formatter<'_>) -> fmt::Result) -> impl 
     Printer { f }
 }
 
-// See comments in src/librustc_middle/lib.rs
+// See comments in compiler/rustc_middle/src/tests.rs
 #[doc(hidden)]
 pub fn __noop_fix_for_27438() {}
 

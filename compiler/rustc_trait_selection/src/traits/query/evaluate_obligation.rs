@@ -41,7 +41,28 @@ impl<'tcx> InferCtxtExt<'tcx> for InferCtxt<'tcx> {
     /// not entirely accurate if inference variables are involved.
     ///
     /// This version may conservatively fail when outlives obligations
-    /// are required.
+    /// are required. Therefore, this version should only be used for
+    /// optimizations or diagnostics and be treated as if it can always
+    /// return `false`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #![allow(dead_code)]
+    /// trait Trait {}
+    ///
+    /// fn check<T: Trait>() {}
+    ///
+    /// fn foo<T: 'static>()
+    /// where
+    ///     &'static T: Trait,
+    /// {
+    ///     // Evaluating `&'?0 T: Trait` adds a `'?0: 'static` outlives obligation,
+    ///     // which means that `predicate_must_hold_considering_regions` will return
+    ///     // `false`.
+    ///     check::<&'_ T>();
+    /// }
+    /// ```
     fn predicate_must_hold_considering_regions(
         &self,
         obligation: &PredicateObligation<'tcx>,
@@ -87,10 +108,8 @@ impl<'tcx> InferCtxtExt<'tcx> for InferCtxt<'tcx> {
             })
         } else {
             assert!(!self.intercrate);
-            let c_pred = self.canonicalize_query_keep_static(
-                param_env.and(obligation.predicate),
-                &mut _orig_values,
-            );
+            let c_pred =
+                self.canonicalize_query(param_env.and(obligation.predicate), &mut _orig_values);
             self.tcx.at(obligation.cause.span()).evaluate_obligation(c_pred)
         }
     }
@@ -118,11 +137,9 @@ impl<'tcx> InferCtxtExt<'tcx> for InferCtxt<'tcx> {
                             r,
                         )
                     }
-                    OverflowError::ErrorReporting => EvaluationResult::EvaluatedToErr,
                     OverflowError::Error(_) => EvaluationResult::EvaluatedToErr,
                 })
             }
-            Err(OverflowError::ErrorReporting) => EvaluationResult::EvaluatedToErr,
             Err(OverflowError::Error(_)) => EvaluationResult::EvaluatedToErr,
         }
     }

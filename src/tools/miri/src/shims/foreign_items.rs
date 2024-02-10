@@ -342,7 +342,7 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     /// Returns the minimum alignment for the target architecture for allocations of the given size.
     fn min_align(&self, size: u64, kind: MiriMemoryKind) -> Align {
         let this = self.eval_context_ref();
-        // List taken from `library/std/src/sys/common/alloc.rs`.
+        // List taken from `library/std/src/sys/pal/common/alloc.rs`.
         // This list should be kept in sync with the one from libstd.
         let min_align = match this.tcx.sess.target.arch.as_ref() {
             "x86" | "arm" | "mips" | "mips32r6" | "powerpc" | "powerpc64" | "wasm32" => 8,
@@ -585,17 +585,17 @@ trait EvalContextExtPriv<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 }
                 if let Ok((alloc_id, offset, ..)) = this.ptr_try_get_alloc_id(ptr) {
                     let (_size, alloc_align, _kind) = this.get_alloc_info(alloc_id);
-                    // Not `get_alloc_extra_mut`, need to handle read-only allocations!
-                    let alloc_extra = this.get_alloc_extra(alloc_id)?;
                     // If the newly promised alignment is bigger than the native alignment of this
                     // allocation, and bigger than the previously promised alignment, then set it.
                     if align > alloc_align
-                        && !alloc_extra
+                        && !this
+                            .machine
                             .symbolic_alignment
-                            .get()
-                            .is_some_and(|(_, old_align)| align <= old_align)
+                            .get_mut()
+                            .get(&alloc_id)
+                            .is_some_and(|&(_, old_align)| align <= old_align)
                     {
-                        alloc_extra.symbolic_alignment.set(Some((offset, align)));
+                        this.machine.symbolic_alignment.get_mut().insert(alloc_id, (offset, align));
                     }
                 }
             }

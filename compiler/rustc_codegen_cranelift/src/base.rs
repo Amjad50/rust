@@ -682,7 +682,6 @@ fn codegen_stmt<'tcx>(
                                 args,
                                 ty::ClosureKind::FnOnce,
                             )
-                            .expect("failed to normalize and resolve closure during codegen")
                             .polymorphize(fx.tcx);
                             let func_ref = fx.get_function_ref(instance);
                             let func_addr = fx.bcx.ins().func_addr(fx.pointer_type, func_ref);
@@ -767,6 +766,15 @@ fn codegen_stmt<'tcx>(
                         NullOp::AlignOf => layout.align.abi.bytes(),
                         NullOp::OffsetOf(fields) => {
                             layout.offset_of_subfield(fx, fields.iter()).bytes()
+                        }
+                        NullOp::DebugAssertions => {
+                            let val = fx.tcx.sess.opts.debug_assertions;
+                            let val = CValue::by_val(
+                                fx.bcx.ins().iconst(types::I8, i64::try_from(val).unwrap()),
+                                fx.layout_of(fx.tcx.types.bool),
+                            );
+                            lval.write_cvalue(fx, val);
+                            return;
                         }
                     };
                     let val = CValue::by_val(

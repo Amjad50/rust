@@ -14,8 +14,10 @@ mod version;
 use indexmap::IndexSet;
 use paths::AbsPathBuf;
 use span::Span;
-use std::{fmt, io, sync::Mutex};
-use triomphe::Arc;
+use std::{
+    fmt, io,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -81,9 +83,11 @@ impl PartialEq for ProcMacro {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct ServerError {
     pub message: String,
-    pub io: Option<io::Error>,
+    // io::Error isn't Clone for some reason
+    pub io: Option<Arc<io::Error>>,
 }
 
 impl fmt::Display for ServerError {
@@ -109,7 +113,7 @@ impl ProcMacroServer {
     }
 
     pub fn load_dylib(&self, dylib: MacroDylib) -> Result<Vec<ProcMacro>, ServerError> {
-        let _p = profile::span("ProcMacroClient::load_dylib");
+        let _p = tracing::span!(tracing::Level::INFO, "ProcMacroClient::load_dylib").entered();
         let macros =
             self.process.lock().unwrap_or_else(|e| e.into_inner()).find_proc_macros(&dylib.path)?;
 
@@ -180,7 +184,7 @@ impl ProcMacro {
             .process
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .send_task(msg::Request::ExpandMacro(task))?;
+            .send_task(msg::Request::ExpandMacro(Box::new(task)))?;
 
         match response {
             msg::Response::ExpandMacro(it) => {

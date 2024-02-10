@@ -26,6 +26,7 @@ use rustc_span::symbol::{kw, Symbol};
 use rustc_span::Span;
 
 use std::any::Any;
+use std::mem;
 
 use super::{Decodable, DecodeContext, DecodeIterator};
 
@@ -236,7 +237,14 @@ provide! { tcx, def_id, other, cdata,
     impl_polarity => { table_direct }
     defaultness => { table_direct }
     constness => { table_direct }
-    coerce_unsized_info => { table }
+    coerce_unsized_info => {
+        Ok(cdata
+            .root
+            .tables
+            .coerce_unsized_info
+            .get(cdata, def_id.index)
+            .map(|lazy| lazy.decode((cdata, tcx)))
+            .process_decoded(tcx, || panic!("{def_id:?} does not have coerce_unsized_info"))) }
     mir_const_qualif => { table }
     rendered_const => { table }
     asyncness => { table_direct }
@@ -283,7 +291,7 @@ provide! { tcx, def_id, other, cdata,
         tcx.arena.alloc_from_iter(cdata.get_associated_item_or_field_def_ids(def_id.index))
     }
     associated_item => { cdata.get_associated_item(def_id.index, tcx.sess) }
-    inherent_impls => { cdata.get_inherent_implementations_for_type(tcx, def_id.index) }
+    inherent_impls => { Ok(cdata.get_inherent_implementations_for_type(tcx, def_id.index)) }
     item_attrs => { tcx.arena.alloc_from_iter(cdata.get_item_attrs(def_id.index, tcx.sess)) }
     is_mir_available => { cdata.is_item_mir_available(def_id.index) }
     is_ctfe_mir_available => { cdata.is_ctfe_mir_available(def_id.index) }
@@ -328,7 +336,7 @@ provide! { tcx, def_id, other, cdata,
     traits => { tcx.arena.alloc_from_iter(cdata.get_traits()) }
     trait_impls_in_crate => { tcx.arena.alloc_from_iter(cdata.get_trait_impls()) }
     implementations_of_trait => { cdata.get_implementations_of_trait(tcx, other) }
-    crate_incoherent_impls => { cdata.get_incoherent_impls(tcx, other) }
+    crate_incoherent_impls => { Ok(cdata.get_incoherent_impls(tcx, other)) }
 
     dep_kind => { cdata.dep_kind }
     module_children => {
@@ -569,12 +577,24 @@ impl CStore {
         self.get_crate_data(cnum).get_proc_macro_quoted_span(id, sess)
     }
 
+    pub fn set_used_recursively(&mut self, cnum: CrateNum) {
+        let cmeta = self.get_crate_data_mut(cnum);
+        if !cmeta.used {
+            cmeta.used = true;
+            let dependencies = mem::take(&mut cmeta.dependencies);
+            for &dep_cnum in &dependencies {
+                self.set_used_recursively(dep_cnum);
+            }
+            self.get_crate_data_mut(cnum).dependencies = dependencies;
+        }
+    }
+
     pub(crate) fn update_extern_crate(&mut self, cnum: CrateNum, extern_crate: ExternCrate) {
         let cmeta = self.get_crate_data_mut(cnum);
         if cmeta.update_extern_crate(extern_crate) {
             // Propagate the extern crate info to dependencies if it was updated.
             let extern_crate = ExternCrate { dependency_of: cnum, ..extern_crate };
-            let dependencies = std::mem::take(&mut cmeta.dependencies);
+            let dependencies = mem::take(&mut cmeta.dependencies);
             for &dep_cnum in &dependencies {
                 self.update_extern_crate(dep_cnum, extern_crate);
             }

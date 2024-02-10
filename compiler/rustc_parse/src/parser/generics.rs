@@ -145,10 +145,10 @@ impl<'a> Parser<'a> {
                 mistyped_const_ident.span,
                 format!("`const` keyword was mistyped as `{}`", mistyped_const_ident.as_str()),
             )
-            .span_suggestion_verbose_mv(
+            .with_span_suggestion_verbose(
                 mistyped_const_ident.span,
                 "use the `const` keyword",
-                kw::Const.as_str(),
+                kw::Const,
                 Applicability::MachineApplicable,
             )
             .emit();

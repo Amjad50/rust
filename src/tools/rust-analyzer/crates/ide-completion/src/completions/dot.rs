@@ -1,6 +1,7 @@
 //! Completes references after dot (fields and method calls).
 
 use ide_db::FxHashSet;
+use syntax::SmolStr;
 
 use crate::{
     context::{CompletionContext, DotAccess, DotAccessKind, ExprCtx, PathCompletionCtx, Qualified},
@@ -20,14 +21,17 @@ pub(crate) fn complete_dot(
 
     // Suggest .await syntax for types that implement Future trait
     if receiver_ty.impls_into_future(ctx.db) {
-        let mut item =
-            CompletionItem::new(CompletionItemKind::Keyword, ctx.source_range(), "await");
+        let mut item = CompletionItem::new(
+            CompletionItemKind::Keyword,
+            ctx.source_range(),
+            SmolStr::new_static("await"),
+        );
         item.detail("expr.await");
         item.add_to(acc, ctx.db);
     }
 
     let is_field_access = matches!(dot_access.kind, DotAccessKind::Field { .. });
-    let is_method_acces_with_parens =
+    let is_method_access_with_parens =
         matches!(dot_access.kind, DotAccessKind::Method { has_parens: true });
 
     complete_fields(
@@ -37,7 +41,7 @@ pub(crate) fn complete_dot(
         |acc, field, ty| acc.add_field(ctx, dot_access, None, field, &ty),
         |acc, field, ty| acc.add_tuple_field(ctx, None, field, &ty),
         is_field_access,
-        is_method_acces_with_parens,
+        is_method_access_with_parens,
     );
 
     complete_methods(ctx, receiver_ty, |func| acc.add_method(ctx, dot_access, func, None, None));
@@ -110,14 +114,14 @@ fn complete_fields(
     mut named_field: impl FnMut(&mut Completions, hir::Field, hir::Type),
     mut tuple_index: impl FnMut(&mut Completions, usize, hir::Type),
     is_field_access: bool,
-    is_method_acess_with_parens: bool,
+    is_method_access_with_parens: bool,
 ) {
     let mut seen_names = FxHashSet::default();
     for receiver in receiver.autoderef(ctx.db) {
         for (field, ty) in receiver.fields(ctx.db) {
             if seen_names.insert(field.name(ctx.db))
                 && (is_field_access
-                    || (is_method_acess_with_parens && (ty.is_fn() || ty.is_closure())))
+                    || (is_method_access_with_parens && (ty.is_fn() || ty.is_closure())))
             {
                 named_field(acc, field, ty);
             }
@@ -127,7 +131,7 @@ fn complete_fields(
             // already seen without inserting into the hashset.
             if !seen_names.contains(&hir::Name::new_tuple_field(i))
                 && (is_field_access
-                    || (is_method_acess_with_parens && (ty.is_fn() || ty.is_closure())))
+                    || (is_method_access_with_parens && (ty.is_fn() || ty.is_closure())))
             {
                 // Tuple fields are always public (tuple struct fields are handled above).
                 tuple_index(acc, i, ty);

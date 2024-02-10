@@ -9,11 +9,10 @@ use crate::emitter::FileWithAnnotatedLines;
 use crate::snippet::Line;
 use crate::translation::{to_fluent_args, Translate};
 use crate::{
-    CodeSuggestion, Diagnostic, DiagnosticId, DiagnosticMessage, Emitter, FluentBundle,
+    CodeSuggestion, Diagnostic, DiagnosticMessage, Emitter, ErrCode, FluentBundle,
     LazyFallbackBundle, Level, MultiSpan, Style, SubDiagnostic,
 };
-use annotate_snippets::display_list::{DisplayList, FormatOptions};
-use annotate_snippets::snippet::*;
+use annotate_snippets::{Annotation, AnnotationType, Renderer, Slice, Snippet, SourceAnnotation};
 use rustc_data_structures::sync::Lrc;
 use rustc_error_messages::FluentArgs;
 use rustc_span::source_map::SourceMap;
@@ -45,15 +44,15 @@ impl Translate for AnnotateSnippetEmitter {
 
 impl Emitter for AnnotateSnippetEmitter {
     /// The entry point for the diagnostics generation
-    fn emit_diagnostic(&mut self, diag: &Diagnostic) {
+    fn emit_diagnostic(&mut self, mut diag: Diagnostic) {
         let fluent_args = to_fluent_args(diag.args());
 
-        let mut children = diag.children.clone();
-        let (mut primary_span, suggestions) = self.primary_span_formatted(diag, &fluent_args);
+        let mut suggestions = diag.suggestions.unwrap_or(vec![]);
+        self.primary_span_formatted(&mut diag.span, &mut suggestions, &fluent_args);
 
         self.fix_multispans_in_extern_macros_and_render_macro_backtrace(
-            &mut primary_span,
-            &mut children,
+            &mut diag.span,
+            &mut diag.children,
             &diag.level,
             self.macro_backtrace,
         );
@@ -63,9 +62,9 @@ impl Emitter for AnnotateSnippetEmitter {
             &diag.messages,
             &fluent_args,
             &diag.code,
-            &primary_span,
-            &children,
-            suggestions,
+            &diag.span,
+            &diag.children,
+            &suggestions,
         );
     }
 
@@ -86,8 +85,12 @@ fn source_string(file: Lrc<SourceFile>, line: &Line) -> String {
 /// Maps `Diagnostic::Level` to `snippet::AnnotationType`
 fn annotation_type_for_level(level: Level) -> AnnotationType {
     match level {
-        Level::Bug | Level::DelayedBug | Level::Fatal | Level::Error => AnnotationType::Error,
-        Level::Warning(_) => AnnotationType::Warning,
+        Level::Bug
+        | Level::Fatal
+        | Level::Error
+        | Level::DelayedBug
+        | Level::GoodPathDelayedBug => AnnotationType::Error,
+        Level::ForceWarning(_) | Level::Warning => AnnotationType::Warning,
         Level::Note | Level::OnceNote => AnnotationType::Note,
         Level::Help | Level::OnceHelp => AnnotationType::Help,
         // FIXME(#59346): Not sure how to map this level
@@ -128,7 +131,7 @@ impl AnnotateSnippetEmitter {
         level: &Level,
         messages: &[(DiagnosticMessage, Style)],
         args: &FluentArgs<'_>,
-        code: &Option<DiagnosticId>,
+        code: &Option<ErrCode>,
         msp: &MultiSpan,
         _children: &[SubDiagnostic],
         _suggestions: &[CodeSuggestion],
@@ -179,22 +182,14 @@ impl AnnotateSnippetEmitter {
                         .collect::<Vec<Owned>>()
                 })
                 .collect();
+            let code = code.map(|code| code.to_string());
             let snippet = Snippet {
                 title: Some(Annotation {
                     label: Some(&message),
-                    id: code.as_ref().map(|c| match c {
-                        DiagnosticId::Error(val) | DiagnosticId::Lint { name: val, .. } => {
-                            val.as_str()
-                        }
-                    }),
+                    id: code.as_deref(),
                     annotation_type: annotation_type_for_level(*level),
                 }),
                 footer: vec![],
-                opt: FormatOptions {
-                    color: true,
-                    anonymized_line_numbers: self.ui_testing,
-                    margin: None,
-                },
                 slices: annotated_files
                     .iter()
                     .map(|(file_name, source, line_index, annotations)| {
@@ -222,7 +217,8 @@ impl AnnotateSnippetEmitter {
             // FIXME(#59346): Figure out if we can _always_ print to stderr or not.
             // `emitter.rs` has the `Destination` enum that lists various possible output
             // destinations.
-            eprintln!("{}", DisplayList::from(snippet))
+            let renderer = Renderer::plain().anonymized_line_numbers(self.ui_testing);
+            eprintln!("{}", renderer.render(snippet))
         }
         // FIXME(#59346): Is it ok to return None if there's no source_map?
     }

@@ -7,8 +7,12 @@ use crate::{lint::lint_body, validate, MirPass};
 /// Just like `MirPass`, except it cannot mutate `Body`.
 pub trait MirLint<'tcx> {
     fn name(&self) -> &'static str {
-        let name = std::any::type_name::<Self>();
-        if let Some((_, tail)) = name.rsplit_once(':') { tail } else { name }
+        // FIXME Simplify the implementation once more `str` methods get const-stable.
+        // See copypaste in `MirPass`
+        const {
+            let name = std::any::type_name::<Self>();
+            rustc_middle::util::common::c_name(name)
+        }
     }
 
     fn is_enabled(&self, _sess: &Session) -> bool {
@@ -176,6 +180,15 @@ fn run_passes_inner<'tcx>(
         }
 
         body.pass_count = 1;
+    }
+
+    if let Some(coroutine) = body.coroutine.as_mut() {
+        if let Some(by_move_body) = coroutine.by_move_body.as_mut() {
+            run_passes_inner(tcx, by_move_body, passes, phase_change, validate_each);
+        }
+        if let Some(by_mut_body) = coroutine.by_mut_body.as_mut() {
+            run_passes_inner(tcx, by_mut_body, passes, phase_change, validate_each);
+        }
     }
 }
 

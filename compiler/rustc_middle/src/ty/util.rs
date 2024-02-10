@@ -350,7 +350,7 @@ impl<'tcx> TyCtxt<'tcx> {
         validate: impl Fn(Self, DefId) -> Result<(), ErrorGuaranteed>,
     ) -> Option<ty::Destructor> {
         let drop_trait = self.lang_items().drop_trait()?;
-        self.ensure().coherent_trait(drop_trait);
+        self.ensure().coherent_trait(drop_trait).ok()?;
 
         let ty = self.type_of(adt_did).instantiate_identity();
         let mut dtor_candidate = None;
@@ -369,7 +369,7 @@ impl<'tcx> TyCtxt<'tcx> {
             if let Some((old_item_id, _)) = dtor_candidate {
                 self.dcx()
                     .struct_span_err(self.def_span(item_id), "multiple drop impls found")
-                    .span_note_mv(self.def_span(old_item_id), "other impl here")
+                    .with_span_note(self.def_span(old_item_id), "other impl here")
                     .delay_as_bug();
             }
 
@@ -604,19 +604,15 @@ impl<'tcx> TyCtxt<'tcx> {
     /// wrapped in a binder.
     pub fn closure_env_ty(
         self,
-        closure_def_id: DefId,
-        closure_args: GenericArgsRef<'tcx>,
+        closure_ty: Ty<'tcx>,
+        closure_kind: ty::ClosureKind,
         env_region: ty::Region<'tcx>,
-    ) -> Option<Ty<'tcx>> {
-        let closure_ty = Ty::new_closure(self, closure_def_id, closure_args);
-        let closure_kind_ty = closure_args.as_closure().kind_ty();
-        let closure_kind = closure_kind_ty.to_opt_closure_kind()?;
-        let env_ty = match closure_kind {
+    ) -> Ty<'tcx> {
+        match closure_kind {
             ty::ClosureKind::Fn => Ty::new_imm_ref(self, env_region, closure_ty),
             ty::ClosureKind::FnMut => Ty::new_mut_ref(self, env_region, closure_ty),
             ty::ClosureKind::FnOnce => closure_ty,
-        };
-        Some(env_ty)
+        }
     }
 
     /// Returns `true` if the node pointed to by `def_id` is a `static` item.
@@ -702,6 +698,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         def_id: DefId,
         args: GenericArgsRef<'tcx>,
+        inspect_coroutine_fields: InspectCoroutineFields,
     ) -> Result<Ty<'tcx>, Ty<'tcx>> {
         let mut visitor = OpaqueTypeExpander {
             seen_opaque_tys: FxHashSet::default(),
@@ -712,6 +709,7 @@ impl<'tcx> TyCtxt<'tcx> {
             check_recursion: true,
             expand_coroutines: true,
             tcx: self,
+            inspect_coroutine_fields,
         };
 
         let expanded_type = visitor.expand_opaque_ty(def_id, args).unwrap();
@@ -729,16 +727,43 @@ impl<'tcx> TyCtxt<'tcx> {
             DefKind::AssocFn if self.associated_item(def_id).fn_has_self_parameter => "method",
             DefKind::Closure if let Some(coroutine_kind) = self.coroutine_kind(def_id) => {
                 match coroutine_kind {
-                    hir::CoroutineKind::Desugared(hir::CoroutineDesugaring::Async, _) => {
-                        "async closure"
-                    }
-                    hir::CoroutineKind::Desugared(hir::CoroutineDesugaring::AsyncGen, _) => {
-                        "async gen closure"
-                    }
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Async,
+                        hir::CoroutineSource::Fn,
+                    ) => "async fn",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Async,
+                        hir::CoroutineSource::Block,
+                    ) => "async block",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Async,
+                        hir::CoroutineSource::Closure,
+                    ) => "async closure",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::AsyncGen,
+                        hir::CoroutineSource::Fn,
+                    ) => "async gen fn",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::AsyncGen,
+                        hir::CoroutineSource::Block,
+                    ) => "async gen block",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::AsyncGen,
+                        hir::CoroutineSource::Closure,
+                    ) => "async gen closure",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Gen,
+                        hir::CoroutineSource::Fn,
+                    ) => "gen fn",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Gen,
+                        hir::CoroutineSource::Block,
+                    ) => "gen block",
+                    hir::CoroutineKind::Desugared(
+                        hir::CoroutineDesugaring::Gen,
+                        hir::CoroutineSource::Closure,
+                    ) => "gen closure",
                     hir::CoroutineKind::Coroutine(_) => "coroutine",
-                    hir::CoroutineKind::Desugared(hir::CoroutineDesugaring::Gen, _) => {
-                        "gen closure"
-                    }
                 }
             }
             _ => def_kind.descr(def_id),
@@ -865,6 +890,13 @@ struct OpaqueTypeExpander<'tcx> {
     /// recursion, and 'false' otherwise to avoid unnecessary work.
     check_recursion: bool,
     tcx: TyCtxt<'tcx>,
+    inspect_coroutine_fields: InspectCoroutineFields,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum InspectCoroutineFields {
+    No,
+    Yes,
 }
 
 impl<'tcx> OpaqueTypeExpander<'tcx> {
@@ -906,9 +938,11 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
             let expanded_ty = match self.expanded_cache.get(&(def_id, args)) {
                 Some(expanded_ty) => *expanded_ty,
                 None => {
-                    for bty in self.tcx.coroutine_hidden_types(def_id) {
-                        let hidden_ty = bty.instantiate(self.tcx, args);
-                        self.fold_ty(hidden_ty);
+                    if matches!(self.inspect_coroutine_fields, InspectCoroutineFields::Yes) {
+                        for bty in self.tcx.coroutine_hidden_types(def_id) {
+                            let hidden_ty = bty.instantiate(self.tcx, args);
+                            self.fold_ty(hidden_ty);
+                        }
                     }
                     let expanded_ty = Ty::new_coroutine_witness(self.tcx, def_id, args);
                     self.expanded_cache.insert((def_id, args), expanded_ty);
@@ -1085,6 +1119,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
+            | ty::CoroutineClosure(..)
             | ty::Dynamic(..)
             | ty::Foreign(_)
             | ty::Coroutine(..)
@@ -1124,6 +1159,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
+            | ty::CoroutineClosure(..)
             | ty::Dynamic(..)
             | ty::Foreign(_)
             | ty::Coroutine(..)
@@ -1215,19 +1251,18 @@ impl<'tcx> Ty<'tcx> {
     /// Primitive types (`u32`, `str`) have structural equality by definition. For composite data
     /// types, equality for the type as a whole is structural when it is the same as equality
     /// between all components (fields, array elements, etc.) of that type. For ADTs, structural
-    /// equality is indicated by an implementation of `PartialStructuralEq` and `StructuralEq` for
-    /// that type.
+    /// equality is indicated by an implementation of `StructuralPartialEq` for that type.
     ///
     /// This function is "shallow" because it may return `true` for a composite type whose fields
-    /// are not `StructuralEq`. For example, `[T; 4]` has structural equality regardless of `T`
+    /// are not `StructuralPartialEq`. For example, `[T; 4]` has structural equality regardless of `T`
     /// because equality for arrays is determined by the equality of each array element. If you
     /// want to know whether a given call to `PartialEq::eq` will proceed structurally all the way
     /// down, you will need to use a type visitor.
     #[inline]
     pub fn is_structural_eq_shallow(self, tcx: TyCtxt<'tcx>) -> bool {
         match self.kind() {
-            // Look for an impl of both `PartialStructuralEq` and `StructuralEq`.
-            ty::Adt(..) => tcx.has_structural_eq_impls(self),
+            // Look for an impl of `StructuralPartialEq`.
+            ty::Adt(..) => tcx.has_structural_eq_impl(self),
 
             // Primitive types that satisfy `Eq`.
             ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Str | ty::Never => true,
@@ -1247,7 +1282,11 @@ impl<'tcx> Ty<'tcx> {
             // Conservatively return `false` for all others...
 
             // Anonymous function types
-            ty::FnDef(..) | ty::Closure(..) | ty::Dynamic(..) | ty::Coroutine(..) => false,
+            ty::FnDef(..)
+            | ty::Closure(..)
+            | ty::CoroutineClosure(..)
+            | ty::Dynamic(..)
+            | ty::Coroutine(..) => false,
 
             // Generic or inferred types
             //
@@ -1391,6 +1430,7 @@ pub fn needs_drop_components<'tcx>(
         | ty::Placeholder(..)
         | ty::Infer(_)
         | ty::Closure(..)
+        | ty::CoroutineClosure(..)
         | ty::Coroutine(..)
         | ty::CoroutineWitness(..) => Ok(smallvec![ty]),
     }
@@ -1423,7 +1463,11 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
 
         // Not trivial because they have components, and instead of looking inside,
         // we'll just perform trait selection.
-        ty::Closure(..) | ty::Coroutine(..) | ty::CoroutineWitness(..) | ty::Adt(..) => false,
+        ty::Closure(..)
+        | ty::CoroutineClosure(..)
+        | ty::Coroutine(..)
+        | ty::CoroutineWitness(..)
+        | ty::Adt(..) => false,
 
         ty::Array(ty, _) | ty::Slice(ty) => is_trivially_const_drop(ty),
 
@@ -1486,6 +1530,7 @@ pub fn reveal_opaque_types_in_bounds<'tcx>(
         check_recursion: false,
         expand_coroutines: false,
         tcx,
+        inspect_coroutine_fields: InspectCoroutineFields::No,
     };
     val.fold_with(&mut visitor)
 }

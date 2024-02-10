@@ -38,7 +38,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
                         let (pats, ddpos) = self.lower_pat_tuple(pats, "tuple struct");
@@ -55,7 +55,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
                         break hir::PatKind::Path(qpath);
@@ -66,7 +66,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             qself,
                             path,
                             ParamMode::Optional,
-                            &ImplTraitContext::Disallowed(ImplTraitPosition::Path),
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                             None,
                         );
 
@@ -109,6 +109,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     // return inner to be processed in next loop
                     PatKind::Paren(inner) => pattern = inner,
                     PatKind::MacCall(_) => panic!("{:?} shouldn't exist here", pattern.span),
+                    PatKind::Err(guar) => break hir::PatKind::Err(*guar),
                 }
             };
 

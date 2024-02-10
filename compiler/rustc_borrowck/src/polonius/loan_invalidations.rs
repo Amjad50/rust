@@ -1,5 +1,3 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
 use rustc_data_structures::graph::dominators::Dominators;
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::{self, BasicBlock, Body, Location, NonDivergingIntrinsic, Place, Rvalue};
@@ -120,7 +118,7 @@ impl<'cx, 'tcx> Visitor<'tcx> for LoanInvalidationsGenerator<'cx, 'tcx> {
             } => {
                 self.consume_operand(location, func);
                 for arg in args {
-                    self.consume_operand(location, arg);
+                    self.consume_operand(location, &arg.node);
                 }
                 self.mutate_place(location, *destination, Deep);
             }

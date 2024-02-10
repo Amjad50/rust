@@ -9,10 +9,11 @@
 //! API should require to assemble every node piecewise. The trick of
 //! `parse(format!())` we use internally is an implementation detail -- long
 //! term, it will be replaced with direct tree manipulation.
+
 use itertools::Itertools;
 use parser::T;
 use rowan::NodeOrToken;
-use stdx::{format_to, never};
+use stdx::{format_to, format_to_acc, never};
 
 use crate::{ast, utils::is_raw_identifier, AstNode, SourceFile, SyntaxKind, SyntaxToken};
 
@@ -263,9 +264,6 @@ pub fn impl_(
     ast_from_text(&format!("impl{gen_params} {path_type}{tr_gen_args}{where_clause}{{{}}}", body))
 }
 
-// FIXME : We must make *_gen_args' type ast::GenericArgList but in order to do so we must implement in `edit_in_place.rs`
-// `add_generic_arg()` just like `add_generic_param()`
-// is implemented for `ast::GenericParamList`
 pub fn impl_trait(
     is_unsafe: bool,
     trait_gen_params: Option<ast::GenericParamList>,
@@ -598,6 +596,9 @@ pub fn expr_macro_call(f: ast::Expr, arg_list: ast::ArgList) -> ast::Expr {
 pub fn expr_ref(expr: ast::Expr, exclusive: bool) -> ast::Expr {
     expr_from_text(&if exclusive { format!("&mut {expr}") } else { format!("&{expr}") })
 }
+pub fn expr_reborrow(expr: ast::Expr) -> ast::Expr {
+    expr_from_text(&format!("&mut *{expr}"))
+}
 pub fn expr_closure(pats: impl IntoIterator<Item = ast::Param>, expr: ast::Expr) -> ast::Expr {
     let params = pats.into_iter().join(", ");
     expr_from_text(&format!("|{params}| {expr}"))
@@ -759,15 +760,12 @@ pub fn match_arm_with_guard(
 }
 
 pub fn match_arm_list(arms: impl IntoIterator<Item = ast::MatchArm>) -> ast::MatchArmList {
-    let arms_str = arms
-        .into_iter()
-        .map(|arm| {
-            let needs_comma = arm.expr().map_or(true, |it| !it.is_block_like());
-            let comma = if needs_comma { "," } else { "" };
-            let arm = arm.syntax();
-            format!("    {arm}{comma}\n")
-        })
-        .collect::<String>();
+    let arms_str = arms.into_iter().fold(String::new(), |mut acc, arm| {
+        let needs_comma = arm.expr().map_or(true, |it| !it.is_block_like());
+        let comma = if needs_comma { "," } else { "" };
+        let arm = arm.syntax();
+        format_to_acc!(acc, "    {arm}{comma}\n")
+    });
     return from_text(&arms_str);
 
     fn from_text(text: &str) -> ast::MatchArmList {

@@ -254,7 +254,7 @@ fn configure_and_expand(
     }
 
     if is_proc_macro_crate && sess.panic_strategy() == PanicStrategy::Abort {
-        sess.dcx().emit_warning(errors::ProcMacroCratePanicAbort);
+        sess.dcx().emit_warn(errors::ProcMacroCratePanicAbort);
     }
 
     sess.time("maybe_create_a_macro_crate", || {
@@ -778,6 +778,10 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
     // kindck is gone now). -nmatsakis
     if let Some(reported) = sess.dcx().has_errors() {
         return Err(reported);
+    } else if sess.dcx().stashed_err_count() > 0 {
+        // Without this case we sometimes get delayed bug ICEs and I don't
+        // understand why. -nnethercote
+        return Err(sess.dcx().delayed_bug("some stashed error is waiting for use"));
     }
 
     sess.time("misc_checking_3", || {

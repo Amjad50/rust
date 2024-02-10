@@ -103,10 +103,10 @@
 #![feature(allocator_api)]
 #![feature(array_chunks)]
 #![feature(array_into_iter_constructors)]
-#![feature(array_methods)]
 #![feature(array_windows)]
 #![feature(ascii_char)]
 #![feature(assert_matches)]
+#![feature(async_fn_traits)]
 #![feature(async_iterator)]
 #![feature(coerce_unsized)]
 #![feature(const_align_of_val)]
@@ -129,12 +129,14 @@
 #![feature(fmt_internals)]
 #![feature(fn_traits)]
 #![feature(hasher_prefixfree_extras)]
+#![feature(hint_assert_unchecked)]
 #![feature(inline_const)]
 #![feature(inplace_iteration)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
 #![feature(iter_repeat_n)]
 #![feature(layout_for_ptr)]
+#![feature(local_waker)]
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_uninit_array_transpose)]
@@ -148,7 +150,6 @@
 #![feature(set_ptr_value)]
 #![feature(sized_type_properties)]
 #![feature(slice_from_ptr_range)]
-#![feature(slice_group_by)]
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
 #![feature(slice_range)]
@@ -253,7 +254,7 @@ pub mod str;
 pub mod string;
 #[cfg(all(not(no_rc), not(no_sync), target_has_atomic = "ptr"))]
 pub mod sync;
-#[cfg(all(not(no_global_oom_handling), not(no_rc), not(no_sync), target_has_atomic = "ptr"))]
+#[cfg(all(not(no_global_oom_handling), not(no_rc), not(no_sync)))]
 pub mod task;
 #[cfg(test)]
 mod tests;

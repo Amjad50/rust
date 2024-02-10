@@ -1,6 +1,6 @@
 use crate::structured_errors::StructuredDiagnostic;
 use rustc_errors::{
-    pluralize, Applicability, Diagnostic, DiagnosticBuilder, DiagnosticId, MultiSpan,
+    codes::*, pluralize, Applicability, Diagnostic, DiagnosticBuilder, ErrCode, MultiSpan,
 };
 use rustc_hir as hir;
 use rustc_middle::ty::{self as ty, AssocItems, AssocKind, TyCtxt};
@@ -523,7 +523,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
     fn start_diagnostics(&self) -> DiagnosticBuilder<'tcx> {
         let span = self.path_segment.ident.span;
         let msg = self.create_error_message();
-        self.tcx.dcx().struct_span_err(span, msg).code_mv(self.code())
+        self.tcx.dcx().struct_span_err(span, msg).with_code(self.code())
     }
 
     /// Builds the `expected 1 type argument / supplied 2 type arguments` message.
@@ -771,8 +771,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
         );
 
         if let Some(parent_node) = self.tcx.hir().opt_parent_id(self.path_segment.hir_id)
-            && let Some(parent_node) = self.tcx.opt_hir_node(parent_node)
-            && let hir::Node::Expr(expr) = parent_node
+            && let hir::Node::Expr(expr) = self.tcx.hir_node(parent_node)
         {
             match &expr.kind {
                 hir::ExprKind::Path(qpath) => self
@@ -1107,8 +1106,8 @@ impl<'tcx> StructuredDiagnostic<'tcx> for WrongNumberOfGenericArgs<'_, 'tcx> {
         self.tcx.sess
     }
 
-    fn code(&self) -> DiagnosticId {
-        rustc_errors::error_code!(E0107)
+    fn code(&self) -> ErrCode {
+        E0107
     }
 
     fn diagnostic_common(&self) -> DiagnosticBuilder<'tcx> {

@@ -2,6 +2,7 @@ use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::{is_trait_method, path_to_local_id, peel_blocks, strip_pat_refs};
 use rustc_ast::ast;
+use rustc_data_structures::packed::Pu128;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::PatKind;
@@ -98,7 +99,6 @@ fn check_fold_with_op(
             cx,
             UNNECESSARY_FOLD,
             fold_span.with_hi(expr.span.hi()),
-            // TODO #2371 don't suggest e.g., .any(|x| f(x)) if we can suggest .any(f)
             "this `.fold` can be written more succinctly using another method",
             "try",
             sugg,
@@ -150,7 +150,7 @@ pub(super) fn check(
                     },
                 );
             },
-            ast::LitKind::Int(0, _) => check_fold_with_op(
+            ast::LitKind::Int(Pu128(0), _) => check_fold_with_op(
                 cx,
                 expr,
                 acc,
@@ -162,7 +162,7 @@ pub(super) fn check(
                     method_name: "sum",
                 },
             ),
-            ast::LitKind::Int(1, _) => {
+            ast::LitKind::Int(Pu128(1), _) => {
                 check_fold_with_op(
                     cx,
                     expr,

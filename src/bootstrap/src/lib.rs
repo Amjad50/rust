@@ -721,6 +721,11 @@ impl Build {
         if self.config.profiler_enabled(target) {
             features.push_str(" profiler");
         }
+        // Generate memcpy, etc.  FIXME: Remove this once compiler-builtins
+        // automatically detects this target.
+        if target.contains("zkvm") {
+            features.push_str(" compiler-builtins-mem");
+        }
         features
     }
 
@@ -787,12 +792,16 @@ impl Build {
         self.stage_out(compiler, mode).join(&*target.triple).join(self.cargo_dir())
     }
 
-    /// Root output directory for LLVM compiled for `target`
+    /// Root output directory of LLVM for `target`
     ///
     /// Note that if LLVM is configured externally then the directory returned
     /// will likely be empty.
     fn llvm_out(&self, target: TargetSelection) -> PathBuf {
-        self.out.join(&*target.triple).join("llvm")
+        if self.config.llvm_from_ci && self.config.build == target {
+            self.config.ci_llvm_root()
+        } else {
+            self.out.join(&*target.triple).join("llvm")
+        }
     }
 
     fn lld_out(&self, target: TargetSelection) -> PathBuf {

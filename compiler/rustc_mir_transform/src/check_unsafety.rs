@@ -128,7 +128,9 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
                         ),
                     }
                 }
-                &AggregateKind::Closure(def_id, _) | &AggregateKind::Coroutine(def_id, _) => {
+                &AggregateKind::Closure(def_id, _)
+                | &AggregateKind::CoroutineClosure(def_id, _)
+                | &AggregateKind::Coroutine(def_id, _) => {
                     let def_id = def_id.expect_local();
                     let UnsafetyCheckResult { violations, used_unsafe_blocks, .. } =
                         self.tcx.mir_unsafety_check_result(def_id);
@@ -527,7 +529,7 @@ fn report_unused_unsafe(tcx: TyCtxt<'_>, kind: UnusedUnsafe, id: HirId) {
     } else {
         None
     };
-    tcx.emit_spanned_lint(UNUSED_UNSAFE, id, span, errors::UnusedUnsafe { span, nested_parent });
+    tcx.emit_node_span_lint(UNUSED_UNSAFE, id, span, errors::UnusedUnsafe { span, nested_parent });
 }
 
 pub fn check_unsafety(tcx: TyCtxt<'_>, def_id: LocalDefId) {
@@ -577,7 +579,7 @@ pub fn check_unsafety(tcx: TyCtxt<'_>, def_id: LocalDefId) {
                 });
             }
             UnsafetyViolationKind::UnsafeFn => {
-                tcx.emit_spanned_lint(
+                tcx.emit_node_span_lint(
                     UNSAFE_OP_IN_UNSAFE_FN,
                     lint_root,
                     source_info.span,

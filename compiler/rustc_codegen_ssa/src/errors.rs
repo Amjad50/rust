@@ -4,7 +4,7 @@ use crate::assert_module_sources::CguReuse;
 use crate::back::command::Command;
 use crate::fluent_generated as fluent;
 use rustc_errors::{
-    DiagCtxt, DiagnosticArgValue, DiagnosticBuilder, EmissionGuarantee, IntoDiagnostic,
+    codes::*, DiagCtxt, DiagnosticArgValue, DiagnosticBuilder, EmissionGuarantee, IntoDiagnostic,
     IntoDiagnosticArg, Level,
 };
 use rustc_macros::Diagnostic;
@@ -147,7 +147,7 @@ impl<'a> CopyPath<'a> {
 struct DebugArgPath<'a>(pub &'a Path);
 
 impl IntoDiagnosticArg for DebugArgPath<'_> {
-    fn into_diagnostic_arg(self) -> rustc_errors::DiagnosticArgValue<'static> {
+    fn into_diagnostic_arg(self) -> rustc_errors::DiagnosticArgValue {
         DiagnosticArgValue::Str(Cow::Owned(format!("{:?}", self.0)))
     }
 }
@@ -230,25 +230,25 @@ impl<G: EmissionGuarantee> IntoDiagnostic<'_, G> for ThorinErrorWrapper {
             thorin::Error::DecompressData(_) => build(fluent::codegen_ssa_thorin_decompress_data),
             thorin::Error::NamelessSection(_, offset) => {
                 build(fluent::codegen_ssa_thorin_section_without_name)
-                    .arg_mv("offset", format!("0x{offset:08x}"))
+                    .with_arg("offset", format!("0x{offset:08x}"))
             }
             thorin::Error::RelocationWithInvalidSymbol(section, offset) => {
                 build(fluent::codegen_ssa_thorin_relocation_with_invalid_symbol)
-                    .arg_mv("section", section)
-                    .arg_mv("offset", format!("0x{offset:08x}"))
+                    .with_arg("section", section)
+                    .with_arg("offset", format!("0x{offset:08x}"))
             }
             thorin::Error::MultipleRelocations(section, offset) => {
                 build(fluent::codegen_ssa_thorin_multiple_relocations)
-                    .arg_mv("section", section)
-                    .arg_mv("offset", format!("0x{offset:08x}"))
+                    .with_arg("section", section)
+                    .with_arg("offset", format!("0x{offset:08x}"))
             }
             thorin::Error::UnsupportedRelocation(section, offset) => {
                 build(fluent::codegen_ssa_thorin_unsupported_relocation)
-                    .arg_mv("section", section)
-                    .arg_mv("offset", format!("0x{offset:08x}"))
+                    .with_arg("section", section)
+                    .with_arg("offset", format!("0x{offset:08x}"))
             }
             thorin::Error::MissingDwoName(id) => build(fluent::codegen_ssa_thorin_missing_dwo_name)
-                .arg_mv("id", format!("0x{id:08x}")),
+                .with_arg("id", format!("0x{id:08x}")),
             thorin::Error::NoCompilationUnits => {
                 build(fluent::codegen_ssa_thorin_no_compilation_units)
             }
@@ -258,7 +258,7 @@ impl<G: EmissionGuarantee> IntoDiagnostic<'_, G> for ThorinErrorWrapper {
             }
             thorin::Error::MissingRequiredSection(section) => {
                 build(fluent::codegen_ssa_thorin_missing_required_section)
-                    .arg_mv("section", section)
+                    .with_arg("section", section)
             }
             thorin::Error::ParseUnitAbbreviations(_) => {
                 build(fluent::codegen_ssa_thorin_parse_unit_abbreviations)
@@ -272,31 +272,30 @@ impl<G: EmissionGuarantee> IntoDiagnostic<'_, G> for ThorinErrorWrapper {
             thorin::Error::ParseUnit(_) => build(fluent::codegen_ssa_thorin_parse_unit),
             thorin::Error::IncompatibleIndexVersion(section, format, actual) => {
                 build(fluent::codegen_ssa_thorin_incompatible_index_version)
-                    .arg_mv("section", section)
-                    .arg_mv("actual", actual)
-                    .arg_mv("format", format)
+                    .with_arg("section", section)
+                    .with_arg("actual", actual)
+                    .with_arg("format", format)
             }
             thorin::Error::OffsetAtIndex(_, index) => {
-                build(fluent::codegen_ssa_thorin_offset_at_index).arg_mv("index", index)
+                build(fluent::codegen_ssa_thorin_offset_at_index).with_arg("index", index)
             }
             thorin::Error::StrAtOffset(_, offset) => {
                 build(fluent::codegen_ssa_thorin_str_at_offset)
-                    .arg_mv("offset", format!("0x{offset:08x}"))
+                    .with_arg("offset", format!("0x{offset:08x}"))
             }
             thorin::Error::ParseIndex(_, section) => {
-                build(fluent::codegen_ssa_thorin_parse_index).arg_mv("section", section)
+                build(fluent::codegen_ssa_thorin_parse_index).with_arg("section", section)
             }
             thorin::Error::UnitNotInIndex(unit) => {
                 build(fluent::codegen_ssa_thorin_unit_not_in_index)
-                    .arg_mv("unit", format!("0x{unit:08x}"))
+                    .with_arg("unit", format!("0x{unit:08x}"))
             }
             thorin::Error::RowNotInIndex(_, row) => {
-                build(fluent::codegen_ssa_thorin_row_not_in_index).arg_mv("row", row)
+                build(fluent::codegen_ssa_thorin_row_not_in_index).with_arg("row", row)
             }
             thorin::Error::SectionNotInRow => build(fluent::codegen_ssa_thorin_section_not_in_row),
-            thorin::Error::EmptyUnit(unit) => {
-                build(fluent::codegen_ssa_thorin_empty_unit).arg_mv("unit", format!("0x{unit:08x}"))
-            }
+            thorin::Error::EmptyUnit(unit) => build(fluent::codegen_ssa_thorin_empty_unit)
+                .with_arg("unit", format!("0x{unit:08x}")),
             thorin::Error::MultipleDebugInfoSection => {
                 build(fluent::codegen_ssa_thorin_multiple_debug_info_section)
             }
@@ -305,10 +304,10 @@ impl<G: EmissionGuarantee> IntoDiagnostic<'_, G> for ThorinErrorWrapper {
             }
             thorin::Error::NotSplitUnit => build(fluent::codegen_ssa_thorin_not_split_unit),
             thorin::Error::DuplicateUnit(unit) => build(fluent::codegen_ssa_thorin_duplicate_unit)
-                .arg_mv("unit", format!("0x{unit:08x}")),
+                .with_arg("unit", format!("0x{unit:08x}")),
             thorin::Error::MissingReferencedUnit(unit) => {
                 build(fluent::codegen_ssa_thorin_missing_referenced_unit)
-                    .arg_mv("unit", format!("0x{unit:08x}"))
+                    .with_arg("unit", format!("0x{unit:08x}"))
             }
             thorin::Error::NoOutputObjectCreated => {
                 build(fluent::codegen_ssa_thorin_not_output_object_created)
@@ -317,19 +316,19 @@ impl<G: EmissionGuarantee> IntoDiagnostic<'_, G> for ThorinErrorWrapper {
                 build(fluent::codegen_ssa_thorin_mixed_input_encodings)
             }
             thorin::Error::Io(e) => {
-                build(fluent::codegen_ssa_thorin_io).arg_mv("error", format!("{e}"))
+                build(fluent::codegen_ssa_thorin_io).with_arg("error", format!("{e}"))
             }
             thorin::Error::ObjectRead(e) => {
-                build(fluent::codegen_ssa_thorin_object_read).arg_mv("error", format!("{e}"))
+                build(fluent::codegen_ssa_thorin_object_read).with_arg("error", format!("{e}"))
             }
             thorin::Error::ObjectWrite(e) => {
-                build(fluent::codegen_ssa_thorin_object_write).arg_mv("error", format!("{e}"))
+                build(fluent::codegen_ssa_thorin_object_write).with_arg("error", format!("{e}"))
             }
             thorin::Error::GimliRead(e) => {
-                build(fluent::codegen_ssa_thorin_gimli_read).arg_mv("error", format!("{e}"))
+                build(fluent::codegen_ssa_thorin_gimli_read).with_arg("error", format!("{e}"))
             }
             thorin::Error::GimliWrite(e) => {
-                build(fluent::codegen_ssa_thorin_gimli_write).arg_mv("error", format!("{e}"))
+                build(fluent::codegen_ssa_thorin_gimli_write).with_arg("error", format!("{e}"))
             }
             _ => unimplemented!("Untranslated thorin error"),
         }
@@ -613,7 +612,7 @@ pub struct UnknownAtomicOperation;
 
 #[derive(Diagnostic)]
 pub enum InvalidMonomorphization<'tcx> {
-    #[diag(codegen_ssa_invalid_monomorphization_basic_integer_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_basic_integer_type, code = E0511)]
     BasicIntegerType {
         #[primary_span]
         span: Span,
@@ -621,7 +620,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_basic_float_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_basic_float_type, code = E0511)]
     BasicFloatType {
         #[primary_span]
         span: Span,
@@ -629,14 +628,14 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_float_to_int_unchecked, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_float_to_int_unchecked, code = E0511)]
     FloatToIntUnchecked {
         #[primary_span]
         span: Span,
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_floating_point_vector, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_floating_point_vector, code = E0511)]
     FloatingPointVector {
         #[primary_span]
         span: Span,
@@ -645,7 +644,7 @@ pub enum InvalidMonomorphization<'tcx> {
         in_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_floating_point_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_floating_point_type, code = E0511)]
     FloatingPointType {
         #[primary_span]
         span: Span,
@@ -653,14 +652,14 @@ pub enum InvalidMonomorphization<'tcx> {
         in_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_unrecognized_intrinsic, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_unrecognized_intrinsic, code = E0511)]
     UnrecognizedIntrinsic {
         #[primary_span]
         span: Span,
         name: Symbol,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_argument, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_argument, code = E0511)]
     SimdArgument {
         #[primary_span]
         span: Span,
@@ -668,7 +667,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_input, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_input, code = E0511)]
     SimdInput {
         #[primary_span]
         span: Span,
@@ -676,7 +675,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_first, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_first, code = E0511)]
     SimdFirst {
         #[primary_span]
         span: Span,
@@ -684,7 +683,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_second, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_second, code = E0511)]
     SimdSecond {
         #[primary_span]
         span: Span,
@@ -692,7 +691,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_third, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_third, code = E0511)]
     SimdThird {
         #[primary_span]
         span: Span,
@@ -700,7 +699,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_return, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_return, code = E0511)]
     SimdReturn {
         #[primary_span]
         span: Span,
@@ -708,7 +707,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_invalid_bitmask, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_invalid_bitmask, code = E0511)]
     InvalidBitmask {
         #[primary_span]
         span: Span,
@@ -718,7 +717,7 @@ pub enum InvalidMonomorphization<'tcx> {
         expected_bytes: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_return_length_input_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_return_length_input_type, code = E0511)]
     ReturnLengthInputType {
         #[primary_span]
         span: Span,
@@ -729,7 +728,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_len: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_second_argument_length, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_second_argument_length, code = E0511)]
     SecondArgumentLength {
         #[primary_span]
         span: Span,
@@ -740,7 +739,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_len: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_third_argument_length, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_third_argument_length, code = E0511)]
     ThirdArgumentLength {
         #[primary_span]
         span: Span,
@@ -751,7 +750,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_len: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_return_integer_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_return_integer_type, code = E0511)]
     ReturnIntegerType {
         #[primary_span]
         span: Span,
@@ -760,7 +759,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_simd_shuffle, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_simd_shuffle, code = E0511)]
     SimdShuffle {
         #[primary_span]
         span: Span,
@@ -768,7 +767,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_return_length, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_return_length, code = E0511)]
     ReturnLength {
         #[primary_span]
         span: Span,
@@ -778,7 +777,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_len: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_return_element, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_return_element, code = E0511)]
     ReturnElement {
         #[primary_span]
         span: Span,
@@ -789,7 +788,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_shuffle_index_not_constant, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_shuffle_index_not_constant, code = E0511)]
     ShuffleIndexNotConstant {
         #[primary_span]
         span: Span,
@@ -797,7 +796,7 @@ pub enum InvalidMonomorphization<'tcx> {
         arg_idx: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_shuffle_index_out_of_bounds, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_shuffle_index_out_of_bounds, code = E0511)]
     ShuffleIndexOutOfBounds {
         #[primary_span]
         span: Span,
@@ -806,7 +805,7 @@ pub enum InvalidMonomorphization<'tcx> {
         total_len: u128,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_inserted_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_inserted_type, code = E0511)]
     InsertedType {
         #[primary_span]
         span: Span,
@@ -816,7 +815,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_return_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_return_type, code = E0511)]
     ReturnType {
         #[primary_span]
         span: Span,
@@ -826,7 +825,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ret_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_expected_return_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_expected_return_type, code = E0511)]
     ExpectedReturnType {
         #[primary_span]
         span: Span,
@@ -835,7 +834,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ret_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_mismatched_lengths, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_mismatched_lengths, code = E0511)]
     MismatchedLengths {
         #[primary_span]
         span: Span,
@@ -844,7 +843,7 @@ pub enum InvalidMonomorphization<'tcx> {
         v_len: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_mask_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_mask_type, code = E0511)]
     MaskType {
         #[primary_span]
         span: Span,
@@ -852,7 +851,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_vector_argument, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_vector_argument, code = E0511)]
     VectorArgument {
         #[primary_span]
         span: Span,
@@ -861,7 +860,7 @@ pub enum InvalidMonomorphization<'tcx> {
         in_elem: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_cannot_return, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_cannot_return, code = E0511)]
     CannotReturn {
         #[primary_span]
         span: Span,
@@ -871,7 +870,7 @@ pub enum InvalidMonomorphization<'tcx> {
         expected_bytes: u64,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_expected_element_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_expected_element_type, code = E0511)]
     ExpectedElementType {
         #[primary_span]
         span: Span,
@@ -883,7 +882,7 @@ pub enum InvalidMonomorphization<'tcx> {
         mutability: ExpectedPointerMutability,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_third_arg_element_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_third_arg_element_type, code = E0511)]
     ThirdArgElementType {
         #[primary_span]
         span: Span,
@@ -892,7 +891,7 @@ pub enum InvalidMonomorphization<'tcx> {
         third_arg: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_unsupported_symbol_of_size, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_unsupported_symbol_of_size, code = E0511)]
     UnsupportedSymbolOfSize {
         #[primary_span]
         span: Span,
@@ -904,7 +903,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ret_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_unsupported_symbol, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_unsupported_symbol, code = E0511)]
     UnsupportedSymbol {
         #[primary_span]
         span: Span,
@@ -915,7 +914,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ret_ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_cast_fat_pointer, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_cast_fat_pointer, code = E0511)]
     CastFatPointer {
         #[primary_span]
         span: Span,
@@ -923,7 +922,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_expected_pointer, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_expected_pointer, code = E0511)]
     ExpectedPointer {
         #[primary_span]
         span: Span,
@@ -931,7 +930,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_expected_usize, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_expected_usize, code = E0511)]
     ExpectedUsize {
         #[primary_span]
         span: Span,
@@ -939,7 +938,7 @@ pub enum InvalidMonomorphization<'tcx> {
         ty: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_unsupported_cast, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_unsupported_cast, code = E0511)]
     UnsupportedCast {
         #[primary_span]
         span: Span,
@@ -950,7 +949,7 @@ pub enum InvalidMonomorphization<'tcx> {
         out_elem: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_unsupported_operation, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_unsupported_operation, code = E0511)]
     UnsupportedOperation {
         #[primary_span]
         span: Span,
@@ -959,7 +958,7 @@ pub enum InvalidMonomorphization<'tcx> {
         in_elem: Ty<'tcx>,
     },
 
-    #[diag(codegen_ssa_invalid_monomorphization_expected_vector_element_type, code = "E0511")]
+    #[diag(codegen_ssa_invalid_monomorphization_expected_vector_element_type, code = E0511)]
     ExpectedVectorElementType {
         #[primary_span]
         span: Span,
@@ -975,7 +974,7 @@ pub enum ExpectedPointerMutability {
 }
 
 impl IntoDiagnosticArg for ExpectedPointerMutability {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
+    fn into_diagnostic_arg(self) -> DiagnosticArgValue {
         match self {
             ExpectedPointerMutability::Mut => DiagnosticArgValue::Str(Cow::Borrowed("*mut")),
             ExpectedPointerMutability::Not => DiagnosticArgValue::Str(Cow::Borrowed("*_")),

@@ -327,7 +327,6 @@ impl<'tcx> InferCtxt<'tcx> {
     #[instrument(level = "debug", skip(self))]
     pub fn register_member_constraints(
         &self,
-        param_env: ty::ParamEnv<'tcx>,
         opaque_type_key: OpaqueTypeKey<'tcx>,
         concrete_ty: Ty<'tcx>,
         span: Span,
@@ -454,6 +453,17 @@ where
                     upvar.visit_with(self);
                 }
                 args.as_closure().sig_as_fn_ptr_ty().visit_with(self);
+            }
+
+            ty::CoroutineClosure(_, args) => {
+                // Skip lifetime parameters of the enclosing item(s)
+
+                for upvar in args.as_coroutine_closure().upvar_tys() {
+                    upvar.visit_with(self);
+                }
+
+                // FIXME(async_closures): Is this the right signature to visit here?
+                args.as_coroutine_closure().signature_parts_ty().visit_with(self);
             }
 
             ty::Coroutine(_, args) => {
@@ -631,13 +641,6 @@ impl<'tcx> InferCtxt<'tcx> {
                 ct_op: |ct| ct,
             });
 
-            if let ty::ClauseKind::Projection(projection) = predicate.kind().skip_binder() {
-                if projection.term.references_error() {
-                    // No point on adding any obligations since there's a type error involved.
-                    obligations.clear();
-                    return;
-                }
-            }
             // Require that the predicate holds for the concrete type.
             debug!(?predicate);
             obligations.push(traits::Obligation::new(
@@ -683,7 +686,7 @@ fn may_define_opaque_type(tcx: TyCtxt<'_>, def_id: LocalDefId, opaque_hir_id: hi
     let res = hir_id == scope;
     trace!(
         "may_define_opaque_type(def={:?}, opaque_node={:?}) = {}",
-        tcx.opt_hir_node(hir_id),
+        tcx.hir_node(hir_id),
         tcx.hir_node(opaque_hir_id),
         res
     );

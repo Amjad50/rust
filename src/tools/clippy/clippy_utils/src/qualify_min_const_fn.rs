@@ -174,7 +174,7 @@ fn check_rvalue<'tcx>(
                 ))
             }
         },
-        Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_), _) | Rvalue::ShallowInitBox(_, _) => {
+        Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_) | NullOp::DebugAssertions, _) | Rvalue::ShallowInitBox(_, _) => {
             Ok(())
         },
         Rvalue::UnaryOp(_, operand) => {
@@ -345,7 +345,7 @@ fn check_terminator<'tcx>(
                 check_operand(tcx, func, span, body)?;
 
                 for arg in args {
-                    check_operand(tcx, arg, span, body)?;
+                    check_operand(tcx, &arg.node, span, body)?;
                 }
                 Ok(())
             } else {

@@ -14,7 +14,9 @@ use crate::ty::{AdtDef, InstanceDef, UserTypeAnnotationIndex};
 use crate::ty::{GenericArg, GenericArgsRef};
 
 use rustc_data_structures::captures::Captures;
-use rustc_errors::{DiagnosticArgValue, DiagnosticMessage, ErrorGuaranteed, IntoDiagnosticArg};
+use rustc_errors::{
+    DiagnosticArgName, DiagnosticArgValue, DiagnosticMessage, ErrorGuaranteed, IntoDiagnosticArg,
+};
 use rustc_hir::def::{CtorKind, Namespace};
 use rustc_hir::def_id::{DefId, CRATE_DEF_ID};
 use rustc_hir::{self, CoroutineDesugaring, CoroutineKind, ImplicitSelfKind};
@@ -138,8 +140,12 @@ fn to_profiler_name(type_name: &'static str) -> &'static str {
 /// loop that goes over each available MIR and applies `run_pass`.
 pub trait MirPass<'tcx> {
     fn name(&self) -> &'static str {
-        let name = std::any::type_name::<Self>();
-        if let Some((_, tail)) = name.rsplit_once(':') { tail } else { name }
+        // FIXME Simplify the implementation once more `str` methods get const-stable.
+        // See copypaste in `MirLint`
+        const {
+            let name = std::any::type_name::<Self>();
+            crate::util::common::c_name(name)
+        }
     }
 
     fn profiler_name(&self) -> &'static str {
@@ -244,18 +250,42 @@ impl<'tcx> MirSource<'tcx> {
     }
 }
 
+/// Additional information carried by a MIR body when it is lowered from a coroutine.
+/// This information is modified as it is lowered during the `StateTransform` MIR pass,
+/// so not all fields will be active at a given time. For example, the `yield_ty` is
+/// taken out of the field after yields are turned into returns, and the `coroutine_drop`
+/// body is only populated after the state transform pass.
 #[derive(Clone, TyEncodable, TyDecodable, Debug, HashStable, TypeFoldable, TypeVisitable)]
 pub struct CoroutineInfo<'tcx> {
-    /// The yield type of the function, if it is a coroutine.
+    /// The yield type of the function. This field is removed after the state transform pass.
     pub yield_ty: Option<Ty<'tcx>>,
 
-    /// The resume type of the function, if it is a coroutine.
+    /// The resume type of the function. This field is removed after the state transform pass.
     pub resume_ty: Option<Ty<'tcx>>,
 
-    /// Coroutine drop glue.
+    /// Coroutine drop glue. This field is populated after the state transform pass.
     pub coroutine_drop: Option<Body<'tcx>>,
 
-    /// The layout of a coroutine. Produced by the state transformation.
+    /// The body of the coroutine, modified to take its upvars by move rather than by ref.
+    ///
+    /// This is used by coroutine-closures, which must return a different flavor of coroutine
+    /// when called using `AsyncFnOnce::call_once`. It is produced by the `ByMoveBody` pass which
+    /// is run right after building the initial MIR, and will only be populated for coroutines
+    /// which come out of the async closure desugaring.
+    ///
+    /// This body should be processed in lockstep with the containing body -- any optimization
+    /// passes, etc, should be applied to this body as well. This is done automatically if
+    /// using `run_passes`.
+    pub by_move_body: Option<Body<'tcx>>,
+
+    /// The body of the coroutine, modified to take its upvars by mutable ref rather than by
+    /// immutable ref.
+    ///
+    /// FIXME(async_closures): This is literally the same body as the parent body. Find a better
+    /// way to represent the by-mut signature (or cap the closure-kind of the coroutine).
+    pub by_mut_body: Option<Body<'tcx>>,
+
+    /// The layout of a coroutine. This field is populated after the state transform pass.
     pub coroutine_layout: Option<CoroutineLayout<'tcx>>,
 
     /// If this is a coroutine then record the type of source expression that caused this coroutine
@@ -274,6 +304,8 @@ impl<'tcx> CoroutineInfo<'tcx> {
             coroutine_kind,
             yield_ty: Some(yield_ty),
             resume_ty: Some(resume_ty),
+            by_move_body: None,
+            by_mut_body: None,
             coroutine_drop: None,
             coroutine_layout: None,
         }
@@ -303,6 +335,12 @@ pub struct Body<'tcx> {
     /// and used for debuginfo. Indexed by a `SourceScope`.
     pub source_scopes: IndexVec<SourceScope, SourceScopeData<'tcx>>,
 
+    /// Additional information carried by a MIR body when it is lowered from a coroutine.
+    ///
+    /// Note that the coroutine drop shim, any promoted consts, and other synthetic MIR
+    /// bodies that come from processing a coroutine body are not typically coroutines
+    /// themselves, and should probably set this to `None` to avoid carrying redundant
+    /// information.
     pub coroutine: Option<Box<CoroutineInfo<'tcx>>>,
 
     /// Declarations of locals.
@@ -576,6 +614,14 @@ impl<'tcx> Body<'tcx> {
     #[inline]
     pub fn coroutine_drop(&self) -> Option<&Body<'tcx>> {
         self.coroutine.as_ref().and_then(|coroutine| coroutine.coroutine_drop.as_ref())
+    }
+
+    pub fn coroutine_by_move_body(&self) -> Option<&Body<'tcx>> {
+        self.coroutine.as_ref()?.by_move_body.as_ref()
+    }
+
+    pub fn coroutine_by_mut_body(&self) -> Option<&Body<'tcx>> {
+        self.coroutine.as_ref()?.by_mut_body.as_ref()
     }
 
     #[inline]
@@ -1316,6 +1362,7 @@ impl<'tcx> BasicBlockData<'tcx> {
     }
 
     /// Does the block have no statements and an unreachable terminator?
+    #[inline]
     pub fn is_empty_unreachable(&self) -> bool {
         self.statements.is_empty() && matches!(self.terminator().kind, TerminatorKind::Unreachable)
     }

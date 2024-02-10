@@ -1,5 +1,3 @@
-#![deny(rustc::untranslatable_diagnostic)]
-#![deny(rustc::diagnostic_outside_of_impl)]
 //! Error reporting machinery for lifetime errors.
 
 use rustc_data_structures::fx::FxIndexSet;
@@ -27,7 +25,7 @@ use rustc_middle::ty::TypeVisitor;
 use rustc_middle::ty::{self, RegionVid, Ty};
 use rustc_middle::ty::{Region, TyCtxt};
 use rustc_span::symbol::{kw, Ident};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::Span;
 
 use crate::borrowck_errors;
 use crate::session_diagnostics::{
@@ -84,7 +82,7 @@ impl<'tcx> RegionErrors<'tcx> {
     #[track_caller]
     pub fn push(&mut self, val: impl Into<RegionErrorKind<'tcx>>) {
         let val = val.into();
-        self.1.sess.dcx().span_delayed_bug(DUMMY_SP, format!("{val:?}"));
+        self.1.sess.dcx().delayed_bug(format!("{val:?}"));
         self.0.push(val);
     }
     pub fn is_empty(&self) -> bool {
@@ -216,7 +214,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 if let Some(id) = placeholder.bound.kind.get_id()
                     && let Some(placeholder_id) = id.as_local()
                     && let gat_hir_id = self.infcx.tcx.local_def_id_to_hir_id(placeholder_id)
-                    && let Some(generics_impl) = hir.get_parent(gat_hir_id).generics()
+                    && let Some(generics_impl) =
+                        hir.get_parent(hir.parent_id(gat_hir_id)).generics()
                 {
                     Some((gat_hir_id, generics_impl))
                 } else {

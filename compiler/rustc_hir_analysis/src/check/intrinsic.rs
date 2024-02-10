@@ -8,7 +8,7 @@ use crate::errors::{
 };
 
 use hir::def_id::DefId;
-use rustc_errors::{struct_span_err, DiagnosticMessage};
+use rustc_errors::{codes::*, struct_span_code_err, DiagnosticMessage};
 use rustc_hir as hir;
 use rustc_middle::traits::{ObligationCause, ObligationCauseCode};
 use rustc_middle::ty::{self, Ty, TyCtxt};
@@ -29,8 +29,8 @@ fn equate_intrinsic_type<'tcx>(
             (own_counts, generics.span)
         }
         _ => {
-            struct_span_err!(tcx.dcx(), it.span, E0622, "intrinsic must be a function")
-                .span_label_mv(it.span, "expected a function")
+            struct_span_code_err!(tcx.dcx(), it.span, E0622, "intrinsic must be a function")
+                .with_span_label(it.span, "expected a function")
                 .emit();
             return;
         }
@@ -112,7 +112,8 @@ pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: DefId) -> hir
         | sym::forget
         | sym::black_box
         | sym::variant_count
-        | sym::ptr_mask => hir::Unsafety::Normal,
+        | sym::ptr_mask
+        | sym::debug_assertions => hir::Unsafety::Normal,
         _ => hir::Unsafety::Unsafe,
     };
 
@@ -453,11 +454,15 @@ pub fn check_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>) {
 
             sym::black_box => (1, vec![param(0)], param(0)),
 
+            sym::is_val_statically_known => (1, vec![param(0)], tcx.types.bool),
+
             sym::const_eval_select => (4, vec![param(0), param(1), param(2)], param(3)),
 
             sym::vtable_size | sym::vtable_align => {
                 (0, vec![Ty::new_imm_ptr(tcx, Ty::new_unit(tcx))], tcx.types.usize)
             }
+
+            sym::debug_assertions => (0, Vec::new(), tcx.types.bool),
 
             other => {
                 tcx.dcx().emit_err(UnrecognizedIntrinsicFunction { span: it.span, name: other });
@@ -552,7 +557,7 @@ pub fn check_platform_intrinsic_type(tcx: TyCtxt<'_>, it: &hir::ForeignItem<'_>)
         sym::simd_shuffle_generic => (2, 1, vec![param(0), param(0)], param(1)),
         _ => {
             let msg = format!("unrecognized platform-specific intrinsic function: `{name}`");
-            tcx.dcx().struct_span_err(it.span, msg).emit();
+            tcx.dcx().span_err(it.span, msg);
             return;
         }
     };

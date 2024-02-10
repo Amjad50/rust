@@ -2,12 +2,11 @@
 
 #![warn(rust_2018_idioms, unused_lifetimes)]
 
-mod input;
 mod change;
+mod input;
 
 use std::panic;
 
-use rustc_hash::FxHashSet;
 use syntax::{ast, Parse, SourceFile};
 use triomphe::Arc;
 
@@ -44,12 +43,13 @@ pub trait Upcast<T: ?Sized> {
 }
 
 pub const DEFAULT_PARSE_LRU_CAP: usize = 128;
+pub const DEFAULT_BORROWCK_LRU_CAP: usize = 256;
 
 pub trait FileLoader {
     /// Text of the file.
     fn file_text(&self, file_id: FileId) -> Arc<str>;
     fn resolve_path(&self, path: AnchoredPath<'_>) -> Option<FileId>;
-    fn relevant_crates(&self, file_id: FileId) -> Arc<FxHashSet<CrateId>>;
+    fn relevant_crates(&self, file_id: FileId) -> Arc<[CrateId]>;
 }
 
 /// Database which stores all significant input facts: source code and project
@@ -65,7 +65,7 @@ pub trait SourceDatabase: FileLoader + std::fmt::Debug {
 }
 
 fn parse(db: &dyn SourceDatabase, file_id: FileId) -> Parse<ast::SourceFile> {
-    let _p = profile::span("parse_query").detail(|| format!("{file_id:?}"));
+    let _p = tracing::span!(tracing::Level::INFO, "parse_query", ?file_id).entered();
     let text = db.file_text(file_id);
     SourceFile::parse(&text)
 }
@@ -84,19 +84,21 @@ pub trait SourceDatabaseExt: SourceDatabase {
     #[salsa::input]
     fn source_root(&self, id: SourceRootId) -> Arc<SourceRoot>;
 
-    fn source_root_crates(&self, id: SourceRootId) -> Arc<FxHashSet<CrateId>>;
+    fn source_root_crates(&self, id: SourceRootId) -> Arc<[CrateId]>;
 }
 
-fn source_root_crates(db: &dyn SourceDatabaseExt, id: SourceRootId) -> Arc<FxHashSet<CrateId>> {
+fn source_root_crates(db: &dyn SourceDatabaseExt, id: SourceRootId) -> Arc<[CrateId]> {
     let graph = db.crate_graph();
-    let res = graph
+    let mut crates = graph
         .iter()
         .filter(|&krate| {
             let root_file = graph[krate].root_file_id;
             db.file_source_root(root_file) == id
         })
-        .collect();
-    Arc::new(res)
+        .collect::<Vec<_>>();
+    crates.sort();
+    crates.dedup();
+    crates.into_iter().collect()
 }
 
 /// Silly workaround for cyclic deps between the traits
@@ -113,8 +115,8 @@ impl<T: SourceDatabaseExt> FileLoader for FileLoaderDelegate<&'_ T> {
         source_root.resolve_path(path)
     }
 
-    fn relevant_crates(&self, file_id: FileId) -> Arc<FxHashSet<CrateId>> {
-        let _p = profile::span("relevant_crates");
+    fn relevant_crates(&self, file_id: FileId) -> Arc<[CrateId]> {
+        let _p = tracing::span!(tracing::Level::INFO, "relevant_crates").entered();
         let source_root = self.0.file_source_root(file_id);
         self.0.source_root_crates(source_root)
     }

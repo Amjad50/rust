@@ -639,6 +639,7 @@ impl Rvalue {
             Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(..), _) => {
                 Ok(Ty::usize_ty())
             }
+            Rvalue::NullaryOp(NullOp::DebugAssertions, _) => Ok(Ty::bool_ty()),
             Rvalue::Aggregate(ak, ops) => match *ak {
                 AggregateKind::Array(ty) => Ty::try_new_array(ty, ops.len() as u64),
                 AggregateKind::Tuple => Ok(Ty::new_tuple(
@@ -963,7 +964,7 @@ pub enum PointerCoercion {
     /// Go from a safe fn pointer to an unsafe fn pointer.
     UnsafeFnPointer,
 
-    /// Go from a non-capturing closure to an fn pointer or an unsafe fn pointer.
+    /// Go from a non-capturing closure to a fn pointer or an unsafe fn pointer.
     /// It cannot convert a closure that requires unsafe.
     ClosureFnPointer(Safety),
 
@@ -1005,6 +1006,8 @@ pub enum NullOp {
     AlignOf,
     /// Returns the offset of a field.
     OffsetOf(Vec<(VariantIdx, FieldIdx)>),
+    /// cfg!(debug_assertions), but at codegen time
+    DebugAssertions,
 }
 
 impl Operand {
@@ -1037,21 +1040,24 @@ impl Place {
     /// locals from the function body where this place originates from.
     pub fn ty(&self, locals: &[LocalDecl]) -> Result<Ty, Error> {
         let start_ty = locals[self.local].ty;
-        self.projection.iter().fold(Ok(start_ty), |place_ty, elem| {
-            let ty = place_ty?;
-            match elem {
-                ProjectionElem::Deref => Self::deref_ty(ty),
-                ProjectionElem::Field(_idx, fty) => Ok(*fty),
-                ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => {
-                    Self::index_ty(ty)
-                }
-                ProjectionElem::Subslice { from, to, from_end } => {
-                    Self::subslice_ty(ty, from, to, from_end)
-                }
-                ProjectionElem::Downcast(_) => Ok(ty),
-                ProjectionElem::OpaqueCast(ty) | ProjectionElem::Subtype(ty) => Ok(*ty),
+        self.projection.iter().fold(Ok(start_ty), |place_ty, elem| elem.ty(place_ty?))
+    }
+}
+
+impl ProjectionElem {
+    /// Get the expected type after applying this projection to a given place type.
+    pub fn ty(&self, place_ty: Ty) -> Result<Ty, Error> {
+        let ty = place_ty;
+        match &self {
+            ProjectionElem::Deref => Self::deref_ty(ty),
+            ProjectionElem::Field(_idx, fty) => Ok(*fty),
+            ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => Self::index_ty(ty),
+            ProjectionElem::Subslice { from, to, from_end } => {
+                Self::subslice_ty(ty, from, to, from_end)
             }
-        })
+            ProjectionElem::Downcast(_) => Ok(ty),
+            ProjectionElem::OpaqueCast(ty) | ProjectionElem::Subtype(ty) => Ok(*ty),
+        }
     }
 
     fn index_ty(ty: Ty) -> Result<Ty, Error> {

@@ -131,8 +131,10 @@
 #![feature(const_fmt_arguments_new)]
 #![feature(const_hash)]
 #![feature(const_heap)]
+#![feature(const_hint_assert_unchecked)]
 #![feature(const_index_range_slice_index)]
 #![feature(const_int_unchecked_arith)]
+#![feature(const_intrinsic_copy)]
 #![feature(const_intrinsic_forget)]
 #![feature(const_ipv4)]
 #![feature(const_ipv6)]
@@ -160,6 +162,7 @@
 #![feature(const_slice_ptr_len)]
 #![feature(const_slice_split_at_mut)]
 #![feature(const_str_from_utf8_unchecked_mut)]
+#![feature(const_strict_overflow_ops)]
 #![feature(const_swap)]
 #![feature(const_try)]
 #![feature(const_type_id)]
@@ -176,14 +179,15 @@
 #![feature(isqrt)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(non_null_convenience)]
-#![feature(offset_of)]
 #![feature(offset_of_enum)]
+#![feature(offset_of_nested)]
 #![feature(panic_internals)]
 #![feature(ptr_alignment_type)]
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
 #![feature(slice_ptr_get)]
 #![feature(slice_split_at_unchecked)]
+#![feature(split_at_checked)]
 #![feature(str_internals)]
 #![feature(str_split_inclusive_remainder)]
 #![feature(str_split_remainder)]
@@ -425,10 +429,6 @@ pub mod primitive;
     deprecated_in_future
 )]
 #[allow(rustdoc::bare_urls)]
-// FIXME: This annotation should be moved into rust-lang/stdarch after clashing_extern_declarations is
-// merged. It currently cannot because bootstrap fails as the lint hasn't been defined yet.
-#[allow(clashing_extern_declarations)]
-#[unstable(feature = "stdsimd", issue = "48556")]
 mod core_arch;
 
 #[stable(feature = "simd_arch", since = "1.27.0")]

@@ -99,7 +99,7 @@ fn check_rust_syntax(
     // All points of divergence have been handled earlier so this can be
     // done the same way whether the span is precise or not.
     let hir_id = cx.tcx.local_def_id_to_hir_id(local_id);
-    cx.tcx.struct_span_lint_hir(crate::lint::INVALID_RUST_CODEBLOCKS, hir_id, sp, msg, |lint| {
+    cx.tcx.node_span_lint(crate::lint::INVALID_RUST_CODEBLOCKS, hir_id, sp, msg, |lint| {
         let explanation = if is_ignore {
             "`ignore` code blocks require valid Rust code for syntax highlighting; \
                     mark blocks that do not contain Rust code as text"
@@ -156,7 +156,7 @@ impl Translate for BufferEmitter {
 }
 
 impl Emitter for BufferEmitter {
-    fn emit_diagnostic(&mut self, diag: &Diagnostic) {
+    fn emit_diagnostic(&mut self, diag: Diagnostic) {
         let mut buffer = self.buffer.borrow_mut();
 
         let fluent_args = to_fluent_args(diag.args());

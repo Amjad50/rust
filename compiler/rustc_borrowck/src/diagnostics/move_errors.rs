@@ -1,3 +1,6 @@
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
+
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty};
@@ -288,7 +291,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         &mut self,
         place: Place<'tcx>,
         span: Span,
-    ) -> DiagnosticBuilder<'a> {
+    ) -> DiagnosticBuilder<'tcx> {
         let description = if place.projection.len() == 1 {
             format!("static item {}", self.describe_any_place(place.as_ref()))
         } else {
@@ -310,7 +313,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         deref_target_place: Place<'tcx>,
         span: Span,
         use_spans: Option<UseSpans<'tcx>>,
-    ) -> DiagnosticBuilder<'a> {
+    ) -> DiagnosticBuilder<'tcx> {
         // Inspect the type of the content behind the
         // borrow to provide feedback about why this
         // was a move rather than a copy.
@@ -334,9 +337,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                         span,
                         &format!("`{}` in pattern guard", self.local_names[local].unwrap()),
                     )
-                    .note_mv(
+                    .with_note(
                         "variables bound in patterns cannot be moved from \
-                     until after the end of the pattern guard",
+                         until after the end of the pattern guard",
                     );
             } else if decl.is_ref_to_static() {
                 return self.report_cannot_move_from_static(move_place, span);
@@ -382,8 +385,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 );
 
                 self.cannot_move_out_of(span, &place_description)
-                    .span_label_mv(upvar_span, "captured outer variable")
-                    .span_label_mv(
+                    .with_span_label(upvar_span, "captured outer variable")
+                    .with_span_label(
                         self.infcx.tcx.def_span(def_id),
                         format!("captured by this `{closure_kind}` closure"),
                     )

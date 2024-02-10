@@ -9,8 +9,10 @@ use rustc_middle::ty::{self, ImplTraitInTraitData, IsSuggestable, Ty, TyCtxt, Ty
 use rustc_span::symbol::Ident;
 use rustc_span::{Span, DUMMY_SP};
 
+use crate::errors::TypeofReservedKeywordUsed;
+
+use super::bad_placeholder;
 use super::ItemCtxt;
-use super::{bad_placeholder, is_suggestable_infer_ty};
 pub use opaque::test_opaque_hidden_types;
 
 mod opaque;
@@ -39,8 +41,18 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
         {
             return tcx.types.usize;
         }
-        Node::Ty(&hir::Ty { kind: TyKind::Typeof(ref e), .. }) if e.hir_id == hir_id => {
-            return tcx.typeck(def_id).node_type(e.hir_id);
+        Node::Ty(&hir::Ty { kind: TyKind::Typeof(ref e), span, .. }) if e.hir_id == hir_id => {
+            let ty = tcx.typeck(def_id).node_type(e.hir_id);
+            let ty = tcx.fold_regions(ty, |r, _| {
+                if r.is_erased() { ty::Region::new_error_misc(tcx) } else { r }
+            });
+            let (ty, opt_sugg) = if let Some(ty) = ty.make_suggestable(tcx, false) {
+                (ty, Some((span, Applicability::MachineApplicable)))
+            } else {
+                (ty, None)
+            };
+            tcx.dcx().emit_err(TypeofReservedKeywordUsed { span, ty, opt_sugg });
+            return ty;
         }
         Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
         | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
@@ -368,7 +380,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
             }
             TraitItemKind::Const(ty, body_id) => body_id
                 .and_then(|body_id| {
-                    is_suggestable_infer_ty(ty).then(|| {
+                    ty.is_suggestable_infer_ty().then(|| {
                         infer_placeholder_type(
                             tcx,
                             def_id,
@@ -392,7 +404,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                 Ty::new_fn_def(tcx, def_id.to_def_id(), args)
             }
             ImplItemKind::Const(ty, body_id) => {
-                if is_suggestable_infer_ty(ty) {
+                if ty.is_suggestable_infer_ty() {
                     infer_placeholder_type(
                         tcx,
                         def_id,
@@ -416,7 +428,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
 
         Node::Item(item) => match item.kind {
             ItemKind::Static(ty, .., body_id) => {
-                if is_suggestable_infer_ty(ty) {
+                if ty.is_suggestable_infer_ty() {
                     infer_placeholder_type(
                         tcx,
                         def_id,
@@ -430,7 +442,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
                 }
             }
             ItemKind::Const(ty, _, body_id) => {
-                if is_suggestable_infer_ty(ty) {
+                if ty.is_suggestable_infer_ty() {
                     infer_placeholder_type(tcx, def_id, body_id, ty.span, item.ident, "constant")
                 } else {
                     icx.to_ty(ty)
@@ -509,11 +521,17 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<Ty
             x => bug!("unexpected non-type Node::GenericParam: {:?}", x),
         },
 
+        Node::ArrayLenInfer(_) => tcx.types.usize,
+
         x => {
             bug!("unexpected sort of node in type_of(): {:?}", x);
         }
     };
-    ty::EarlyBinder::bind(output)
+    if let Err(e) = icx.check_tainted_by_errors() {
+        ty::EarlyBinder::bind(Ty::new_error(tcx, e))
+    } else {
+        ty::EarlyBinder::bind(output)
+    }
 }
 
 pub(super) fn type_of_opaque(
@@ -526,9 +544,13 @@ pub(super) fn type_of_opaque(
         Ok(ty::EarlyBinder::bind(match tcx.hir_node_by_def_id(def_id) {
             Node::Item(item) => match item.kind {
                 ItemKind::OpaqueTy(OpaqueTy {
-                    origin: hir::OpaqueTyOrigin::TyAlias { .. },
+                    origin: hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: false },
                     ..
                 }) => opaque::find_opaque_ty_constraints_for_tait(tcx, def_id),
+                ItemKind::OpaqueTy(OpaqueTy {
+                    origin: hir::OpaqueTyOrigin::TyAlias { in_assoc_ty: true },
+                    ..
+                }) => opaque::find_opaque_ty_constraints_for_impl_trait_in_assoc_type(tcx, def_id),
                 // Opaque types desugared from `impl Trait`.
                 ItemKind::OpaqueTy(&OpaqueTy {
                     origin:
@@ -582,7 +604,6 @@ fn infer_placeholder_type<'a>(
 
                 // The parser provided a sub-optimal `HasPlaceholders` suggestion for the type.
                 // We are typeck and have the real type, so remove that and suggest the actual type.
-                // FIXME(eddyb) this looks like it should be functionality on `Diagnostic`.
                 if let Ok(suggestions) = &mut err.suggestions {
                     suggestions.clear();
                 }
@@ -603,6 +624,8 @@ fn infer_placeholder_type<'a>(
             }
 
             err.emit();
+            // diagnostic stashing loses the information of whether something is a hard error.
+            Ty::new_error_with_message(tcx, span, "ItemNoType is a hard error")
         }
         None => {
             let mut diag = bad_placeholder(tcx, vec![span], kind);
@@ -623,15 +646,9 @@ fn infer_placeholder_type<'a>(
                 }
             }
 
-            diag.emit();
+            Ty::new_error(tcx, diag.emit())
         }
     }
-
-    // Typeck doesn't expect erased regions to be returned from `type_of`.
-    tcx.fold_regions(ty, |r, _| match *r {
-        ty::ReErased => tcx.lifetimes.re_static,
-        _ => r,
-    })
 }
 
 fn check_feature_inherent_assoc_ty(tcx: TyCtxt<'_>, span: Span) {
@@ -639,7 +656,7 @@ fn check_feature_inherent_assoc_ty(tcx: TyCtxt<'_>, span: Span) {
         use rustc_session::parse::feature_err;
         use rustc_span::symbol::sym;
         feature_err(
-            &tcx.sess.parse_sess,
+            &tcx.sess,
             sym::inherent_associated_types,
             span,
             "inherent associated types are unstable",

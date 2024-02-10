@@ -498,14 +498,14 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
                     // order when emitting them.
                     let err =
                         self.tcx().dcx().struct_span_err(span, format!("user args: {user_args:?}"));
-                    err.buffer(&mut errors_buffer);
+                    errors_buffer.push(err);
                 }
             }
 
             if !errors_buffer.is_empty() {
                 errors_buffer.sort_by_key(|diag| diag.span.primary_span());
-                for diag in errors_buffer {
-                    self.tcx().dcx().emit_diagnostic(diag);
+                for err in errors_buffer {
+                    err.emit();
                 }
             }
         }
@@ -753,10 +753,14 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
     }
 
     fn report_error(&self, p: impl Into<ty::GenericArg<'tcx>>) -> ErrorGuaranteed {
-        match self.fcx.dcx().has_errors() {
-            Some(e) => e,
-            None => self
-                .fcx
+        if let Some(guar) = self.fcx.dcx().has_errors() {
+            guar
+        } else if self.fcx.dcx().stashed_err_count() > 0 {
+            // Without this case we sometimes get uninteresting and extraneous
+            // "type annotations needed" errors.
+            self.fcx.dcx().delayed_bug("error in Resolver")
+        } else {
+            self.fcx
                 .err_ctxt()
                 .emit_inference_failure_err(
                     self.fcx.tcx.hir().body_owner_def_id(self.body.id()),
@@ -765,7 +769,7 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
                     E0282,
                     false,
                 )
-                .emit(),
+                .emit()
         }
     }
 

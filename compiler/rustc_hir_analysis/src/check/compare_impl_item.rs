@@ -1,8 +1,8 @@
 use super::potentially_plural_count;
-use crate::errors::LifetimesOrBoundsMismatchOnTrait;
+use crate::errors::{LifetimesOrBoundsMismatchOnTrait, MethodShouldReturnFuture};
 use hir::def_id::{DefId, DefIdMap, LocalDefId};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
-use rustc_errors::{pluralize, struct_span_err, Applicability, DiagnosticId, ErrorGuaranteed};
+use rustc_errors::{codes::*, pluralize, struct_span_code_err, Applicability, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit;
@@ -10,7 +10,7 @@ use rustc_hir::{GenericParamKind, ImplItemKind};
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::infer::{self, InferCtxt, TyCtxtInferExt};
-use rustc_infer::traits::util;
+use rustc_infer::traits::{util, FulfillmentError};
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::util::ExplicitSelf;
@@ -19,7 +19,8 @@ use rustc_middle::ty::{
     self, GenericArgs, Ty, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt,
 };
 use rustc_middle::ty::{GenericParamDefKind, TyCtxt};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::Span;
+use rustc_trait_selection::regions::InferCtxtRegionExt;
 use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
 use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
 use rustc_trait_selection::traits::{
@@ -73,7 +74,6 @@ fn check_method_is_structurally_compatible<'tcx>(
     compare_generic_param_kinds(tcx, impl_m, trait_m, delay)?;
     compare_number_of_method_arguments(tcx, impl_m, trait_m, delay)?;
     compare_synthetic_generics(tcx, impl_m, trait_m, delay)?;
-    compare_asyncness(tcx, impl_m, trait_m, delay)?;
     check_region_bounds_on_impl_item(tcx, impl_m, trait_m, delay)?;
     Ok(())
 }
@@ -254,7 +254,7 @@ fn compare_method_predicate_entailment<'tcx>(
     // checks. For the comparison to be valid, we need to
     // normalize the associated types in the impl/trait methods
     // first. However, because function types bind regions, just
-    // calling `normalize_associated_types_in` would have no effect on
+    // calling `FnCtxt::normalize` would have no effect on
     // any associated types appearing in the fn arguments or return
     // type.
 
@@ -378,7 +378,7 @@ fn compare_method_predicate_entailment<'tcx>(
     // lifetime parameters.
     let outlives_env = OutlivesEnvironment::with_bounds(
         param_env,
-        infcx.implied_bounds_tys(param_env, impl_m_def_id, wf_tys),
+        infcx.implied_bounds_tys(param_env, impl_m_def_id, &wf_tys),
     );
     let errors = infcx.resolve_regions(&outlives_env);
     if !errors.is_empty() {
@@ -411,36 +411,6 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for RemapLateBound<'_, 'tcx> {
             r
         }
     }
-}
-
-fn compare_asyncness<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    impl_m: ty::AssocItem,
-    trait_m: ty::AssocItem,
-    delay: bool,
-) -> Result<(), ErrorGuaranteed> {
-    if tcx.asyncness(trait_m.def_id).is_async() {
-        match tcx.fn_sig(impl_m.def_id).skip_binder().skip_binder().output().kind() {
-            ty::Alias(ty::Opaque, ..) => {
-                // allow both `async fn foo()` and `fn foo() -> impl Future`
-            }
-            ty::Error(_) => {
-                // We don't know if it's ok, but at least it's already an error.
-            }
-            _ => {
-                return Err(tcx
-                    .dcx()
-                    .create_err(crate::errors::AsyncTraitImplShouldBeAsync {
-                        span: tcx.def_span(impl_m.def_id),
-                        method_name: trait_m.name,
-                        trait_item_span: tcx.hir().span_if_local(trait_m.def_id),
-                    })
-                    .emit_unless(delay));
-            }
-        };
-    }
-
-    Ok(())
 }
 
 /// Given a method def-id in an impl, compare the method signature of the impl
@@ -625,7 +595,7 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
     match ocx.eq(&cause, param_env, trait_return_ty, impl_return_ty) {
         Ok(()) => {}
         Err(terr) => {
-            let mut diag = struct_span_err!(
+            let mut diag = struct_span_code_err!(
                 tcx.dcx(),
                 cause.span(),
                 E0053,
@@ -694,15 +664,20 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
     // RPITs.
     let errors = ocx.select_all_or_error();
     if !errors.is_empty() {
-        let reported = infcx.err_ctxt().report_fulfillment_errors(errors);
-        return Err(reported);
+        if let Err(guar) = try_report_async_mismatch(tcx, infcx, &errors, trait_m, impl_m, impl_sig)
+        {
+            return Err(guar);
+        }
+
+        let guar = infcx.err_ctxt().report_fulfillment_errors(errors);
+        return Err(guar);
     }
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
     let outlives_env = OutlivesEnvironment::with_bounds(
         param_env,
-        infcx.implied_bounds_tys(param_env, impl_m_def_id, wf_tys),
+        infcx.implied_bounds_tys(param_env, impl_m_def_id, &wf_tys),
     );
     ocx.resolve_regions_and_report_errors(impl_m_def_id, &outlives_env)?;
 
@@ -934,17 +909,15 @@ impl<'tcx> ty::FallibleTypeFolder<TyCtxt<'tcx>> for RemapHiddenTyRegions<'tcx> {
                             return_span,
                             "return type captures more lifetimes than trait definition",
                         )
-                        .span_label_mv(self.tcx.def_span(def_id), "this lifetime was captured")
-                        .span_note_mv(
+                        .with_span_label(self.tcx.def_span(def_id), "this lifetime was captured")
+                        .with_span_note(
                             self.tcx.def_span(self.def_id),
                             "hidden type must only reference lifetimes captured by this impl trait",
                         )
-                        .note_mv(format!("hidden type inferred to be `{}`", self.ty))
+                        .with_note(format!("hidden type inferred to be `{}`", self.ty))
                         .emit()
                 }
-                _ => {
-                    self.tcx.dcx().span_delayed_bug(DUMMY_SP, "should've been able to remap region")
-                }
+                _ => self.tcx.dcx().delayed_bug("should've been able to remap region"),
             };
             return Err(guar);
         };
@@ -972,7 +945,7 @@ fn report_trait_method_mismatch<'tcx>(
     let (impl_err_span, trait_err_span) =
         extract_spans_for_error_reporting(infcx, terr, &cause, impl_m, trait_m);
 
-    let mut diag = struct_span_err!(
+    let mut diag = struct_span_code_err!(
         tcx.dcx(),
         impl_err_span,
         E0053,
@@ -1217,7 +1190,7 @@ fn compare_self_type<'tcx>(
         (false, true) => {
             let self_descr = self_string(impl_m);
             let impl_m_span = tcx.def_span(impl_m.def_id);
-            let mut err = struct_span_err!(
+            let mut err = struct_span_code_err!(
                 tcx.dcx(),
                 impl_m_span,
                 E0185,
@@ -1237,7 +1210,7 @@ fn compare_self_type<'tcx>(
         (true, false) => {
             let self_descr = self_string(trait_m);
             let impl_m_span = tcx.def_span(impl_m.def_id);
-            let mut err = struct_span_err!(
+            let mut err = struct_span_code_err!(
                 tcx.dcx(),
                 impl_m_span,
                 E0186,
@@ -1303,8 +1276,7 @@ fn compare_number_of_generics<'tcx>(
     // inheriting the generics from will also have mismatched arguments, and
     // we'll report an error for that instead. Delay a bug for safety, though.
     if trait_.is_impl_trait_in_trait() {
-        return Err(tcx.dcx().span_delayed_bug(
-            rustc_span::DUMMY_SP,
+        return Err(tcx.dcx().delayed_bug(
             "errors comparing numbers of generics of trait/impl functions were not emitted",
         ));
     }
@@ -1385,7 +1357,7 @@ fn compare_number_of_generics<'tcx>(
                     kind = kind,
                 ),
             );
-            err.code(DiagnosticId::Error("E0049".into()));
+            err.code(E0049);
 
             let msg =
                 format!("expected {trait_count} {kind} parameter{}", pluralize!(trait_count),);
@@ -1463,7 +1435,7 @@ fn compare_number_of_method_arguments<'tcx>(
             })
             .unwrap_or_else(|| tcx.def_span(impl_m.def_id));
 
-        let mut err = struct_span_err!(
+        let mut err = struct_span_code_err!(
             tcx.dcx(),
             impl_span,
             E0050,
@@ -1530,7 +1502,7 @@ fn compare_synthetic_generics<'tcx>(
             let impl_def_id = impl_def_id.expect_local();
             let impl_span = tcx.def_span(impl_def_id);
             let trait_span = tcx.def_span(trait_def_id);
-            let mut err = struct_span_err!(
+            let mut err = struct_span_code_err!(
                 tcx.dcx(),
                 impl_span,
                 E0643,
@@ -1689,7 +1661,7 @@ fn compare_generic_param_kinds<'tcx>(
             let param_impl_span = tcx.def_span(param_impl.def_id);
             let param_trait_span = tcx.def_span(param_trait.def_id);
 
-            let mut err = struct_span_err!(
+            let mut err = struct_span_code_err!(
                 tcx.dcx(),
                 param_impl_span,
                 E0053,
@@ -1836,7 +1808,7 @@ fn compare_const_predicate_entailment<'tcx>(
         let (ty, _) = tcx.hir().expect_impl_item(impl_ct_def_id).expect_const();
         cause.span = ty.span;
 
-        let mut diag = struct_span_err!(
+        let mut diag = struct_span_code_err!(
             tcx.dcx(),
             cause.span,
             E0326,
@@ -1992,6 +1964,10 @@ pub(super) fn check_type_bounds<'tcx>(
     impl_ty: ty::AssocItem,
     impl_trait_ref: ty::TraitRef<'tcx>,
 ) -> Result<(), ErrorGuaranteed> {
+    // Avoid bogus "type annotations needed `Foo: Bar`" errors on `impl Bar for Foo` in case
+    // other `Foo` impls are incoherent.
+    tcx.ensure().coherent_trait(impl_trait_ref.def_id)?;
+
     let param_env = tcx.param_env(impl_ty.def_id);
     debug!(?param_env);
 
@@ -2073,7 +2049,7 @@ pub(super) fn check_type_bounds<'tcx>(
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
-    let implied_bounds = infcx.implied_bounds_tys(param_env, impl_ty_def_id, assumed_wf_types);
+    let implied_bounds = infcx.implied_bounds_tys(param_env, impl_ty_def_id, &assumed_wf_types);
     let outlives_env = OutlivesEnvironment::with_bounds(param_env, implied_bounds);
     ocx.resolve_regions_and_report_errors(impl_ty_def_id, &outlives_env)
 }
@@ -2249,4 +2225,48 @@ fn assoc_item_kind_str(impl_item: &ty::AssocItem) -> &'static str {
         ty::AssocKind::Fn => "method",
         ty::AssocKind::Type => "type",
     }
+}
+
+/// Manually check here that `async fn foo()` wasn't matched against `fn foo()`,
+/// and extract a better error if so.
+fn try_report_async_mismatch<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    infcx: &InferCtxt<'tcx>,
+    errors: &[FulfillmentError<'tcx>],
+    trait_m: ty::AssocItem,
+    impl_m: ty::AssocItem,
+    impl_sig: ty::FnSig<'tcx>,
+) -> Result<(), ErrorGuaranteed> {
+    if !tcx.asyncness(trait_m.def_id).is_async() {
+        return Ok(());
+    }
+
+    let ty::Alias(ty::Projection, ty::AliasTy { def_id: async_future_def_id, .. }) =
+        *tcx.fn_sig(trait_m.def_id).skip_binder().skip_binder().output().kind()
+    else {
+        bug!("expected `async fn` to return an RPITIT");
+    };
+
+    for error in errors {
+        if let traits::BindingObligation(def_id, _) = *error.root_obligation.cause.code()
+            && def_id == async_future_def_id
+            && let Some(proj) = error.root_obligation.predicate.to_opt_poly_projection_pred()
+            && let Some(proj) = proj.no_bound_vars()
+            && infcx.can_eq(
+                error.root_obligation.param_env,
+                proj.term.ty().unwrap(),
+                impl_sig.output(),
+            )
+        {
+            // FIXME: We should suggest making the fn `async`, but extracting
+            // the right span is a bit difficult.
+            return Err(tcx.sess.dcx().emit_err(MethodShouldReturnFuture {
+                span: tcx.def_span(impl_m.def_id),
+                method_name: trait_m.name,
+                trait_item_span: tcx.hir().span_if_local(trait_m.def_id),
+            }));
+        }
+    }
+
+    Ok(())
 }
