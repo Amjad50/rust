@@ -59,7 +59,7 @@ r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std']}
 
 [target.'cfg(target_os = "emerald")'.dependencies]
 # This is from `https://github.com/Amjad50/Emerald`, i.e. it must be run from that context
-emerald_std = { version = "0.2.3", features = ['rustc-dep-of-std'] }
+emerald_std = { version = "0.2.5", features = ['rustc-dep-of-std'] }
 
 [features]
 backtrace = [

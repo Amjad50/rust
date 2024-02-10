@@ -1,4 +1,5 @@
 use crate::time::Duration;
+use emerald_std::clock::ClockType;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct Instant(Duration);
@@ -8,9 +9,14 @@ pub struct SystemTime(Duration);
 
 pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
 
+// its a bit confusing, but `SystemTime` refers to the time since boot,
+// and `RealTime` refers to the time since the unix epoch
 impl Instant {
     pub fn now() -> Instant {
-        panic!("time not implemented on this platform")
+        let time = unsafe {
+            emerald_std::clock::get_time(ClockType::SystemTime).expect("Failed to get time")
+        };
+        Instant(Duration::new(time.seconds, time.nanoseconds as u32))
     }
 
     pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
@@ -28,7 +34,10 @@ impl Instant {
 
 impl SystemTime {
     pub fn now() -> SystemTime {
-        panic!("time not implemented on this platform")
+        let time = unsafe {
+            emerald_std::clock::get_time(ClockType::RealTime).expect("Failed to get time")
+        };
+        SystemTime(Duration::new(time.seconds, time.nanoseconds as u32))
     }
 
     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
