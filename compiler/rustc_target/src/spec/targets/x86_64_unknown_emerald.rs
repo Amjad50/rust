@@ -1,19 +1,18 @@
-use crate::spec::{base, StackProbeType, Target, TargetOptions};
+use crate::spec::{base, StackProbeType, Target};
 
 pub fn target() -> Target {
+    let mut base = base::emerald::opts();
+    base.cpu = "x86-64".into();
+    base.plt_by_default = false;
+    base.max_atomic_width = Some(64);
+    base.stack_probes = StackProbeType::Inline;
+
     Target {
         llvm_target: "x86_64-unknown-none".into(),
         pointer_width: 64,
         arch: "x86_64".into(),
         data_layout: "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
             .into(),
-        options: TargetOptions {
-            cpu: "x86-64".into(),
-            features: "-mmx,-sse,+soft-float".into(),
-            plt_by_default: false,
-            max_atomic_width: Some(64),
-            stack_probes: StackProbeType::Inline,
-            ..base::emerald::opts()
-        },
+        options: base,
     }
 }
