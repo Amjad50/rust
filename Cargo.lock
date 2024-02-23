@@ -1212,9 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "emerald_kernel_user_link"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "553132cab85a2a497d1ea12e887b0c02ad4d1a17f09900ec74640eacdaa87b97"
+version = "0.2.4"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-core",
@@ -1222,13 +1220,12 @@ dependencies = [
 
 [[package]]
 name = "emerald_std"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3728e4814248417c26c01de4c514e4c8a675d77e36eae094d41378a22e12223"
+version = "0.2.7"
 dependencies = [
  "compiler_builtins",
  "emerald_kernel_user_link",
  "increasing_heap_allocator",
+ "libm 0.2.8 (git+https://github.com/Amjad50/libm?branch=compiling_libm_for_std)",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -1780,7 +1777,7 @@ version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6cb51c9a029ddc91b07a787f1d86b53ccfa49b0e86688c946ebe8d3555685dd7"
 dependencies = [
- "libm",
+ "libm 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1985,8 +1982,6 @@ dependencies = [
 [[package]]
 name = "increasing_heap_allocator"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f78a0467200b54f544152c480d8863463dfbee92af6d7fe279f68bf287e5c928"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
@@ -2241,9 +2236,18 @@ dependencies = [
 
 [[package]]
 name = "libm"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7012b1bbb0719e1097c47611d3898568c546d597c2e74d66f6087edd5233ff4"
+checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
+
+[[package]]
+name = "libm"
+version = "0.2.8"
+source = "git+https://github.com/Amjad50/libm?branch=compiling_libm_for_std#9ded10304060e82d5cb71fcf8ae99a9538802c65"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-core",
+]
 
 [[package]]
 name = "libz-sys"
@@ -2608,7 +2612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "578ede34cf02f8924ab9447f50c28075b4d3e5b269972345e7e0372b38c6cdcd"
 dependencies = [
  "autocfg",
- "libm",
+ "libm 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
