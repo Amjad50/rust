@@ -1,6 +1,6 @@
 use core::ffi::CStr;
 
-use emerald_std::io::FileStat;
+use emerald_std::io::{FileStat, SeekWhence};
 
 use crate::ffi::OsString;
 use crate::fmt;
@@ -300,8 +300,20 @@ impl File {
         Ok(())
     }
 
-    pub fn seek(&self, _pos: SeekFrom) -> io::Result<u64> {
-        todo!()
+    pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
+        let (whence, offset) = match pos {
+            // Casting to `i64` is fine, too large values will end up as
+            // negative which will cause an error in `sys_seek`.
+            SeekFrom::Start(off) => (SeekWhence::Start, off as i64),
+            SeekFrom::Current(off) => (SeekWhence::Current, off),
+            SeekFrom::End(off) => (SeekWhence::End, off),
+        };
+
+        let seek = emerald_std::io::SeekFrom { whence, offset };
+
+        unsafe {
+            emerald_std::io::syscall_seek(self.fd.as_raw_fd(), seek).map_err(syscall_to_io_error)
+        }
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
