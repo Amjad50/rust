@@ -9,7 +9,7 @@ pub fn opts() -> TargetOptions {
         // position_independent_executables: false,
         // static_position_independent_executables: false,
         // has_thread_local: false,
-        panic_strategy: PanicStrategy::Abort,
+        panic_strategy: PanicStrategy::Unwind,
         ..Default::default()
     }
 }

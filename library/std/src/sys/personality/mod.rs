@@ -30,6 +30,7 @@ cfg_if::cfg_if! {
         target_os = "psp",
         target_os = "xous",
         target_os = "solid_asp3",
+        target_os = "emerald",
         all(target_family = "unix", not(target_os = "espidf"), not(target_os = "l4re")),
         all(target_vendor = "fortanix", target_env = "sgx"),
     ))] {

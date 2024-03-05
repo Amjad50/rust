@@ -7,8 +7,29 @@ use crate::io;
 use crate::marker::PhantomData;
 use crate::os::emerald::prelude::OsStringExt;
 use crate::path::{self, PathBuf};
+use crate::ptr::addr_of;
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::pal::emerald::syscall_to_io_error;
+
+#[cfg(not(test))]
+#[cfg(feature = "panic_unwind")]
+mod eh_unwinding {
+    pub(crate) struct EhFrameFinder(usize /* eh_frame */);
+    pub(crate) static mut EH_FRAME_SETTINGS: EhFrameFinder = EhFrameFinder(0);
+    impl EhFrameFinder {
+        pub(crate) fn init(&mut self, eh_frame: usize) {
+            self.0 = eh_frame;
+        }
+    }
+    unsafe impl unwind::EhFrameFinder for EhFrameFinder {
+        fn find(&self, _pc: usize) -> Option<unwind::FrameInfo> {
+            Some(unwind::FrameInfo {
+                text_base: None,
+                kind: unwind::FrameInfoKind::EhFrame(self.0),
+            })
+        }
+    }
+}
 
 // This function is needed by the panic runtime. The symbol is named in
 // pre-link args for the target specification, so keep that in sync.
@@ -22,6 +43,13 @@ extern "C" {
 
 #[no_mangle]
 pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
+    #[cfg(not(test))]
+    #[cfg(feature = "panic_unwind")]
+    unsafe {
+        eh_unwinding::EH_FRAME_SETTINGS
+            .init(emerald_std::process::process_metadata().eh_frame_adress);
+        unwind::set_custom_eh_frame_finder(&*addr_of!(eh_unwinding::EH_FRAME_SETTINGS)).ok();
+    }
     exit(unsafe { main(argc, argv) });
 }
 

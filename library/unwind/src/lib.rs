@@ -26,7 +26,7 @@ cfg_if::cfg_if! {
     ))] {
         mod libunwind;
         pub use libunwind::*;
-    } else if #[cfg(target_os = "xous")] {
+    } else if #[cfg(any(target_os = "xous", target_os = "emerald"))] {
         mod unwinding;
         pub use unwinding::*;
     } else {
