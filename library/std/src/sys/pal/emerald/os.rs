@@ -175,7 +175,10 @@ pub fn env() -> Env {
     panic!("not supported on this platform")
 }
 
-pub fn getenv(_: &OsStr) -> Option<OsString> {
+pub fn getenv(str: &OsStr) -> Option<OsString> {
+    if str == "RUST_BACKTRACE" {
+        return Some("full".into());
+    }
     None
 }
 
