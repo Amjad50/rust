@@ -47,7 +47,7 @@ pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     #[cfg(feature = "panic_unwind")]
     unsafe {
         eh_unwinding::EH_FRAME_SETTINGS
-            .init(emerald_std::process::process_metadata().eh_frame_adress);
+            .init(emerald_std::process::process_metadata().eh_frame_address);
         unwind::set_custom_eh_frame_finder(&*addr_of!(eh_unwinding::EH_FRAME_SETTINGS)).ok();
     }
     exit(unsafe { main(argc, argv) });
