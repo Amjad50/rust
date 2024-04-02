@@ -61,7 +61,7 @@ r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std'] }
 # This is from `https://github.com/Amjad50/Emerald`, i.e. it must be run from that context
 # TODO: for now we are using relative path, as we are using `libm` from `git` and we can't publish
 #       that. Fix it later
-emerald_std = { version = "0.2.9", features = ['rustc-dep-of-std'], path = "../../../../libraries/emerald_std" }
+emerald_std = { version = "0.3.0", features = ['rustc-dep-of-std'], path = "../../../../libraries/emerald_std" }
 
 [features]
 backtrace = [

@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "emerald_kernel_user_link"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-core",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "emerald_std"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "compiler_builtins",
  "emerald_kernel_user_link",

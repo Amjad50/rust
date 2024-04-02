@@ -37,7 +37,7 @@ pub struct DirEntry {
 }
 
 #[derive(Clone, Debug)]
-pub struct OpenOptions {}
+pub struct OpenOptions(emerald_std::io::OpenOptions);
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct FileTimes {}
@@ -217,15 +217,32 @@ impl DirEntry {
 
 impl OpenOptions {
     pub fn new() -> OpenOptions {
-        OpenOptions {}
+        OpenOptions(emerald_std::io::OpenOptions::new())
     }
 
-    pub fn read(&mut self, _read: bool) {}
-    pub fn write(&mut self, _write: bool) {}
-    pub fn append(&mut self, _append: bool) {}
-    pub fn truncate(&mut self, _truncate: bool) {}
-    pub fn create(&mut self, _create: bool) {}
-    pub fn create_new(&mut self, _create_new: bool) {}
+    pub fn read(&mut self, read: bool) {
+        self.0.read(read);
+    }
+
+    pub fn write(&mut self, write: bool) {
+        self.0.write(write);
+    }
+
+    pub fn append(&mut self, append: bool) {
+        self.0.append(append);
+    }
+
+    pub fn truncate(&mut self, truncate: bool) {
+        self.0.truncate(truncate);
+    }
+
+    pub fn create(&mut self, create: bool) {
+        self.0.create(create);
+    }
+
+    pub fn create_new(&mut self, create_new: bool) {
+        self.0.create_new(create_new);
+    }
 }
 
 impl File {
@@ -235,12 +252,11 @@ impl File {
         Ok(File { path: path.to_owned(), fd })
     }
 
-    fn openc(path: &CStr, _opts: &OpenOptions) -> io::Result<FileDesc> {
+    fn openc(path: &CStr, open_options: &OpenOptions) -> io::Result<FileDesc> {
         let flags = 0;
-        let access_mode = 0;
 
         let fd = unsafe {
-            emerald_std::io::syscall_open(path, access_mode, flags).map_err(syscall_to_io_error)
+            emerald_std::io::syscall_open(path, open_options.0, flags).map_err(syscall_to_io_error)
         }?;
 
         Ok(unsafe { FileDesc::from_raw_fd(fd as usize) })
