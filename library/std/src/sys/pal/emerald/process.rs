@@ -42,6 +42,8 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
+
+    spawned: bool,
 }
 
 // passed back to std::process with the pipes connected to the child, if any
@@ -93,6 +95,8 @@ impl Command {
             stdin: None,
             stdout: None,
             stderr: None,
+
+            spawned: false,
         }
     }
 
@@ -153,14 +157,20 @@ impl Command {
         None
     }
 
-    fn setup_io(&self, default: Stdio, needs_stdin: bool) -> io::Result<(StdioPipes, ChildPipes)> {
-        let null = Stdio::Null;
-        let default_stdin = if needs_stdin { &default } else { &null };
-        let stdin = self.stdin.as_ref().unwrap_or(default_stdin);
-        let stdout = self.stdout.as_ref().unwrap_or(&default);
-        let stderr = self.stderr.as_ref().unwrap_or(&default);
+    fn setup_io(
+        &mut self,
+        mut default: Stdio,
+        needs_stdin: bool,
+    ) -> io::Result<(StdioPipes, ChildPipes)> {
+        let mut null = Stdio::Null;
+        let default_stdin = if needs_stdin { &mut default } else { &mut null };
+        let stdin = self.stdin.as_mut().unwrap_or(default_stdin);
         let (their_stdin, our_stdin) = stdin.to_child_stdio(true)?;
+
+        let stdout = self.stdout.as_mut().unwrap_or(&mut default);
         let (their_stdout, our_stdout) = stdout.to_child_stdio(false)?;
+
+        let stderr = self.stderr.as_mut().unwrap_or(&mut default);
         let (their_stderr, our_stderr) = stderr.to_child_stdio(false)?;
         let ours = StdioPipes { stdin: our_stdin, stdout: our_stdout, stderr: our_stderr };
         let theirs = ChildPipes { stdin: their_stdin, stdout: their_stdout, stderr: their_stderr };
@@ -172,7 +182,16 @@ impl Command {
         default: Stdio,
         needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
+        // TODO: add support for multiple spawns.
+        //       this requires `dups` or `clone` for files.
+        //       the reason its like that is that `Stdio::Fd` must be moved
+        //       so we need a way to clone the file
+        if self.spawned {
+            return Err(io::Error::new(io::ErrorKind::Other, "Command can only be spawned once"));
+        }
+
         let (ours, theirs) = self.setup_io(default, needs_stdin)?;
+        self.spawned = true;
 
         // setup 3 mappings as the max, and only use what's needed
         let mut file_mappings = [SpawnFileMapping { src_fd: 0, dst_fd: 0 }; 3];
@@ -212,8 +231,8 @@ impl Command {
 }
 
 impl Stdio {
-    pub fn to_child_stdio(&self, readable: bool) -> io::Result<(ChildStdio, Option<AnonPipe>)> {
-        match *self {
+    pub fn to_child_stdio(&mut self, readable: bool) -> io::Result<(ChildStdio, Option<AnonPipe>)> {
+        match self {
             Stdio::Inherit => Ok((ChildStdio::Inherit, None)),
 
             // Make sure that the source descriptors are not an stdio
@@ -223,7 +242,16 @@ impl Stdio {
             // parent's stdout, and the child's stdout to be the parent's
             // stderr. No matter which we dup first, the second will get
             // overwritten prematurely.
-            Stdio::Fd(ref fd) => {
+            Stdio::Fd(_) => {
+                // replace self with inherit
+                // TODO: this is not good, replace with `dups` or cloning the file somehow
+                let fd = core::mem::replace(self, Stdio::Inherit);
+
+                let fd = match fd {
+                    Stdio::Fd(fd) => fd,
+                    _ => unreachable!(),
+                };
+
                 if fd.as_raw_fd() <= FD_STDERR {
                     // TODO: add support for passing stdio fds
                     Err(io::Error::new(
@@ -232,7 +260,7 @@ impl Stdio {
                     ))
                 } else {
                     // move the fd
-                    Ok((ChildStdio::Explicit(fd.as_raw_fd()), None))
+                    Ok((ChildStdio::Explicit(fd.into_raw_fd()), None))
                 }
             }
 
