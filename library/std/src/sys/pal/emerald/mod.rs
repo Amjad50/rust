@@ -60,6 +60,9 @@ fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
         SyscallError::IsDirectory => {
             crate::io::Error::new(crate::io::ErrorKind::IsADirectory, "Is a directory")
         }
+        SyscallError::AlreadyExists => {
+            crate::io::Error::new(crate::io::ErrorKind::AlreadyExists, "Already exists")
+        }
         SyscallError::InvalidArgument(arg1, arg2, arg3, arg4, arg5, arg6, arg7) => {
             let errors = [arg1, arg2, arg3, arg4, arg5, arg6, arg7];
 
