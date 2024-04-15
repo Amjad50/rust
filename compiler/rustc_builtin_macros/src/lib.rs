@@ -15,6 +15,7 @@
 #![feature(lint_reasons)]
 #![feature(proc_macro_internals)]
 #![feature(proc_macro_quote)]
+#![feature(try_blocks)]
 
 extern crate proc_macro;
 
@@ -45,10 +46,10 @@ mod format;
 mod format_foreign;
 mod global_allocator;
 mod log_syntax;
+mod pattern_type;
 mod source_util;
 mod test;
 mod trace_macros;
-mod type_ascribe;
 mod util;
 
 pub mod asm;
@@ -95,10 +96,10 @@ pub fn register_builtin_macros(resolver: &mut dyn ResolverExpand) {
         log_syntax: log_syntax::expand_log_syntax,
         module_path: source_util::expand_mod,
         option_env: env::expand_option_env,
+        pattern_type: pattern_type::expand,
         std_panic: edition_panic::expand_panic,
         stringify: source_util::expand_stringify,
         trace_macros: trace_macros::expand_trace_macros,
-        type_ascribe: type_ascribe::expand_type_ascribe,
         unreachable: edition_panic::expand_unreachable,
         // tidy-alphabetical-end
     }

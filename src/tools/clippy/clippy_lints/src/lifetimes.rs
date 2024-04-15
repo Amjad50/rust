@@ -216,7 +216,7 @@ fn check_fn_inner<'tcx>(
                     None
                 }))
                 .collect_vec(),
-            &format!("the following explicit lifetimes could be elided: {lts}"),
+            format!("the following explicit lifetimes could be elided: {lts}"),
             |diag| {
                 if sig.header.is_async() {
                     // async functions have usages whose spans point at the lifetime declaration which messes up
@@ -285,7 +285,7 @@ fn elision_suggestions(
             .iter()
             .filter(|usage| named_lifetime(usage).map_or(false, |id| elidable_lts.contains(&id)))
             .map(|usage| {
-                match cx.tcx.hir().get_parent(usage.hir_id) {
+                match cx.tcx.parent_hir_node(usage.hir_id) {
                     Node::Ty(Ty {
                         kind: TyKind::Ref(..), ..
                     }) => {
@@ -294,8 +294,7 @@ fn elision_suggestions(
                         let span = cx
                             .sess()
                             .source_map()
-                            .span_extend_while(usage.ident.span, |ch| ch.is_ascii_whitespace())
-                            .unwrap_or(usage.ident.span);
+                            .span_extend_while_whitespace(usage.ident.span);
 
                         (span, String::new())
                     },

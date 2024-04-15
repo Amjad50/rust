@@ -8,9 +8,10 @@
 #![doc(rust_logo)]
 #![allow(internal_features)]
 #![feature(rustdoc_internals)]
-#![feature(associated_type_bounds)]
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(const_option)]
 #![feature(core_intrinsics)]
+#![feature(generic_nonzero)]
 #![feature(inline_const)]
 #![feature(min_specialization)]
 #![feature(never_type)]
@@ -22,5 +23,6 @@ pub use self::serialize::{Decodable, Decoder, Encodable, Encoder};
 
 mod serialize;
 
+pub mod int_overflow;
 pub mod leb128;
 pub mod opaque;

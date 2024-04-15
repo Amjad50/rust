@@ -64,7 +64,7 @@ impl ProcMacros {
                         &bridge::server::SameThread,
                         S::make_server(call_site, def_site, mixed_site),
                         parsed_body,
-                        false,
+                        cfg!(debug_assertions),
                     );
                     return res
                         .map(|it| it.into_subtree(call_site))
@@ -75,7 +75,7 @@ impl ProcMacros {
                         &bridge::server::SameThread,
                         S::make_server(call_site, def_site, mixed_site),
                         parsed_body,
-                        false,
+                        cfg!(debug_assertions),
                     );
                     return res
                         .map(|it| it.into_subtree(call_site))
@@ -87,7 +87,7 @@ impl ProcMacros {
                         S::make_server(call_site, def_site, mixed_site),
                         parsed_attributes,
                         parsed_body,
-                        false,
+                        cfg!(debug_assertions),
                     );
                     return res
                         .map(|it| it.into_subtree(call_site))
@@ -108,7 +108,7 @@ impl ProcMacros {
                     (trait_name.to_string(), ProcMacroKind::CustomDerive)
                 }
                 bridge::client::ProcMacro::Bang { name, .. } => {
-                    (name.to_string(), ProcMacroKind::FuncLike)
+                    (name.to_string(), ProcMacroKind::Bang)
                 }
                 bridge::client::ProcMacro::Attr { name, .. } => {
                     (name.to_string(), ProcMacroKind::Attr)

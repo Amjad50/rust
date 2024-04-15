@@ -56,7 +56,7 @@ type variable is an instance of a type parameter. That is,
 given a generic function `fn foo<T>(t: T)`, while checking the
 function `foo`, the type `ty_param(0)` refers to the type `T`, which
 is treated in abstract. However, when `foo()` is called, `T` will be
-substituted for a fresh type variable `N`. This variable will
+instantiated with a fresh type variable `N`. This variable will
 eventually be resolved to some concrete type (which might itself be
 a type parameter).
 
@@ -74,13 +74,14 @@ pub mod wfcheck;
 
 pub use check::check_abi;
 
-use std::num::NonZeroU32;
+use std::num::NonZero;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_errors::ErrorGuaranteed;
-use rustc_errors::{pluralize, struct_span_code_err, Diagnostic, DiagnosticBuilder};
+use rustc_errors::{pluralize, struct_span_code_err, Diag};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::Visitor;
+use rustc_hir::Mutability;
 use rustc_index::bit_set::BitSet;
 use rustc_infer::infer::error_reporting::ObligationCauseExt as _;
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
@@ -91,17 +92,17 @@ use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
 use rustc_session::parse::feature_err;
-use rustc_span::symbol::{kw, Ident};
-use rustc_span::{self, def_id::CRATE_DEF_ID, BytePos, Span, Symbol, DUMMY_SP};
+use rustc_span::symbol::{kw, sym, Ident};
+use rustc_span::{def_id::CRATE_DEF_ID, BytePos, Span, Symbol, DUMMY_SP};
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::abi::Abi;
+use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::error_reporting::suggestions::ReturnsVisitor;
 use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
 use rustc_trait_selection::traits::ObligationCtxt;
 
 use crate::errors;
 use crate::require_c_abi_if_c_variadic;
-use crate::util::common::indenter;
 
 use self::compare_impl_item::collect_return_position_impl_trait_in_trait_tys;
 use self::region::region_scope_tree;
@@ -130,7 +131,7 @@ fn get_owner_return_paths(
 ) -> Option<(LocalDefId, ReturnsVisitor<'_>)> {
     let hir_id = tcx.local_def_id_to_hir_id(def_id);
     let parent_id = tcx.hir().get_parent_item(hir_id).def_id;
-    tcx.opt_hir_node_by_def_id(parent_id).and_then(|node| node.body_id()).map(|body_id| {
+    tcx.hir_node_by_def_id(parent_id).body_id().map(|body_id| {
         let body = tcx.hir().body(body_id);
         let mut visitor = ReturnsVisitor::default();
         visitor.visit_body(body);
@@ -142,7 +143,7 @@ fn get_owner_return_paths(
 /// as they must always be defined by the compiler.
 // FIXME: Move this to a more appropriate place.
 pub fn forbid_intrinsic_abi(tcx: TyCtxt<'_>, sp: Span, abi: Abi) {
-    if let Abi::RustIntrinsic | Abi::PlatformIntrinsic = abi {
+    if let Abi::RustIntrinsic = abi {
         tcx.dcx().span_err(sp, "intrinsic must be in `extern \"rust-intrinsic\" { ... }` block");
     }
 }
@@ -270,7 +271,7 @@ fn default_body_is_unstable(
     item_did: DefId,
     feature: Symbol,
     reason: Option<Symbol>,
-    issue: Option<NonZeroU32>,
+    issue: Option<NonZero<u32>>,
 ) {
     let missing_item_name = tcx.associated_item(item_did).name;
     let (mut some_note, mut none_note, mut reason_str) = (false, false, String::new());
@@ -291,12 +292,16 @@ fn default_body_is_unstable(
         reason: reason_str,
     });
 
+    let inject_span = item_did
+        .as_local()
+        .and_then(|id| tcx.crate_level_attribute_injection_span(tcx.local_def_id_to_hir_id(id)));
     rustc_session::parse::add_feature_diagnostics_for_issue(
         &mut err,
         &tcx.sess,
         feature,
         rustc_feature::GateIssue::Library(issue),
         false,
+        inject_span,
     );
 
     err.emit();
@@ -307,7 +312,7 @@ fn bounds_from_generic_predicates<'tcx>(
     tcx: TyCtxt<'tcx>,
     predicates: impl IntoIterator<Item = (ty::Clause<'tcx>, Span)>,
 ) -> (String, String) {
-    let mut types: FxHashMap<Ty<'tcx>, Vec<DefId>> = FxHashMap::default();
+    let mut types: FxIndexMap<Ty<'tcx>, Vec<DefId>> = FxIndexMap::default();
     let mut projections = vec![];
     for (predicate, _) in predicates {
         debug!("predicate {:?}", predicate);
@@ -427,7 +432,7 @@ fn fn_sig_suggestion<'tcx>(
 
     let asyncness = if tcx.asyncness(assoc.def_id).is_async() {
         output = if let ty::Alias(_, alias_ty) = *output.kind() {
-            tcx.explicit_item_bounds(alias_ty.def_id)
+            tcx.explicit_item_super_predicates(alias_ty.def_id)
                 .iter_instantiated_copied(tcx, alias_ty.args)
                 .find_map(|(bound, _)| bound.as_projection_clause()?.no_bound_vars()?.term.ty())
                 .unwrap_or_else(|| {
@@ -462,14 +467,64 @@ fn fn_sig_suggestion<'tcx>(
     )
 }
 
-pub fn ty_kind_suggestion(ty: Ty<'_>) -> Option<&'static str> {
+pub fn ty_kind_suggestion<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>) -> Option<String> {
+    // Keep in sync with `rustc_borrowck/src/diagnostics/conflict_errors.rs:ty_kind_suggestion`.
+    // FIXME: deduplicate the above.
+    let implements_default = |ty| {
+        let Some(default_trait) = tcx.get_diagnostic_item(sym::Default) else {
+            return false;
+        };
+        let infcx = tcx.infer_ctxt().build();
+        infcx
+            .type_implements_trait(default_trait, [ty], ty::ParamEnv::reveal_all())
+            .must_apply_modulo_regions()
+    };
     Some(match ty.kind() {
-        ty::Bool => "true",
-        ty::Char => "'a'",
-        ty::Int(_) | ty::Uint(_) => "42",
-        ty::Float(_) => "3.14159",
-        ty::Error(_) | ty::Never => return None,
-        _ => "value",
+        ty::Never | ty::Error(_) => return None,
+        ty::Bool => "false".to_string(),
+        ty::Char => "\'x\'".to_string(),
+        ty::Int(_) | ty::Uint(_) => "42".into(),
+        ty::Float(_) => "3.14159".into(),
+        ty::Slice(_) => "[]".to_string(),
+        ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::Vec) => {
+            "vec![]".to_string()
+        }
+        ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::String) => {
+            "String::new()".to_string()
+        }
+        ty::Adt(def, args) if def.is_box() => {
+            format!("Box::new({})", ty_kind_suggestion(args[0].expect_ty(), tcx)?)
+        }
+        ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::Option) => {
+            "None".to_string()
+        }
+        ty::Adt(def, args) if Some(def.did()) == tcx.get_diagnostic_item(sym::Result) => {
+            format!("Ok({})", ty_kind_suggestion(args[0].expect_ty(), tcx)?)
+        }
+        ty::Adt(_, _) if implements_default(ty) => "Default::default()".to_string(),
+        ty::Ref(_, ty, mutability) => {
+            if let (ty::Str, Mutability::Not) = (ty.kind(), mutability) {
+                "\"\"".to_string()
+            } else {
+                let Some(ty) = ty_kind_suggestion(*ty, tcx) else {
+                    return None;
+                };
+                format!("&{}{ty}", mutability.prefix_str())
+            }
+        }
+        ty::Array(ty, len) => format!(
+            "[{}; {}]",
+            ty_kind_suggestion(*ty, tcx)?,
+            len.eval_target_usize(tcx, ty::ParamEnv::reveal_all()),
+        ),
+        ty::Tuple(tys) => format!(
+            "({})",
+            tys.iter()
+                .map(|ty| ty_kind_suggestion(ty, tcx))
+                .collect::<Option<Vec<String>>>()?
+                .join(", ")
+        ),
+        _ => "value".to_string(),
     })
 }
 
@@ -507,7 +562,7 @@ fn suggestion_signature<'tcx>(
         }
         ty::AssocKind::Const => {
             let ty = tcx.type_of(assoc.def_id).instantiate_identity();
-            let val = ty_kind_suggestion(ty).unwrap_or("todo!()");
+            let val = ty_kind_suggestion(ty, tcx).unwrap_or_else(|| "value".to_string());
             format!("const {}: {} = {};", assoc.name, ty, val)
         }
     }

@@ -276,6 +276,23 @@ impl InferenceTable<'_> {
             return success(simple(Adjust::NeverToAny)(to_ty.clone()), to_ty.clone(), vec![]);
         }
 
+        // If we are coercing into an ATPIT, coerce into its proxy inference var, instead.
+        let mut to_ty = to_ty;
+        let _to;
+        if let Some(atpit_table) = &self.atpit_coercion_table {
+            if let TyKind::OpaqueType(opaque_ty_id, _) = to_ty.kind(Interner) {
+                if !matches!(
+                    from_ty.kind(Interner),
+                    TyKind::InferenceVar(..) | TyKind::OpaqueType(..)
+                ) {
+                    if let Some(ty) = atpit_table.get(opaque_ty_id) {
+                        _to = ty.clone();
+                        to_ty = &_to;
+                    }
+                }
+            }
+        }
+
         // Consider coercing the subtype to a DST
         if let Ok(ret) = self.try_coerce_unsized(&from_ty, to_ty) {
             return Ok(ret);
@@ -647,7 +664,7 @@ impl InferenceTable<'_> {
         let goal: InEnvironment<DomainGoal> =
             InEnvironment::new(&self.trait_env.env, coerce_unsized_tref.cast(Interner));
 
-        let canonicalized = self.canonicalize(goal);
+        let canonicalized = self.canonicalize_with_free_vars(goal);
 
         // FIXME: rustc's coerce_unsized is more specialized -- it only tries to
         // solve `CoerceUnsized` and `Unsize` goals at this point and leaves the

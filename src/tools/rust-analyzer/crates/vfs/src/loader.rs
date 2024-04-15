@@ -58,7 +58,7 @@ pub enum Message {
         /// The [`Config`] version.
         config_version: u32,
     },
-    /// The handle loaded the following files' content.
+    /// The handle loaded the following files' content for the first time.
     Loaded { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
     /// The handle loaded the following files' content.
     Changed { files: Vec<(AbsPathBuf, Option<Vec<u8>>)> },
@@ -201,7 +201,7 @@ impl Directories {
 /// ```
 fn dirs(base: AbsPathBuf, exclude: &[&str]) -> Directories {
     let exclude = exclude.iter().map(|it| base.join(it)).collect::<Vec<_>>();
-    Directories { extensions: vec!["rs".to_string()], include: vec![base], exclude }
+    Directories { extensions: vec!["rs".to_owned()], include: vec![base], exclude }
 }
 
 impl fmt::Debug for Message {

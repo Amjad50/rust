@@ -51,6 +51,8 @@ use crate::io::{self, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut, SeekFrom};
 /// // We might want to use a BufReader here for efficiency, but let's
 /// // keep this example focused.
 /// let mut file = File::create("foo.txt")?;
+/// // First, we need to allocate 10 bytes to be able to write into.
+/// file.set_len(10)?;
 ///
 /// write_ten_bytes_at_end(&mut file)?;
 /// # Ok(())
@@ -352,6 +354,13 @@ where
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let n = buf.len();
         Read::read_exact(&mut self.remaining_slice(), buf)?;
+        self.pos += n as u64;
+        Ok(())
+    }
+
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        let n = cursor.capacity();
+        Read::read_buf_exact(&mut self.remaining_slice(), cursor)?;
         self.pos += n as u64;
         Ok(())
     }

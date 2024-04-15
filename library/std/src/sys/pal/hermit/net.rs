@@ -80,10 +80,7 @@ impl Socket {
         let mut pollfd = netc::pollfd { fd: self.as_raw_fd(), events: netc::POLLOUT, revents: 0 };
 
         if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
-            return Err(io::const_io_error!(
-                io::ErrorKind::InvalidInput,
-                "cannot set a 0 duration timeout",
-            ));
+            return Err(io::Error::ZERO_TIMEOUT);
         }
 
         let start = Instant::now();
@@ -156,7 +153,7 @@ impl Socket {
             )
         })?;
         unsafe {
-            buf.advance(ret as usize);
+            buf.advance_unchecked(ret as usize);
         }
         Ok(())
     }
@@ -207,7 +204,7 @@ impl Socket {
                 buf.as_mut_ptr(),
                 buf.len(),
                 flags,
-                &mut storage as *mut _ as *mut _,
+                core::ptr::addr_of_mut!(storage) as *mut _,
                 &mut addrlen,
             )
         })?;
@@ -245,10 +242,7 @@ impl Socket {
         let timeout = match dur {
             Some(dur) => {
                 if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
-                    return Err(io::const_io_error!(
-                        io::ErrorKind::InvalidInput,
-                        "cannot set a 0 duration timeout",
-                    ));
+                    return Err(io::Error::ZERO_TIMEOUT);
                 }
 
                 let secs = if dur.as_secs() > netc::time_t::MAX as u64 {
@@ -323,7 +317,7 @@ impl Socket {
             netc::ioctl(
                 self.as_raw_fd(),
                 netc::FIONBIO,
-                &mut nonblocking as *mut _ as *mut core::ffi::c_void,
+                core::ptr::addr_of_mut!(nonblocking) as *mut core::ffi::c_void,
             )
         })
         .map(drop)

@@ -150,13 +150,13 @@ impl RenderType {
             string.push('{');
             write_optional_id(self.id, string);
             string.push('{');
-            for generic in &self.generics.as_ref().map(Vec::as_slice).unwrap_or_default()[..] {
+            for generic in &self.generics.as_deref().unwrap_or_default()[..] {
                 generic.write_to_string(string);
             }
             string.push('}');
             if self.bindings.is_some() {
                 string.push('{');
-                for binding in &self.bindings.as_ref().map(Vec::as_slice).unwrap_or_default()[..] {
+                for binding in &self.bindings.as_deref().unwrap_or_default()[..] {
                     string.push('{');
                     binding.0.write_to_string(string);
                     string.push('{');
@@ -184,40 +184,15 @@ pub(crate) enum RenderTypeId {
 
 impl RenderTypeId {
     pub fn write_to_string(&self, string: &mut String) {
-        // (sign, value)
-        let (sign, id): (bool, u32) = match &self {
+        let id: i32 = match &self {
             // 0 is a sentinel, everything else is one-indexed
             // concrete type
-            RenderTypeId::Index(idx) if *idx >= 0 => (false, (idx + 1isize).try_into().unwrap()),
+            RenderTypeId::Index(idx) if *idx >= 0 => (idx + 1isize).try_into().unwrap(),
             // generic type parameter
-            RenderTypeId::Index(idx) => (true, (-*idx).try_into().unwrap()),
+            RenderTypeId::Index(idx) => (*idx).try_into().unwrap(),
             _ => panic!("must convert render types to indexes before serializing"),
         };
-        // zig-zag encoding
-        let value: u32 = (id << 1) | (if sign { 1 } else { 0 });
-        // Self-terminating hex use capital letters for everything but the
-        // least significant digit, which is lowercase. For example, decimal 17
-        // would be `` Aa `` if zig-zag encoding weren't used.
-        //
-        // Zig-zag encoding, however, stores the sign bit as the last bit.
-        // This means, in the last hexit, 1 is actually `c`, -1 is `b`
-        // (`a` is the imaginary -0), and, because all the bits are shifted
-        // by one, `` A` `` is actually 8 and `` Aa `` is -8.
-        //
-        // https://rust-lang.github.io/rustc-dev-guide/rustdoc-internals/search.html
-        // describes the encoding in more detail.
-        let mut shift: u32 = 28;
-        let mut mask: u32 = 0xF0_00_00_00;
-        while shift < 32 {
-            let hexit = (value & mask) >> shift;
-            if hexit != 0 || shift == 0 {
-                let hex =
-                    char::try_from(if shift == 0 { '`' } else { '@' } as u32 + hexit).unwrap();
-                string.push(hex);
-            }
-            shift = shift.wrapping_sub(4);
-            mask = mask >> 4;
-        }
+        search_index::encode::write_vlqhex_to_string(id, string);
     }
 }
 
@@ -883,7 +858,7 @@ fn assoc_const(
         w,
         "{indent}{vis}const <a{href} class=\"constant\">{name}</a>{generics}: {ty}",
         indent = " ".repeat(indent),
-        vis = visibility_print_with_space(it.visibility(tcx), it.item_id, cx),
+        vis = visibility_print_with_space(it, cx),
         href = assoc_href_attr(it, link, cx),
         name = it.name.as_ref().unwrap(),
         generics = generics.print(cx),
@@ -912,12 +887,11 @@ fn assoc_type(
     indent: usize,
     cx: &Context<'_>,
 ) {
-    let tcx = cx.tcx();
     write!(
         w,
         "{indent}{vis}type <a{href} class=\"associatedtype\">{name}</a>{generics}",
         indent = " ".repeat(indent),
-        vis = visibility_print_with_space(it.visibility(tcx), it.item_id, cx),
+        vis = visibility_print_with_space(it, cx),
         href = assoc_href_attr(it, link, cx),
         name = it.name.as_ref().unwrap(),
         generics = generics.print(cx),
@@ -945,7 +919,7 @@ fn assoc_method(
     let tcx = cx.tcx();
     let header = meth.fn_header(tcx).expect("Trying to get header from a non-function item");
     let name = meth.name.as_ref().unwrap();
-    let vis = visibility_print_with_space(meth.visibility(tcx), meth.item_id, cx).to_string();
+    let vis = visibility_print_with_space(meth, cx).to_string();
     let defaultness = print_default_space(meth.is_default());
     // FIXME: Once https://github.com/rust-lang/rust/issues/67792 is implemented, we can remove
     // this condition.
@@ -1680,7 +1654,7 @@ fn render_impl(
                 write!(
                     &mut doc_buffer,
                     "{}",
-                    document_short(item, cx, link, parent, rendering_params.show_def_docs,)
+                    document_short(item, cx, link, parent, rendering_params.show_def_docs)
                 );
             }
         }
@@ -1698,9 +1672,10 @@ fn render_impl(
                     let id = cx.derive_id(format!("{item_type}.{name}"));
                     let source_id = trait_
                         .and_then(|trait_| {
-                            trait_.items.iter().find(|item| {
-                                item.name.map(|n| n.as_str().eq(name.as_str())).unwrap_or(false)
-                            })
+                            trait_
+                                .items
+                                .iter()
+                                .find(|item| item.name.map(|n| n == *name).unwrap_or(false))
                         })
                         .map(|item| format!("{}.{name}", item.type_()));
                     write!(w, "<section id=\"{id}\" class=\"{item_type}{in_trait_class}\">");
@@ -2043,15 +2018,13 @@ pub(crate) fn render_impl_summary(
     w.write_str("</h3>");
 
     let is_trait = inner_impl.trait_.is_some();
-    if is_trait {
-        if let Some(portability) = portability(&i.impl_item, Some(parent)) {
-            write!(
-                w,
-                "<span class=\"item-info\">\
-                     <div class=\"stab portability\">{portability}</div>\
-                 </span>",
-            );
-        }
+    if is_trait && let Some(portability) = portability(&i.impl_item, Some(parent)) {
+        write!(
+            w,
+            "<span class=\"item-info\">\
+                 <div class=\"stab portability\">{portability}</div>\
+             </span>",
+        );
     }
 
     w.write_str("</section>");
@@ -2508,7 +2481,7 @@ fn render_call_locations<W: fmt::Write>(mut w: W, cx: &mut Context<'_>, item: &c
         // Look for the example file in the source map if it exists, otherwise return a dummy span
         let file_span = (|| {
             let source_map = tcx.sess.source_map();
-            let crate_src = tcx.sess.local_crate_source_file()?;
+            let crate_src = tcx.sess.local_crate_source_file()?.into_local_path()?;
             let abs_crate_src = crate_src.canonicalize().ok()?;
             let crate_root = abs_crate_src.parent()?.parent()?;
             let rel_path = path.strip_prefix(crate_root).ok()?;

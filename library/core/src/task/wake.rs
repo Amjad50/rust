@@ -2,6 +2,7 @@
 
 use crate::mem::transmute;
 
+use crate::any::Any;
 use crate::fmt;
 use crate::marker::PhantomData;
 use crate::ptr;
@@ -9,10 +10,14 @@ use crate::ptr;
 /// A `RawWaker` allows the implementor of a task executor to create a [`Waker`]
 /// or a [`LocalWaker`] which provides customized wakeup behavior.
 ///
-/// [vtable]: https://en.wikipedia.org/wiki/Virtual_method_table
-///
 /// It consists of a data pointer and a [virtual function pointer table (vtable)][vtable]
 /// that customizes the behavior of the `RawWaker`.
+///
+/// `RawWaker`s are unsafe to use.
+/// Implementing the [`Wake`] trait is a safe alternative that requires memory allocation.
+///
+/// [vtable]: https://en.wikipedia.org/wiki/Virtual_method_table
+/// [`Wake`]: ../../alloc/task/trait.Wake.html
 #[derive(PartialEq, Debug)]
 #[stable(feature = "futures_api", since = "1.36.0")]
 pub struct RawWaker {
@@ -98,6 +103,12 @@ impl RawWaker {
 /// pointer of a properly constructed [`RawWaker`] object from inside the
 /// [`RawWaker`] implementation. Calling one of the contained functions using
 /// any other `data` pointer will cause undefined behavior.
+///
+/// Note that while this type implements `PartialEq`, comparing function pointers, and hence
+/// comparing structs like this that contain function pointers, is unreliable: pointers to the same
+/// function can compare inequal (because functions are duplicated in multiple codegen units), and
+/// pointers to *different* functions can compare equal (since identical functions can be
+/// deduplicated within a codegen unit).
 ///
 /// # Thread safety
 /// If the [`RawWaker`] will be used to construct a [`Waker`] then
@@ -210,6 +221,12 @@ impl RawWakerVTable {
     }
 }
 
+#[derive(Debug)]
+enum ExtData<'a> {
+    Some(&'a mut dyn Any),
+    None(()),
+}
+
 /// The context of an asynchronous task.
 ///
 /// Currently, `Context` only serves to provide access to a [`&Waker`](Waker)
@@ -219,6 +236,7 @@ impl RawWakerVTable {
 pub struct Context<'a> {
     waker: &'a Waker,
     local_waker: &'a LocalWaker,
+    ext: ExtData<'a>,
     // Ensure we future-proof against variance changes by forcing
     // the lifetime to be invariant (argument-position lifetimes
     // are contravariant while return-position lifetimes are
@@ -247,12 +265,24 @@ impl<'a> Context<'a> {
     pub const fn waker(&self) -> &'a Waker {
         &self.waker
     }
+
     /// Returns a reference to the [`LocalWaker`] for the current task.
     #[inline]
     #[unstable(feature = "local_waker", issue = "118959")]
     #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
     pub const fn local_waker(&self) -> &'a LocalWaker {
         &self.local_waker
+    }
+
+    /// Returns a reference to the extension data for the current task.
+    #[inline]
+    #[unstable(feature = "context_ext", issue = "123392")]
+    #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
+    pub const fn ext(&mut self) -> &mut dyn Any {
+        match &mut self.ext {
+            ExtData::Some(data) => *data,
+            ExtData::None(unit) => unit,
+        }
     }
 }
 
@@ -290,6 +320,7 @@ impl fmt::Debug for Context<'_> {
 pub struct ContextBuilder<'a> {
     waker: &'a Waker,
     local_waker: &'a LocalWaker,
+    ext: ExtData<'a>,
     // Ensure we future-proof against variance changes by forcing
     // the lifetime to be invariant (argument-position lifetimes
     // are contravariant while return-position lifetimes are
@@ -308,7 +339,39 @@ impl<'a> ContextBuilder<'a> {
     pub const fn from_waker(waker: &'a Waker) -> Self {
         // SAFETY: LocalWaker is just Waker without thread safety
         let local_waker = unsafe { transmute(waker) };
-        Self { waker: waker, local_waker, _marker: PhantomData, _marker2: PhantomData }
+        Self {
+            waker: waker,
+            local_waker,
+            ext: ExtData::None(()),
+            _marker: PhantomData,
+            _marker2: PhantomData,
+        }
+    }
+
+    /// Create a ContextBuilder from an existing Context.
+    #[inline]
+    #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
+    #[unstable(feature = "context_ext", issue = "123392")]
+    pub const fn from(cx: &'a mut Context<'_>) -> Self {
+        let ext = match &mut cx.ext {
+            ExtData::Some(ext) => ExtData::Some(*ext),
+            ExtData::None(()) => ExtData::None(()),
+        };
+        Self {
+            waker: cx.waker,
+            local_waker: cx.local_waker,
+            ext,
+            _marker: PhantomData,
+            _marker2: PhantomData,
+        }
+    }
+
+    /// This method is used to set the value for the waker on `Context`.
+    #[inline]
+    #[unstable(feature = "context_ext", issue = "123392")]
+    #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
+    pub const fn waker(self, waker: &'a Waker) -> Self {
+        Self { waker, ..self }
     }
 
     /// This method is used to set the value for the local waker on `Context`.
@@ -319,13 +382,21 @@ impl<'a> ContextBuilder<'a> {
         Self { local_waker, ..self }
     }
 
+    /// This method is used to set the value for the extension data on `Context`.
+    #[inline]
+    #[unstable(feature = "context_ext", issue = "123392")]
+    #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
+    pub const fn ext(self, data: &'a mut dyn Any) -> Self {
+        Self { ext: ExtData::Some(data), ..self }
+    }
+
     /// Builds the `Context`.
     #[inline]
     #[unstable(feature = "local_waker", issue = "118959")]
     #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
     pub const fn build(self) -> Context<'a> {
-        let ContextBuilder { waker, local_waker, _marker, _marker2 } = self;
-        Context { waker, local_waker, _marker, _marker2 }
+        let ContextBuilder { waker, local_waker, ext, _marker, _marker2 } = self;
+        Context { waker, local_waker, ext, _marker, _marker2 }
     }
 }
 
@@ -349,8 +420,12 @@ impl<'a> ContextBuilder<'a> {
 /// of `*waker = new_waker.clone()`, as the former will avoid cloning the waker
 /// unnecessarily if the two wakers [wake the same task](Self::will_wake).
 ///
+/// Constructing a `Waker` from a [`RawWaker`] is unsafe.
+/// Implementing the [`Wake`] trait is a safe alternative that requires memory allocation.
+///
 /// [`Future::poll()`]: core::future::Future::poll
 /// [`Poll::Pending`]: core::task::Poll::Pending
+/// [`Wake`]: ../../alloc/task/trait.Wake.html
 #[cfg_attr(not(doc), repr(transparent))] // work around https://github.com/rust-lang/rust/issues/66401
 #[stable(feature = "futures_api", since = "1.36.0")]
 pub struct Waker {
@@ -427,14 +502,22 @@ impl Waker {
     #[must_use]
     #[stable(feature = "futures_api", since = "1.36.0")]
     pub fn will_wake(&self, other: &Waker) -> bool {
-        self.waker == other.waker
+        let RawWaker { data: a_data, vtable: a_vtable } = self.waker;
+        let RawWaker { data: b_data, vtable: b_vtable } = other.waker;
+        a_data == b_data && ptr::eq(a_vtable, b_vtable)
     }
 
     /// Creates a new `Waker` from [`RawWaker`].
     ///
+    /// # Safety
+    ///
     /// The behavior of the returned `Waker` is undefined if the contract defined
     /// in [`RawWaker`]'s and [`RawWakerVTable`]'s documentation is not upheld.
-    /// Therefore this method is unsafe.
+    ///
+    /// (Authors wishing to avoid unsafe code may implement the [`Wake`] trait instead, at the
+    /// cost of a required heap allocation.)
+    ///
+    /// [`Wake`]: ../../alloc/task/trait.Wake.html
     #[inline]
     #[must_use]
     #[stable(feature = "futures_api", since = "1.36.0")]
@@ -600,7 +683,7 @@ impl LocalWaker {
     ///
     /// [`poll()`]: crate::future::Future::poll
     #[inline]
-    #[stable(feature = "futures_api", since = "1.36.0")]
+    #[unstable(feature = "local_waker", issue = "118959")]
     pub fn wake(self) {
         // The actual wakeup call is delegated through a virtual function call
         // to the implementation which is defined by the executor.
@@ -622,7 +705,7 @@ impl LocalWaker {
     /// the case where an owned `Waker` is available. This method should be preferred to
     /// calling `waker.clone().wake()`.
     #[inline]
-    #[stable(feature = "futures_api", since = "1.36.0")]
+    #[unstable(feature = "local_waker", issue = "118959")]
     pub fn wake_by_ref(&self) {
         // The actual wakeup call is delegated through a virtual function call
         // to the implementation which is defined by the executor.
@@ -642,7 +725,7 @@ impl LocalWaker {
     /// avoid cloning the waker when they would wake the same task anyway.
     #[inline]
     #[must_use]
-    #[stable(feature = "futures_api", since = "1.36.0")]
+    #[unstable(feature = "local_waker", issue = "118959")]
     pub fn will_wake(&self, other: &LocalWaker) -> bool {
         self.waker == other.waker
     }
@@ -654,7 +737,7 @@ impl LocalWaker {
     /// Therefore this method is unsafe.
     #[inline]
     #[must_use]
-    #[stable(feature = "futures_api", since = "1.36.0")]
+    #[unstable(feature = "local_waker", issue = "118959")]
     #[rustc_const_unstable(feature = "const_waker", issue = "102012")]
     pub const unsafe fn from_raw(waker: RawWaker) -> LocalWaker {
         Self { waker }
@@ -726,7 +809,18 @@ impl AsRef<LocalWaker> for Waker {
     }
 }
 
-#[stable(feature = "futures_api", since = "1.36.0")]
+#[unstable(feature = "local_waker", issue = "118959")]
+impl Drop for LocalWaker {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: This is safe because `LocalWaker::from_raw` is the only way
+        // to initialize `drop` and `data` requiring the user to acknowledge
+        // that the contract of `RawWaker` is upheld.
+        unsafe { (self.waker.vtable.drop)(self.waker.data) }
+    }
+}
+
+#[unstable(feature = "local_waker", issue = "118959")]
 impl fmt::Debug for LocalWaker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vtable_ptr = self.waker.vtable as *const RawWakerVTable;

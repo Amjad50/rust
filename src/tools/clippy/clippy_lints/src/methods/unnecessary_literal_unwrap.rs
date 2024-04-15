@@ -63,7 +63,7 @@ pub(super) fn check(
     let help_message = format!("used `{method}()` on `{constructor}` value");
     let suggestion_message = format!("remove the `{constructor}` and `{method}()`");
 
-    span_lint_and_then(cx, UNNECESSARY_LITERAL_UNWRAP, expr.span, &help_message, |diag| {
+    span_lint_and_then(cx, UNNECESSARY_LITERAL_UNWRAP, expr.span, help_message, |diag| {
         let suggestions = match (constructor, method, ty) {
             ("None", "unwrap", _) => Some(vec![(expr.span, "panic!()".to_string())]),
             ("None", "expect", _) => Some(vec![
@@ -76,7 +76,7 @@ pub(super) fn check(
                     (expr.span.with_lo(call_args[0].span.hi()), String::new()),
                 ];
                 // try to also remove the unsafe block if present
-                if let hir::Node::Block(block) = cx.tcx.hir().get_parent(expr.hir_id)
+                if let hir::Node::Block(block) = cx.tcx.parent_hir_node(expr.hir_id)
                     && let hir::BlockCheckMode::UnsafeBlock(hir::UnsafeSource::UserProvided) = block.rules
                 {
                     suggs.extend([

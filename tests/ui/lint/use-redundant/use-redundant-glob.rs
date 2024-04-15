@@ -1,4 +1,4 @@
-// check-pass
+//@ check-pass
 #![warn(unused_imports)]
 
 pub mod bar {
@@ -8,7 +8,7 @@ pub mod bar {
 
 pub fn warning() -> bar::Foo {
     use bar::*;
-    use bar::Foo; //~ WARNING imported redundantly
+    use bar::Foo; //FIXME(unused_imports): ~ WARNING imported redundantly
     Foo(Bar('a'))
 }
 

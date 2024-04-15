@@ -1,5 +1,4 @@
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::query::Providers;
@@ -8,6 +7,7 @@ use rustc_middle::ty::GenericArgsRef;
 use rustc_middle::ty::{self, Instance, TyCtxt, TypeVisitableExt};
 use rustc_span::sym;
 use rustc_trait_selection::traits;
+use rustc_type_ir::ClosureKind;
 use traits::{translate_args, Reveal};
 
 use crate::errors::UnexpectedFnPtrAssociatedItem;
@@ -28,7 +28,7 @@ fn resolve_instance<'tcx>(
             tcx.normalize_erasing_regions(param_env, args),
         )
     } else {
-        let def = if matches!(tcx.def_kind(def_id), DefKind::Fn) && tcx.is_intrinsic(def_id) {
+        let def = if tcx.intrinsic(def_id).is_some() {
             debug!(" => intrinsic");
             ty::InstanceDef::Intrinsic(def_id)
         } else if Some(def_id) == tcx.lang_items().drop_in_place_fn() {
@@ -209,10 +209,8 @@ fn resolve_associated_item<'tcx>(
                 let name = tcx.item_name(trait_item_id);
                 if name == sym::clone {
                     let self_ty = trait_ref.self_ty();
-
-                    let is_copy = self_ty.is_copy_modulo_regions(tcx, param_env);
                     match self_ty.kind() {
-                        _ if is_copy => (),
+                        ty::FnDef(..) | ty::FnPtr(_) => (),
                         ty::Coroutine(..)
                         | ty::CoroutineWitness(..)
                         | ty::Closure(..)
@@ -247,7 +245,7 @@ fn resolve_associated_item<'tcx>(
                         span: tcx.def_span(trait_item_id),
                     })
                 }
-            } else if tcx.fn_trait_kind_from_def_id(trait_ref.def_id).is_some() {
+            } else if let Some(target_kind) = tcx.fn_trait_kind_from_def_id(trait_ref.def_id) {
                 // FIXME: This doesn't check for malformed libcore that defines, e.g.,
                 // `trait Fn { fn call_once(&self) { .. } }`. This is mostly for extension
                 // methods.
@@ -266,13 +264,7 @@ fn resolve_associated_item<'tcx>(
                 }
                 match *rcvr_args.type_at(0).kind() {
                     ty::Closure(closure_def_id, args) => {
-                        let trait_closure_kind = tcx.fn_trait_kind_from_def_id(trait_id).unwrap();
-                        Some(Instance::resolve_closure(
-                            tcx,
-                            closure_def_id,
-                            args,
-                            trait_closure_kind,
-                        ))
+                        Some(Instance::resolve_closure(tcx, closure_def_id, args, target_kind))
                     }
                     ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
                         def: ty::InstanceDef::FnPtrShim(trait_item_id, rcvr_args.type_at(0)),
@@ -290,7 +282,7 @@ fn resolve_associated_item<'tcx>(
                             Some(Instance {
                                 def: ty::InstanceDef::ConstructCoroutineInClosureShim {
                                     coroutine_closure_def_id,
-                                    target_kind: ty::ClosureKind::FnOnce,
+                                    receiver_by_ref: target_kind != ty::ClosureKind::FnOnce,
                                 },
                                 args,
                             })
@@ -305,18 +297,15 @@ fn resolve_associated_item<'tcx>(
             {
                 match *rcvr_args.type_at(0).kind() {
                     ty::CoroutineClosure(coroutine_closure_def_id, args) => {
-                        // If we're computing `AsyncFnOnce`/`AsyncFnMut` for a by-ref closure,
-                        // or `AsyncFnOnce` for a by-mut closure, then construct a new body that
-                        // has the right return types.
-                        //
-                        // Specifically, `AsyncFnMut` for a by-ref coroutine-closure just needs
-                        // to have its input and output types fixed (`&mut self` and returning
-                        // `i16` coroutine kind).
-                        if target_kind > args.as_coroutine_closure().kind() {
+                        if target_kind == ClosureKind::FnOnce
+                            && args.as_coroutine_closure().kind() != ClosureKind::FnOnce
+                        {
+                            // If we're computing `AsyncFnOnce` for a by-ref closure then
+                            // construct a new body that has the right return types.
                             Some(Instance {
                                 def: ty::InstanceDef::ConstructCoroutineInClosureShim {
                                     coroutine_closure_def_id,
-                                    target_kind,
+                                    receiver_by_ref: false,
                                 },
                                 args,
                             })
@@ -325,13 +314,7 @@ fn resolve_associated_item<'tcx>(
                         }
                     }
                     ty::Closure(closure_def_id, args) => {
-                        let trait_closure_kind = tcx.fn_trait_kind_from_def_id(trait_id).unwrap();
-                        Some(Instance::resolve_closure(
-                            tcx,
-                            closure_def_id,
-                            args,
-                            trait_closure_kind,
-                        ))
+                        Some(Instance::resolve_closure(tcx, closure_def_id, args, target_kind))
                     }
                     ty::FnDef(..) | ty::FnPtr(..) => Some(Instance {
                         def: ty::InstanceDef::FnPtrShim(trait_item_id, rcvr_args.type_at(0)),

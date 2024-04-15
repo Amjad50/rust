@@ -46,11 +46,10 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
             return;
         };
         if let ConstantSource::Constant = source
-            && let Some(node) = cx.tcx.hir().find_parent(e.hir_id)
             && let Node::Item(Item {
                 kind: ItemKind::Const(..),
                 ..
-            }) = node
+            }) = cx.tcx.parent_hir_node(e.hir_id)
         {
             return;
         }
@@ -59,7 +58,7 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
                 cx,
                 ASSERTIONS_ON_CONSTANTS,
                 macro_call.span,
-                &format!(
+                format!(
                     "`{}!(true)` will be optimized out by the compiler",
                     cx.tcx.item_name(macro_call.def_id)
                 ),
@@ -75,9 +74,9 @@ impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
                 cx,
                 ASSERTIONS_ON_CONSTANTS,
                 macro_call.span,
-                &format!("`assert!(false{assert_arg})` should probably be replaced"),
+                format!("`assert!(false{assert_arg})` should probably be replaced"),
                 None,
-                &format!("use `panic!({panic_arg})` or `unreachable!({panic_arg})`"),
+                format!("use `panic!({panic_arg})` or `unreachable!({panic_arg})`"),
             );
         }
     }

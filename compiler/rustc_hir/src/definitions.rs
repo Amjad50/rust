@@ -287,6 +287,8 @@ pub enum DefPathData {
     /// An existential `impl Trait` type node.
     /// Argument position `impl Trait` have a `TypeNs` with their pretty-printed name.
     OpaqueTy,
+    /// An anonymous struct or union type i.e. `struct { foo: Type }` or `union { bar: Type }`
+    AnonAdt,
 }
 
 impl Definitions {
@@ -378,14 +380,19 @@ impl Definitions {
     pub fn local_def_path_hash_to_def_id(
         &self,
         hash: DefPathHash,
-        err: &mut dyn FnMut() -> !,
+        err_msg: &dyn std::fmt::Debug,
     ) -> LocalDefId {
         debug_assert!(hash.stable_crate_id() == self.table.stable_crate_id);
+        #[cold]
+        #[inline(never)]
+        fn err(err_msg: &dyn std::fmt::Debug) -> ! {
+            panic!("{err_msg:?}")
+        }
         self.table
             .def_path_hash_to_index
             .get(&hash.local_hash())
             .map(|local_def_index| LocalDefId { local_def_index })
-            .unwrap_or_else(|| err())
+            .unwrap_or_else(|| err(err_msg))
     }
 
     pub fn def_path_hash_to_def_index_map(&self) -> &DefPathHashMap {
@@ -409,15 +416,18 @@ impl DefPathData {
         match *self {
             TypeNs(name) if name == kw::Empty => None,
             TypeNs(name) | ValueNs(name) | MacroNs(name) | LifetimeNs(name) => Some(name),
+
             Impl | ForeignMod | CrateRoot | Use | GlobalAsm | Closure | Ctor | AnonConst
-            | OpaqueTy => None,
+            | OpaqueTy | AnonAdt => None,
         }
     }
 
     pub fn name(&self) -> DefPathDataName {
         use self::DefPathData::*;
         match *self {
-            TypeNs(name) if name == kw::Empty => DefPathDataName::Anon { namespace: sym::opaque },
+            TypeNs(name) if name == kw::Empty => {
+                DefPathDataName::Anon { namespace: sym::synthetic }
+            }
             TypeNs(name) | ValueNs(name) | MacroNs(name) | LifetimeNs(name) => {
                 DefPathDataName::Named(name)
             }
@@ -431,6 +441,7 @@ impl DefPathData {
             Ctor => DefPathDataName::Anon { namespace: sym::constructor },
             AnonConst => DefPathDataName::Anon { namespace: sym::constant },
             OpaqueTy => DefPathDataName::Anon { namespace: sym::opaque },
+            AnonAdt => DefPathDataName::Anon { namespace: sym::anon_adt },
         }
     }
 }

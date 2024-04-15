@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(associated_type_bounds)]
+//@ check-pass
 
 use std::fmt::Debug;
 use std::iter::Once;

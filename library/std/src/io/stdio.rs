@@ -11,9 +11,11 @@ use crate::fs::File;
 use crate::io::{
     self, BorrowedCursor, BufReader, IoSlice, IoSliceMut, LineWriter, Lines, SpecReadByte,
 };
+use crate::panic::{RefUnwindSafe, UnwindSafe};
 use crate::sync::atomic::{AtomicBool, Ordering};
-use crate::sync::{Arc, Mutex, MutexGuard, OnceLock, ReentrantMutex, ReentrantMutexGuard};
+use crate::sync::{Arc, Mutex, MutexGuard, OnceLock, ReentrantLock, ReentrantLockGuard};
 use crate::sys::stdio;
+use crate::thread::AccessError;
 
 type LocalStream = Arc<Mutex<Vec<u8>>>;
 
@@ -127,8 +129,8 @@ impl Write for StdoutRaw {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        let total = bufs.iter().map(|b| b.len()).sum();
-        handle_ebadf(self.0.write_vectored(bufs), total)
+        let total = || bufs.iter().map(|b| b.len()).sum();
+        handle_ebadf_lazy(self.0.write_vectored(bufs), total)
     }
 
     #[inline]
@@ -159,8 +161,8 @@ impl Write for StderrRaw {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        let total = bufs.iter().map(|b| b.len()).sum();
-        handle_ebadf(self.0.write_vectored(bufs), total)
+        let total = || bufs.iter().map(|b| b.len()).sum();
+        handle_ebadf_lazy(self.0.write_vectored(bufs), total)
     }
 
     #[inline]
@@ -188,6 +190,13 @@ impl Write for StderrRaw {
 fn handle_ebadf<T>(r: io::Result<T>, default: T) -> io::Result<T> {
     match r {
         Err(ref e) if stdio::is_ebadf(e) => Ok(default),
+        r => r,
+    }
+}
+
+fn handle_ebadf_lazy<T>(r: io::Result<T>, default: impl FnOnce() -> T) -> io::Result<T> {
+    match r {
+        Err(ref e) if stdio::is_ebadf(e) => Ok(default()),
         r => r,
     }
 }
@@ -443,6 +452,38 @@ impl Read for Stdin {
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         self.lock().read_exact(buf)
     }
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        self.lock().read_buf_exact(cursor)
+    }
+}
+
+#[stable(feature = "read_shared_stdin", since = "1.78.0")]
+impl Read for &Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.lock().read(buf)
+    }
+    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.lock().read_buf(buf)
+    }
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        self.lock().read_vectored(bufs)
+    }
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        self.lock().is_read_vectored()
+    }
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.lock().read_to_end(buf)
+    }
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.lock().read_to_string(buf)
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.lock().read_exact(buf)
+    }
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        self.lock().read_buf_exact(cursor)
+    }
 }
 
 // only used by platform-dependent io::copy specializations, i.e. unused on some platforms
@@ -482,6 +523,10 @@ impl Read for StdinLock<'_> {
 
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         self.inner.read_exact(buf)
+    }
+
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        self.inner.read_buf_exact(cursor)
     }
 }
 
@@ -545,7 +590,7 @@ pub struct Stdout {
     // FIXME: this should be LineWriter or BufWriter depending on the state of
     //        stdout (tty or not). Note that if this is not line buffered it
     //        should also flush-on-panic or some form of flush-on-abort.
-    inner: &'static ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>,
+    inner: &'static ReentrantLock<RefCell<LineWriter<StdoutRaw>>>,
 }
 
 /// A locked reference to the [`Stdout`] handle.
@@ -567,10 +612,10 @@ pub struct Stdout {
 #[must_use = "if unused stdout will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StdoutLock<'a> {
-    inner: ReentrantMutexGuard<'a, RefCell<LineWriter<StdoutRaw>>>,
+    inner: ReentrantLockGuard<'a, RefCell<LineWriter<StdoutRaw>>>,
 }
 
-static STDOUT: OnceLock<ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>> = OnceLock::new();
+static STDOUT: OnceLock<ReentrantLock<RefCell<LineWriter<StdoutRaw>>>> = OnceLock::new();
 
 /// Constructs a new handle to the standard output of the current process.
 ///
@@ -624,7 +669,7 @@ static STDOUT: OnceLock<ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>> = OnceLo
 pub fn stdout() -> Stdout {
     Stdout {
         inner: STDOUT
-            .get_or_init(|| ReentrantMutex::new(RefCell::new(LineWriter::new(stdout_raw())))),
+            .get_or_init(|| ReentrantLock::new(RefCell::new(LineWriter::new(stdout_raw())))),
     }
 }
 
@@ -635,7 +680,7 @@ pub fn cleanup() {
     let mut initialized = false;
     let stdout = STDOUT.get_or_init(|| {
         initialized = true;
-        ReentrantMutex::new(RefCell::new(LineWriter::with_capacity(0, stdout_raw())))
+        ReentrantLock::new(RefCell::new(LineWriter::with_capacity(0, stdout_raw())))
     });
 
     if !initialized {
@@ -677,6 +722,12 @@ impl Stdout {
         StdoutLock { inner: self.inner.lock() }
     }
 }
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl UnwindSafe for Stdout {}
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl RefUnwindSafe for Stdout {}
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stdout {
@@ -737,6 +788,12 @@ impl Write for &Stdout {
     }
 }
 
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl UnwindSafe for StdoutLock<'_> {}
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl RefUnwindSafe for StdoutLock<'_> {}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for StdoutLock<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -786,7 +843,7 @@ impl fmt::Debug for StdoutLock<'_> {
 /// standard library or via raw Windows API calls, will fail.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Stderr {
-    inner: &'static ReentrantMutex<RefCell<StderrRaw>>,
+    inner: &'static ReentrantLock<RefCell<StderrRaw>>,
 }
 
 /// A locked reference to the [`Stderr`] handle.
@@ -808,7 +865,7 @@ pub struct Stderr {
 #[must_use = "if unused stderr will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StderrLock<'a> {
-    inner: ReentrantMutexGuard<'a, RefCell<StderrRaw>>,
+    inner: ReentrantLockGuard<'a, RefCell<StderrRaw>>,
 }
 
 /// Constructs a new handle to the standard error of the current process.
@@ -862,8 +919,8 @@ pub fn stderr() -> Stderr {
     // Note that unlike `stdout()` we don't use `at_exit` here to register a
     // destructor. Stderr is not buffered, so there's no need to run a
     // destructor for flushing the buffer
-    static INSTANCE: ReentrantMutex<RefCell<StderrRaw>> =
-        ReentrantMutex::new(RefCell::new(stderr_raw()));
+    static INSTANCE: ReentrantLock<RefCell<StderrRaw>> =
+        ReentrantLock::new(RefCell::new(stderr_raw()));
 
     Stderr { inner: &INSTANCE }
 }
@@ -897,6 +954,12 @@ impl Stderr {
         StderrLock { inner: self.inner.lock() }
     }
 }
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl UnwindSafe for Stderr {}
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl RefUnwindSafe for Stderr {}
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stderr {
@@ -957,6 +1020,12 @@ impl Write for &Stderr {
     }
 }
 
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl UnwindSafe for StderrLock<'_> {}
+
+#[stable(feature = "catch_unwind", since = "1.9.0")]
+impl RefUnwindSafe for StderrLock<'_> {}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for StderrLock<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -996,12 +1065,31 @@ impl fmt::Debug for StderrLock<'_> {
 )]
 #[doc(hidden)]
 pub fn set_output_capture(sink: Option<LocalStream>) -> Option<LocalStream> {
+    try_set_output_capture(sink).expect(
+        "cannot access a Thread Local Storage value \
+         during or after destruction",
+    )
+}
+
+/// Tries to set the thread-local output capture buffer and returns the old one.
+/// This may fail once thread-local destructors are called. It's used in panic
+/// handling instead of `set_output_capture`.
+#[unstable(
+    feature = "internal_output_capture",
+    reason = "this function is meant for use in the test crate \
+    and may disappear in the future",
+    issue = "none"
+)]
+#[doc(hidden)]
+pub fn try_set_output_capture(
+    sink: Option<LocalStream>,
+) -> Result<Option<LocalStream>, AccessError> {
     if sink.is_none() && !OUTPUT_CAPTURE_USED.load(Ordering::Relaxed) {
         // OUTPUT_CAPTURE is definitely None since OUTPUT_CAPTURE_USED is false.
-        return None;
+        return Ok(None);
     }
     OUTPUT_CAPTURE_USED.store(true, Ordering::Relaxed);
-    OUTPUT_CAPTURE.with(move |slot| slot.replace(sink))
+    OUTPUT_CAPTURE.try_with(move |slot| slot.replace(sink))
 }
 
 /// Write `args` to the capture buffer if enabled and possible, or `global_s`

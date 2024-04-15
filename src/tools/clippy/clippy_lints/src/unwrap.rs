@@ -208,7 +208,7 @@ struct MutationVisitor<'tcx> {
 /// (i.e. the `x` in `x.as_mut()`), and that is the reason for why we care about its parent
 /// expression: that will be where the actual method call is.
 fn is_option_as_mut_use(tcx: TyCtxt<'_>, expr_id: HirId) -> bool {
-    if let Node::Expr(mutating_expr) = tcx.hir().get_parent(expr_id)
+    if let Node::Expr(mutating_expr) = tcx.parent_hir_node(expr_id)
         && let ExprKind::MethodCall(path, ..) = mutating_expr.kind
     {
         path.ident.name.as_str() == "as_mut"
@@ -338,7 +338,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'a, 'tcx> {
                         UNNECESSARY_UNWRAP,
                         expr.hir_id,
                         expr.span,
-                        &format!(
+                        format!(
                             "called `{}` on `{unwrappable_variable_name}` after checking its variant with `{}`",
                             method_name.ident.name,
                             unwrappable.check_name.ident.as_str(),
@@ -373,7 +373,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'a, 'tcx> {
                         PANICKING_UNWRAP,
                         expr.hir_id,
                         expr.span,
-                        &format!("this call to `{}()` will always panic", method_name.ident.name),
+                        format!("this call to `{}()` will always panic", method_name.ident.name),
                         |diag| {
                             diag.span_label(unwrappable.check.span, "because of this check");
                         },

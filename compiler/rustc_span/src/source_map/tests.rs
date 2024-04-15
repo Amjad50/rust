@@ -1,7 +1,5 @@
 use super::*;
 
-use rustc_data_structures::sync::FreezeLock;
-
 fn init_source_map() -> SourceMap {
     let sm = SourceMap::new(FilePathMapping::empty());
     sm.new_source_file(PathBuf::from("blork.rs").into(), "first line.\nsecond line".to_string());
@@ -245,7 +243,7 @@ fn t10() {
         src_hash,
         stable_id,
         source_len.to_u32(),
-        CrateNum::new(0),
+        CrateNum::ZERO,
         FreezeLock::new(lines.read().clone()),
         multibyte_chars,
         non_narrow_chars,

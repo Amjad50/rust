@@ -100,7 +100,7 @@ impl<'tcx> LateLintPass<'tcx> for Default {
                 cx,
                 DEFAULT_TRAIT_ACCESS,
                 expr.span,
-                &format!("calling `{replacement}` is more clear than this expression"),
+                format!("calling `{replacement}` is more clear than this expression"),
                 "try",
                 replacement,
                 Applicability::Unspecified, // First resolve the TODO above
@@ -121,7 +121,7 @@ impl<'tcx> LateLintPass<'tcx> for Default {
             // find all binding statements like `let mut _ = T::default()` where `T::default()` is the
             // `default` method of the `Default` trait, and store statement index in current block being
             // checked and the name of the bound variable
-            let (local, variant, binding_name, binding_type, span) = if let StmtKind::Local(local) = stmt.kind
+            let (local, variant, binding_name, binding_type, span) = if let StmtKind::Let(local) = stmt.kind
                 // only take `let ...` statements
                 && let Some(expr) = local.init
                 && !any_parent_is_automatically_derived(cx.tcx, expr.hir_id)
@@ -131,7 +131,7 @@ impl<'tcx> LateLintPass<'tcx> for Default {
                 // only when assigning `... = Default::default()`
                 && is_expr_default(expr, cx)
                 && let binding_type = cx.typeck_results().node_type(binding_id)
-                && let Some(adt) = binding_type.ty_adt_def()
+                && let ty::Adt(adt, args) = *binding_type.kind()
                 && adt.is_struct()
                 && let variant = adt.non_enum_variant()
                 && (adt.did().is_local() || !variant.is_field_list_non_exhaustive())
@@ -144,7 +144,7 @@ impl<'tcx> LateLintPass<'tcx> for Default {
                     .fields
                     .iter()
                     .all(|field| {
-                        is_copy(cx, cx.tcx.type_of(field.did).instantiate_identity())
+                        is_copy(cx, cx.tcx.type_of(field.did).instantiate(cx.tcx, args))
                     })
                 && (!has_drop(cx, binding_type) || all_fields_are_copy)
             {
@@ -243,7 +243,7 @@ impl<'tcx> LateLintPass<'tcx> for Default {
                     first_assign.unwrap().span,
                     "field assignment outside of initializer for an instance created with Default::default()",
                     Some(local.span),
-                    &format!("consider initializing the variable with `{sugg}` and removing relevant reassignments"),
+                    format!("consider initializing the variable with `{sugg}` and removing relevant reassignments"),
                 );
                 self.reassigned_linted.insert(span);
             }

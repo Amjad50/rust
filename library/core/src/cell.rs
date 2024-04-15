@@ -237,9 +237,8 @@
 
 use crate::cmp::Ordering;
 use crate::fmt::{self, Debug, Display};
-use crate::intrinsics::is_nonoverlapping;
 use crate::marker::{PhantomData, Unsize};
-use crate::mem;
+use crate::mem::{self, size_of};
 use crate::ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn};
 use crate::ptr::{self, NonNull};
 
@@ -435,11 +434,20 @@ impl<T> Cell<T> {
     #[inline]
     #[stable(feature = "move_cell", since = "1.17.0")]
     pub fn swap(&self, other: &Self) {
+        // This function documents that it *will* panic, and intrinsics::is_nonoverlapping doesn't
+        // do the check in const, so trying to use it here would be inviting unnecessary fragility.
+        fn is_nonoverlapping<T>(src: *const T, dst: *const T) -> bool {
+            let src_usize = src.addr();
+            let dst_usize = dst.addr();
+            let diff = src_usize.abs_diff(dst_usize);
+            diff >= size_of::<T>()
+        }
+
         if ptr::eq(self, other) {
             // Swapping wouldn't change anything.
             return;
         }
-        if !is_nonoverlapping(self, other, 1) {
+        if !is_nonoverlapping(self, other) {
             // See <https://github.com/rust-lang/rust/issues/80778> for why we need to stop here.
             panic!("`Cell::swap` on overlapping non-identical `Cell`s");
         }
@@ -467,6 +475,7 @@ impl<T> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "move_cell", since = "1.17.0")]
+    #[rustc_confusables("swap")]
     pub fn replace(&self, val: T) -> T {
         // SAFETY: This can cause data races if called from a separate thread,
         // but `Cell` is `!Sync` so this won't happen.
@@ -858,6 +867,7 @@ impl<T> RefCell<T> {
     #[inline]
     #[stable(feature = "refcell_replace", since = "1.24.0")]
     #[track_caller]
+    #[rustc_confusables("swap")]
     pub fn replace(&self, t: T) -> T {
         mem::replace(&mut *self.borrow_mut(), t)
     }
@@ -2061,6 +2071,7 @@ impl<T> UnsafeCell<T> {
     /// ```
     #[inline(always)]
     #[stable(feature = "rust1", since = "1.0.0")]
+    // When this is const stabilized, please remove `primitive_into_inner` below.
     #[rustc_const_unstable(feature = "const_cell_into_inner", issue = "78729")]
     pub const fn into_inner(self) -> T {
         self.value
@@ -2206,6 +2217,47 @@ impl<T: CoerceUnsized<U>, U> CoerceUnsized<UnsafeCell<U>> for UnsafeCell<T> {}
 // `self: UnsafeCellWrapper<Self>` becomes possible
 #[unstable(feature = "dispatch_from_dyn", issue = "none")]
 impl<T: DispatchFromDyn<U>, U> DispatchFromDyn<UnsafeCell<U>> for UnsafeCell<T> {}
+
+// Special cases of UnsafeCell::into_inner where T is a primitive. These are
+// used by Atomic*::into_inner.
+//
+// The real UnsafeCell::into_inner cannot be used yet in a stable const function.
+// That is blocked on a "precise drop analysis" unstable const feature.
+// https://github.com/rust-lang/rust/issues/73255
+macro_rules! unsafe_cell_primitive_into_inner {
+    ($($primitive:ident $atomic:literal)*) => {
+        $(
+            #[cfg(target_has_atomic_load_store = $atomic)]
+            impl UnsafeCell<$primitive> {
+                pub(crate) const fn primitive_into_inner(self) -> $primitive {
+                    self.value
+                }
+            }
+        )*
+    };
+}
+
+unsafe_cell_primitive_into_inner! {
+    i8 "8"
+    u8 "8"
+    i16 "16"
+    u16 "16"
+    i32 "32"
+    u32 "32"
+    i64 "64"
+    u64 "64"
+    i128 "128"
+    u128 "128"
+    isize "ptr"
+    usize "ptr"
+}
+
+#[cfg(target_has_atomic_load_store = "ptr")]
+impl<T> UnsafeCell<*mut T> {
+    pub(crate) const fn primitive_into_inner(self) -> *mut T {
+        self.value
+    }
+}
 
 /// [`UnsafeCell`], but [`Sync`].
 ///

@@ -1074,7 +1074,22 @@ mod prim_tuple {}
 #[doc(hidden)]
 impl<T> (T,) {}
 
+#[rustc_doc_primitive = "f16"]
+#[doc(alias = "half")]
+/// A 16-bit floating point type (specifically, the "binary16" type defined in IEEE 754-2008).
+///
+/// This type is very similar to [`prim@f32`] but has decreased precision because it uses half as many
+/// bits. Please see [the documentation for [`prim@f32`] or [Wikipedia on
+/// half-precision values][wikipedia] for more information.
+///
+/// *[See also the `std::f16::consts` module](crate::f16::consts).*
+///
+/// [wikipedia]: https://en.wikipedia.org/wiki/Half-precision_floating-point_format
+#[unstable(feature = "f16", issue = "116909")]
+mod prim_f16 {}
+
 #[rustc_doc_primitive = "f32"]
+#[doc(alias = "single")]
 /// A 32-bit floating point type (specifically, the "binary32" type defined in IEEE 754-2008).
 ///
 /// This type can represent a wide range of decimal numbers, like `3.5`, `27`,
@@ -1143,6 +1158,7 @@ impl<T> (T,) {}
 mod prim_f32 {}
 
 #[rustc_doc_primitive = "f64"]
+#[doc(alias = "double")]
 /// A 64-bit floating point type (specifically, the "binary64" type defined in IEEE 754-2008).
 ///
 /// This type is very similar to [`f32`], but has increased
@@ -1156,6 +1172,20 @@ mod prim_f32 {}
 /// [wikipedia]: https://en.wikipedia.org/wiki/Double-precision_floating-point_format
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_f64 {}
+
+#[rustc_doc_primitive = "f128"]
+#[doc(alias = "quad")]
+/// A 128-bit floating point type (specifically, the "binary128" type defined in IEEE 754-2008).
+///
+/// This type is very similar to [`prim@f32`] and [`prim@f64`], but has increased precision by using twice
+/// as many bits as `f64`. Please see [the documentation for [`prim@f32`] or [Wikipedia on
+/// quad-precision values][wikipedia] for more information.
+///
+/// *[See also the `std::f128::consts` module](crate::f128::consts).*
+///
+/// [wikipedia]: https://en.wikipedia.org/wiki/Quadruple-precision_floating-point_format
+#[unstable(feature = "f128", issue = "116909")]
+mod prim_f128 {}
 
 #[rustc_doc_primitive = "i8"]
 //
@@ -1577,8 +1607,7 @@ mod prim_ref {}
 /// - Any two types with size 0 and alignment 1 are ABI-compatible.
 /// - A `repr(transparent)` type `T` is ABI-compatible with its unique non-trivial field, i.e., the
 ///   unique field that doesn't have size 0 and alignment 1 (if there is such a field).
-/// - `i32` is ABI-compatible with `NonZeroI32`, and similar for all other integer types with their
-///   matching `NonZero*` type.
+/// - `i32` is ABI-compatible with `NonZero<i32>`, and similar for all other integer types.
 /// - If `T` is guaranteed to be subject to the [null pointer
 ///   optimization](option/index.html#representation), then `T` and `Option<T>` are ABI-compatible.
 ///
@@ -1613,9 +1642,9 @@ mod prim_ref {}
 /// type in the function pointer to the type at the function declaration, and the return value is
 /// [`transmute`d][mem::transmute] from the type in the declaration to the type in the
 /// pointer. All the usual caveats and concerns around transmutation apply; for instance, if the
-/// function expects a `NonZeroI32` and the function pointer uses the ABI-compatible type
-/// `Option<NonZeroI32>`, and the value used for the argument is `None`, then this call is Undefined
-/// Behavior since transmuting `None::<NonZeroI32>` to `NonZeroI32` violates the non-zero
+/// function expects a `NonZero<i32>` and the function pointer uses the ABI-compatible type
+/// `Option<NonZero<i32>>`, and the value used for the argument is `None`, then this call is Undefined
+/// Behavior since transmuting `None::<NonZero<i32>>` to `NonZero<i32>` violates the non-zero
 /// requirement.
 ///
 /// #### Requirements concerning target features
@@ -1659,6 +1688,11 @@ mod prim_ref {}
 /// * [`Unpin`]
 /// * [`UnwindSafe`]
 /// * [`RefUnwindSafe`]
+///
+/// Note that while this type implements `PartialEq`, comparing function pointers is unreliable:
+/// pointers to the same function can compare inequal (because functions are duplicated in multiple
+/// codegen units), and pointers to *different* functions can compare equal (since identical
+/// functions can be deduplicated within a codegen unit).
 ///
 /// [`Hash`]: hash::Hash
 /// [`Pointer`]: fmt::Pointer

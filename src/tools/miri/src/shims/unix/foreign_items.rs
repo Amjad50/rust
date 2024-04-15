@@ -1,19 +1,14 @@
 use std::ffi::OsStr;
 use std::str;
 
-use log::trace;
-
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_span::Symbol;
 use rustc_target::abi::{Align, Size};
 use rustc_target::spec::abi::Abi;
 
+use crate::shims::unix::*;
 use crate::*;
 use shims::foreign_items::EmulateForeignItemResult;
-use shims::unix::fs::EvalContextExt as _;
-use shims::unix::mem::EvalContextExt as _;
-use shims::unix::sync::EvalContextExt as _;
-use shims::unix::thread::EvalContextExt as _;
 
 use shims::unix::freebsd::foreign_items as freebsd;
 use shims::unix::linux::foreign_items as linux;
@@ -46,14 +41,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         link_name: Symbol,
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
-        dest: &PlaceTy<'tcx, Provenance>,
+        dest: &MPlaceTy<'tcx, Provenance>,
     ) -> InterpResult<'tcx, EmulateForeignItemResult> {
         let this = self.eval_context_mut();
 
         // See `fn emulate_foreign_item_inner` in `shims/foreign_items.rs` for the general pattern.
         #[rustfmt::skip]
         match link_name.as_str() {
-            // Environment related shims
+            // Environment variables
             "getenv" => {
                 let [name] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let result = this.getenv(name)?;
@@ -81,25 +76,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
 
-            // File related shims
-            "open" | "open64" => {
-                // `open` is variadic, the third argument is only present when the second argument has O_CREAT (or on linux O_TMPFILE, but miri doesn't support that) set
-                this.check_abi_and_shim_symbol_clash(abi, Abi::C { unwind: false }, link_name)?;
-                let result = this.open(args)?;
-                this.write_scalar(Scalar::from_i32(result), dest)?;
-            }
-            "close" => {
-                let [fd] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
-                let result = this.close(fd)?;
-                this.write_scalar(result, dest)?;
-            }
-            "fcntl" => {
-                // `fcntl` is variadic. The argument count is checked based on the first argument
-                // in `this.fcntl()`, so we do not use `check_shim` here.
-                this.check_abi_and_shim_symbol_clash(abi, Abi::C { unwind: false }, link_name)?;
-                let result = this.fcntl(args)?;
-                this.write_scalar(Scalar::from_i32(result), dest)?;
-            }
+            // File descriptors
             "read" => {
                 let [fd, buf, count] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let fd = this.read_scalar(fd)?.to_i32()?;
@@ -117,6 +94,26 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.write(fd, buf, count)?;
                 // Now, `result` is the value we return back to the program.
                 this.write_scalar(Scalar::from_target_isize(result, this), dest)?;
+            }
+            "close" => {
+                let [fd] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let result = this.close(fd)?;
+                this.write_scalar(result, dest)?;
+            }
+            "fcntl" => {
+                // `fcntl` is variadic. The argument count is checked based on the first argument
+                // in `this.fcntl()`, so we do not use `check_shim` here.
+                this.check_abi_and_shim_symbol_clash(abi, Abi::C { unwind: false }, link_name)?;
+                let result = this.fcntl(args)?;
+                this.write_scalar(Scalar::from_i32(result), dest)?;
+            }
+
+            // File and file system access
+            "open" | "open64" => {
+                // `open` is variadic, the third argument is only present when the second argument has O_CREAT (or on linux O_TMPFILE, but miri doesn't support that) set
+                this.check_abi_and_shim_symbol_clash(abi, Abi::C { unwind: false }, link_name)?;
+                let result = this.open(args)?;
+                this.write_scalar(Scalar::from_i32(result), dest)?;
             }
             "unlink" => {
                 let [path] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
@@ -221,7 +218,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
 
-            // Time related shims
+            // Sockets
+            "socketpair" => {
+                let [domain, type_, protocol, sv] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+
+                let result = this.socketpair(domain, type_, protocol, sv)?;
+                this.write_scalar(result, dest)?;
+            }
+
+            // Time
             "gettimeofday" => {
                 let [tv, tz] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let result = this.gettimeofday(tv, tz)?;
@@ -262,6 +268,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
             "mmap" => {
                 let [addr, length, prot, flags, fd, offset] = this.check_shim(abi, Abi::C {unwind: false}, link_name, args)?;
+                let offset = this.read_scalar(offset)?.to_int(this.libc_ty_layout("off_t").size)?;
                 let ptr = this.mmap(addr, length, prot, flags, fd, offset)?;
                 this.write_scalar(ptr, dest)?;
             }
@@ -599,7 +606,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 if bufsize > 256 {
                     let err = this.eval_libc("EIO");
                     this.set_last_error(err)?;
-                    this.write_scalar(Scalar::from_i32(-1), dest)?
+                    this.write_scalar(Scalar::from_i32(-1), dest)?;
                 } else {
                     this.gen_random(buf, bufsize)?;
                     this.write_scalar(Scalar::from_i32(0), dest)?;
@@ -709,6 +716,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     this.write_null(&result)?;
                     this.write_scalar(this.eval_libc("ERANGE"), dest)?;
                 }
+            }
+
+            "sched_getaffinity" => {
+                // FreeBSD supports it as well since 13.1 (as a wrapper of cpuset_getaffinity)
+                if !matches!(&*this.tcx.sess.target.os, "linux" | "freebsd") {
+                    throw_unsup_format!(
+                        "`sched_getaffinity` is not supported on {}",
+                        this.tcx.sess.target.os
+                    );
+                }
+                let [pid, cpusetsize, mask] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                this.read_scalar(pid)?.to_i32()?;
+                this.read_target_usize(cpusetsize)?;
+                this.deref_pointer_as(mask, this.libc_ty_layout("cpu_set_t"))?;
+                // FIXME: we just return an error; `num_cpus` then falls back to `sysconf`.
+                let einval = this.eval_libc("EINVAL");
+                this.set_last_error(einval)?;
+                this.write_scalar(Scalar::from_i32(-1), dest)?;
             }
 
             // Platform-specific shims

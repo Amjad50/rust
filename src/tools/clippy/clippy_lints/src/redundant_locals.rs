@@ -3,7 +3,7 @@ use clippy_utils::is_from_proc_macro;
 use clippy_utils::ty::needs_ordered_drop;
 use rustc_ast::Mutability;
 use rustc_hir::def::Res;
-use rustc_hir::{BindingAnnotation, ByRef, ExprKind, HirId, Local, Node, Pat, PatKind, QPath};
+use rustc_hir::{BindingAnnotation, ByRef, ExprKind, HirId, LetStmt, Node, Pat, PatKind, QPath};
 use rustc_hir_typeck::expr_use_visitor::PlaceBase;
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
@@ -47,7 +47,7 @@ declare_clippy_lint! {
 declare_lint_pass!(RedundantLocals => [REDUNDANT_LOCALS]);
 
 impl<'tcx> LateLintPass<'tcx> for RedundantLocals {
-    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx Local<'tcx>) {
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx LetStmt<'tcx>) {
         if !local.span.is_desugaring(DesugaringKind::Async)
             // the pattern is a single by-value binding
             && let PatKind::Binding(BindingAnnotation(ByRef::No, mutability), _, ident, None) = local.pat.kind
@@ -77,9 +77,9 @@ impl<'tcx> LateLintPass<'tcx> for RedundantLocals {
                 cx,
                 REDUNDANT_LOCALS,
                 local.span,
-                &format!("redundant redefinition of a binding `{ident}`"),
+                format!("redundant redefinition of a binding `{ident}`"),
                 Some(binding_pat.span),
-                &format!("`{ident}` is initially defined here"),
+                format!("`{ident}` is initially defined here"),
             );
         }
     }
@@ -101,7 +101,7 @@ impl<'tcx> LateLintPass<'tcx> for RedundantLocals {
 fn is_by_value_closure_capture(cx: &LateContext<'_>, redefinition: HirId, root_variable: HirId) -> bool {
     let closure_def_id = cx.tcx.hir().enclosing_body_owner(redefinition);
 
-    cx.tcx.is_closure_or_coroutine(closure_def_id.to_def_id())
+    cx.tcx.is_closure_like(closure_def_id.to_def_id())
         && cx.tcx.closure_captures(closure_def_id).iter().any(|c| {
             matches!(c.info.capture_kind, UpvarCapture::ByValue)
                 && matches!(c.place.base, PlaceBase::Upvar(upvar) if upvar.var_path.hir_id == root_variable)

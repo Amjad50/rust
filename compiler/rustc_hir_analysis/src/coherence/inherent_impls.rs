@@ -144,6 +144,12 @@ impl<'tcx> InherentCollect<'tcx> {
         let id = id.owner_id.def_id;
         let item_span = self.tcx.def_span(id);
         let self_ty = self.tcx.type_of(id).instantiate_identity();
+        let mut self_ty = self.tcx.peel_off_weak_alias_tys(self_ty);
+        // We allow impls on pattern types exactly when we allow impls on the base type.
+        // FIXME(pattern_types): Figure out the exact coherence rules we want here.
+        while let ty::Pat(base, _) = *self_ty.kind() {
+            self_ty = base;
+        }
         match *self_ty.kind() {
             ty::Adt(def, _) => self.check_def_id(id, self_ty, def.did()),
             ty::Foreign(did) => self.check_def_id(id, self_ty, did),
@@ -153,6 +159,7 @@ impl<'tcx> InherentCollect<'tcx> {
             ty::Dynamic(..) => {
                 Err(self.tcx.dcx().emit_err(errors::InherentDyn { span: item_span }))
             }
+            ty::Pat(_, _) => unreachable!(),
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -161,12 +168,12 @@ impl<'tcx> InherentCollect<'tcx> {
             | ty::Str
             | ty::Array(..)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(..)
             | ty::Never
             | ty::FnPtr(_)
             | ty::Tuple(..) => self.check_primitive_impl(id, self_ty),
-            ty::Alias(..) | ty::Param(_) => {
+            ty::Alias(ty::Projection | ty::Inherent | ty::Opaque, _) | ty::Param(_) => {
                 Err(self.tcx.dcx().emit_err(errors::InherentNominal { span: item_span }))
             }
             ty::FnDef(..)
@@ -174,6 +181,7 @@ impl<'tcx> InherentCollect<'tcx> {
             | ty::CoroutineClosure(..)
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
+            | ty::Alias(ty::Weak, _)
             | ty::Bound(..)
             | ty::Placeholder(_)
             | ty::Infer(_) => {

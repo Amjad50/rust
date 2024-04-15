@@ -1,22 +1,30 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::is_no_std_crate;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::sugg::Sugg;
+use clippy_utils::{expr_use_ctxt, is_no_std_crate, ExprUseNode};
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, Mutability, Ty, TyKind};
 use rustc_lint::LateContext;
-use rustc_middle::ty::{self, TypeAndMut};
+use rustc_middle::ty;
 
 use super::REF_AS_PTR;
 
-pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, cast_expr: &Expr<'_>, cast_to_hir_ty: &Ty<'_>) {
+pub(super) fn check<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &'tcx Expr<'_>,
+    cast_expr: &'tcx Expr<'_>,
+    cast_to_hir_ty: &Ty<'_>,
+) {
     let (cast_from, cast_to) = (
         cx.typeck_results().expr_ty(cast_expr),
         cx.typeck_results().expr_ty(expr),
     );
 
     if matches!(cast_from.kind(), ty::Ref(..))
-        && let ty::RawPtr(TypeAndMut { mutbl: to_mutbl, .. }) = cast_to.kind()
+        && let ty::RawPtr(_, to_mutbl) = cast_to.kind()
+        && let Some(use_cx) = expr_use_ctxt(cx, expr)
+        // TODO: only block the lint if `cast_expr` is a temporary
+        && !matches!(use_cx.node, ExprUseNode::LetStmt(_) | ExprUseNode::ConstStatic(_))
     {
         let core_or_std = if is_no_std_crate(cx) { "core" } else { "std" };
         let fn_name = match to_mutbl {

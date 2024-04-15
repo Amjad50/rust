@@ -1,5 +1,5 @@
 //! Implementation of "range exclusive" inlay hints:
-//! ```no_run
+//! ```ignore
 //! for i in 0../* < */10 {}
 //! if let ../* < */100 = 50 {}
 //! ```
@@ -30,7 +30,6 @@ fn inlay_hint(token: SyntaxToken) -> InlayHint {
         kind: crate::InlayKind::RangeExclusive,
         label: crate::InlayHintLabel::from("<"),
         text_edit: None,
-        needs_resolve: false,
     }
 }
 

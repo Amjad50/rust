@@ -57,10 +57,7 @@
 //
 // This cfg won't affect doc tests.
 #![cfg(not(test))]
-// To run core tests without x.py without ending up with two copies of core, Miri needs to be
-// able to "empty" this crate. See <https://github.com/rust-lang/miri-test-libstd/issues/4>.
-// rustc itself never sets the feature, so this line has no effect there.
-#![cfg(any(not(feature = "miri-test-libstd"), test, doctest))]
+//
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
@@ -71,7 +68,6 @@
 #![doc(rust_logo)]
 #![doc(cfg_hide(
     not(test),
-    any(not(feature = "miri-test-libstd"), test, doctest),
     no_fp_fmt_parse,
     target_pointer_width = "16",
     target_pointer_width = "32",
@@ -94,6 +90,7 @@
 ))]
 #![no_core]
 #![rustc_coherence_is_core]
+#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
 //
 // Lints:
 #![deny(rust_2021_incompatible_or_patterns)]
@@ -106,11 +103,15 @@
 #![allow(incomplete_features)]
 #![warn(multiple_supertrait_upcastable)]
 #![allow(internal_features)]
+#![deny(ffi_unwind_calls)]
 // Do not check link redundancy on bootstraping phase
 #![allow(rustdoc::redundant_explicit_links)]
 //
 // Library features:
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
+#![feature(array_ptr_get)]
+#![feature(asm_experimental_arch)]
 #![feature(char_indices_offset)]
 #![feature(const_align_of_val)]
 #![feature(const_align_of_val_raw)]
@@ -121,7 +122,6 @@
 #![feature(const_array_into_iter_constructors)]
 #![feature(const_bigint_helper_methods)]
 #![feature(const_black_box)]
-#![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
 #![feature(const_char_from_u32_unchecked)]
 #![feature(const_eval_select)]
@@ -133,7 +133,7 @@
 #![feature(const_heap)]
 #![feature(const_hint_assert_unchecked)]
 #![feature(const_index_range_slice_index)]
-#![feature(const_int_unchecked_arith)]
+#![feature(const_int_from_str)]
 #![feature(const_intrinsic_copy)]
 #![feature(const_intrinsic_forget)]
 #![feature(const_ipv4)]
@@ -159,7 +159,6 @@
 #![feature(const_slice_from_raw_parts_mut)]
 #![feature(const_slice_from_ref)]
 #![feature(const_slice_index)]
-#![feature(const_slice_ptr_len)]
 #![feature(const_slice_split_at_mut)]
 #![feature(const_str_from_utf8_unchecked_mut)]
 #![feature(const_strict_overflow_ops)]
@@ -167,6 +166,8 @@
 #![feature(const_try)]
 #![feature(const_type_id)]
 #![feature(const_type_name)]
+#![feature(const_typed_swap)]
+#![feature(const_ub_checks)]
 #![feature(const_unicode_case_lookup)]
 #![feature(const_unsafecell_get_mut)]
 #![feature(const_waker)]
@@ -177,6 +178,7 @@
 #![feature(ip_bits)]
 #![feature(is_ascii_octdigit)]
 #![feature(isqrt)]
+#![feature(link_cfg)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(non_null_convenience)]
 #![feature(offset_of_enum)]
@@ -186,13 +188,11 @@
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
 #![feature(slice_ptr_get)]
-#![feature(slice_split_at_unchecked)]
 #![feature(split_at_checked)]
 #![feature(str_internals)]
 #![feature(str_split_inclusive_remainder)]
 #![feature(str_split_remainder)]
 #![feature(strict_provenance)]
-#![feature(unchecked_math)]
 #![feature(unchecked_shifts)]
 #![feature(utf16_extra)]
 #![feature(utf16_extra_const)]
@@ -206,7 +206,6 @@
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
 #![feature(asm_const)]
-#![feature(associated_type_bounds)]
 #![feature(auto_traits)]
 #![feature(c_unwind)]
 #![feature(cfg_sanitize)]
@@ -221,13 +220,14 @@
 #![feature(const_trait_impl)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
-#![feature(diagnostic_namespace)]
 #![feature(doc_cfg)]
 #![feature(doc_cfg_hide)]
 #![feature(doc_notable_trait)]
 #![feature(effects)]
-#![feature(exhaustive_patterns)]
 #![feature(extern_types)]
+#![feature(f128)]
+#![feature(f16)]
+#![feature(freeze_impls)]
 #![feature(fundamental)]
 #![feature(generic_arg_infer)]
 #![feature(if_let_guard)]
@@ -238,6 +238,7 @@
 #![feature(let_chains)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
+#![feature(min_exhaustive_patterns)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]
 #![feature(must_not_suspend)]
@@ -245,7 +246,6 @@
 #![feature(never_type)]
 #![feature(no_core)]
 #![feature(no_sanitize)]
-#![feature(platform_intrinsics)]
 #![feature(prelude_import)]
 #![feature(repr_simd)]
 #![feature(rustc_allow_const_fn_unstable)]
@@ -268,6 +268,7 @@
 #![feature(arm_target_feature)]
 #![feature(avx512_target_feature)]
 #![feature(hexagon_target_feature)]
+#![feature(loongarch_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(powerpc_target_feature)]
 #![feature(riscv_target_feature)]
@@ -283,7 +284,7 @@ extern crate self as core;
 
 #[prelude_import]
 #[allow(unused)]
-use prelude::v1::*;
+use prelude::rust_2021::*;
 
 #[cfg(not(test))] // See #65860
 #[macro_use]
@@ -309,32 +310,48 @@ mod internal_macros;
 #[macro_use]
 mod int_macros;
 
+#[rustc_diagnostic_item = "i128_legacy_mod"]
 #[path = "num/shells/i128.rs"]
 pub mod i128;
+#[rustc_diagnostic_item = "i16_legacy_mod"]
 #[path = "num/shells/i16.rs"]
 pub mod i16;
+#[rustc_diagnostic_item = "i32_legacy_mod"]
 #[path = "num/shells/i32.rs"]
 pub mod i32;
+#[rustc_diagnostic_item = "i64_legacy_mod"]
 #[path = "num/shells/i64.rs"]
 pub mod i64;
+#[rustc_diagnostic_item = "i8_legacy_mod"]
 #[path = "num/shells/i8.rs"]
 pub mod i8;
+#[rustc_diagnostic_item = "isize_legacy_mod"]
 #[path = "num/shells/isize.rs"]
 pub mod isize;
 
+#[rustc_diagnostic_item = "u128_legacy_mod"]
 #[path = "num/shells/u128.rs"]
 pub mod u128;
+#[rustc_diagnostic_item = "u16_legacy_mod"]
 #[path = "num/shells/u16.rs"]
 pub mod u16;
+#[rustc_diagnostic_item = "u32_legacy_mod"]
 #[path = "num/shells/u32.rs"]
 pub mod u32;
+#[rustc_diagnostic_item = "u64_legacy_mod"]
 #[path = "num/shells/u64.rs"]
 pub mod u64;
+#[rustc_diagnostic_item = "u8_legacy_mod"]
 #[path = "num/shells/u8.rs"]
 pub mod u8;
+#[rustc_diagnostic_item = "usize_legacy_mod"]
 #[path = "num/shells/usize.rs"]
 pub mod usize;
 
+#[path = "num/f128.rs"]
+pub mod f128;
+#[path = "num/f16.rs"]
+pub mod f16;
 #[path = "num/f32.rs"]
 pub mod f32;
 #[path = "num/f64.rs"]
@@ -353,6 +370,7 @@ pub mod hint;
 pub mod intrinsics;
 pub mod mem;
 pub mod ptr;
+mod ub_checks;
 
 /* Core language traits */
 
@@ -383,6 +401,9 @@ pub mod net;
 pub mod option;
 pub mod panic;
 pub mod panicking;
+#[cfg(not(bootstrap))]
+#[unstable(feature = "core_pattern_types", issue = "none")]
+pub mod pat;
 pub mod pin;
 pub mod result;
 pub mod sync;

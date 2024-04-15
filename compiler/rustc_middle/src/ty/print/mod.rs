@@ -139,7 +139,7 @@ pub trait Printer<'tcx>: Sized {
                                 _,
                                 hir::CoroutineSource::Closure,
                             )) = self.tcx().coroutine_kind(def_id)
-                                && args.len() >= parent_args.len() + 1
+                                && args.len() > parent_args.len()
                             {
                                 return self.path_generic_args(
                                     |cx| cx.print_def_path(def_id, parent_args),
@@ -259,11 +259,11 @@ fn characteristic_def_id_of_type_cached<'a>(
 
         ty::Dynamic(data, ..) => data.principal_def_id(),
 
-        ty::Array(subty, _) | ty::Slice(subty) => {
+        ty::Pat(subty, _) | ty::Array(subty, _) | ty::Slice(subty) => {
             characteristic_def_id_of_type_cached(subty, visited)
         }
 
-        ty::RawPtr(mt) => characteristic_def_id_of_type_cached(mt.ty, visited),
+        ty::RawPtr(ty, _) => characteristic_def_id_of_type_cached(ty, visited),
 
         ty::Ref(_, ty, _) => characteristic_def_id_of_type_cached(ty, visited),
 

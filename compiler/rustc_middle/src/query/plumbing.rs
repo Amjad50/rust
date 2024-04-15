@@ -8,8 +8,6 @@ use crate::query::{
 };
 use crate::ty::TyCtxt;
 use field_offset::FieldOffset;
-use measureme::StringId;
-use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::AtomicU64;
 use rustc_data_structures::sync::WorkerLocal;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -21,16 +19,6 @@ use rustc_query_system::query::*;
 use rustc_query_system::HandleCycleError;
 use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
 use std::ops::Deref;
-
-pub struct QueryKeyStringCache {
-    pub def_id_cache: FxHashMap<DefId, StringId>,
-}
-
-impl QueryKeyStringCache {
-    pub fn new() -> QueryKeyStringCache {
-        QueryKeyStringCache { def_id_cache: Default::default() }
-    }
-}
 
 pub struct DynamicQuery<'tcx, C: QueryCache> {
     pub name: &'static str,
@@ -336,14 +324,13 @@ macro_rules! define_callbacks {
                     ))
                 }
 
-                pub type Storage<'tcx> = <
-                    <$($K)* as keys::Key>::CacheSelector as CacheSelector<'tcx, Erase<$V>>
-                >::Cache;
+                pub type Storage<'tcx> = <$($K)* as keys::Key>::Cache<Erase<$V>>;
 
-                // Ensure that keys grow no larger than 64 bytes
-                #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+                // Ensure that keys grow no larger than 72 bytes by accident.
+                // Increase this limit if necessary, but do try to keep the size low if possible
+                #[cfg(all(any(target_arch = "x86_64", target_arch="aarch64"), target_pointer_width = "64"))]
                 const _: () = {
-                    if mem::size_of::<Key<'static>>() > 64 {
+                    if mem::size_of::<Key<'static>>() > 72 {
                         panic!("{}", concat!(
                             "the query `",
                             stringify!($name),
@@ -354,8 +341,9 @@ macro_rules! define_callbacks {
                     }
                 };
 
-                // Ensure that values grow no larger than 64 bytes
-                #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+                // Ensure that values grow no larger than 64 bytes by accident.
+                // Increase this limit if necessary, but do try to keep the size low if possible
+                #[cfg(all(any(target_arch = "x86_64", target_arch="aarch64"), target_pointer_width = "64"))]
                 const _: () = {
                     if mem::size_of::<Value<'static>>() > 64 {
                         panic!("{}", concat!(

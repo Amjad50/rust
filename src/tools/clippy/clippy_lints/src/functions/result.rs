@@ -1,8 +1,8 @@
-use rustc_errors::Diagnostic;
+use rustc_errors::Diag;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_middle::ty::{self, Adt, Ty};
+use rustc_middle::ty::{Adt, Ty};
 use rustc_span::{sym, Span};
 
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_then};
@@ -25,7 +25,7 @@ fn result_err_ty<'tcx>(
             .tcx
             .instantiate_bound_regions_with_erased(cx.tcx.fn_sig(id).instantiate_identity().output())
         && is_type_diagnostic_item(cx, ty, sym::Result)
-        && let ty::Adt(_, args) = ty.kind()
+        && let Adt(_, args) = ty.kind()
     {
         let err_ty = args.type_at(1);
         Some((hir_ty, err_ty))
@@ -92,7 +92,7 @@ fn check_result_large_err<'tcx>(cx: &LateContext<'tcx>, err_ty: Ty<'tcx>, hir_ty
             .expect("already checked this is adt")
             .did()
             .as_local()
-        && let Some(hir::Node::Item(item)) = cx.tcx.opt_hir_node_by_def_id(local_def_id)
+        && let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(local_def_id)
         && let hir::ItemKind::Enum(ref def, _) = item.kind
     {
         let variants_size = AdtVariantInfo::new(cx, *adt, subst);
@@ -135,7 +135,7 @@ fn check_result_large_err<'tcx>(cx: &LateContext<'tcx>, err_ty: Ty<'tcx>, hir_ty
                 RESULT_LARGE_ERR,
                 hir_ty_span,
                 "the `Err`-variant returned from this function is very large",
-                |diag: &mut Diagnostic| {
+                |diag: &mut Diag<'_, ()>| {
                     diag.span_label(hir_ty_span, format!("the `Err`-variant is at least {ty_size} bytes"));
                     diag.help(format!("try reducing the size of `{err_ty}`, for example by boxing large elements or replacing it with `Box<{err_ty}>`"));
                 },

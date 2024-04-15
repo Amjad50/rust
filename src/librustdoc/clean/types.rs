@@ -23,6 +23,7 @@ use rustc_hir::{BodyId, Mutability};
 use rustc_hir_analysis::check::intrinsic::intrinsic_operation_unsafety;
 use rustc_index::IndexVec;
 use rustc_metadata::rendered_const;
+use rustc_middle::span_bug;
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::{self, TyCtxt, Visibility};
 use rustc_resolve::rustdoc::{
@@ -266,8 +267,15 @@ impl ExternalCrate {
         let as_primitive = |res: Res<!>| {
             let Res::Def(DefKind::Mod, def_id) = res else { return None };
             tcx.get_attrs(def_id, sym::rustc_doc_primitive).find_map(|attr| {
-                // FIXME: should warn on unknown primitives?
-                Some((def_id, PrimitiveType::from_symbol(attr.value_str()?)?))
+                let attr_value = attr.value_str().expect("syntax should already be validated");
+                let Some(prim) = PrimitiveType::from_symbol(attr_value) else {
+                    span_bug!(
+                        attr.span,
+                        "primitive `{attr_value}` is not a member of `PrimitiveType`"
+                    );
+                };
+
+                Some((def_id, prim))
             })
         };
 
@@ -643,7 +651,7 @@ impl Item {
                 let abi = tcx.fn_sig(def_id).skip_binder().abi();
                 hir::FnHeader {
                     unsafety: if abi == Abi::RustIntrinsic {
-                        intrinsic_operation_unsafety(tcx, self.def_id().unwrap())
+                        intrinsic_operation_unsafety(tcx, def_id.expect_local())
                     } else {
                         hir::Unsafety::Unsafe
                     },
@@ -1161,7 +1169,7 @@ impl Attributes {
         false
     }
 
-    fn is_doc_hidden(&self) -> bool {
+    pub(crate) fn is_doc_hidden(&self) -> bool {
         self.has_doc_flag(sym::hidden)
     }
 
@@ -1277,13 +1285,6 @@ impl GenericBound {
         false
     }
 
-    pub(crate) fn get_poly_trait(&self) -> Option<PolyTrait> {
-        if let GenericBound::TraitBound(ref p, _) = *self {
-            return Some(p.clone());
-        }
-        None
-    }
-
     pub(crate) fn get_trait_path(&self) -> Option<Path> {
         if let GenericBound::TraitBound(PolyTrait { ref trait_, .. }, _) = *self {
             Some(trait_.clone())
@@ -1326,7 +1327,7 @@ impl WherePredicate {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub(crate) enum GenericParamDefKind {
     Lifetime { outlives: ThinVec<Lifetime> },
-    Type { did: DefId, bounds: ThinVec<GenericBound>, default: Option<Box<Type>>, synthetic: bool },
+    Type { bounds: ThinVec<GenericBound>, default: Option<Box<Type>>, synthetic: bool },
     // Option<Box<String>> makes this type smaller than `Option<String>` would.
     Const { ty: Box<Type>, default: Option<Box<String>>, is_host_effect: bool },
 }
@@ -1340,12 +1341,13 @@ impl GenericParamDefKind {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub(crate) struct GenericParamDef {
     pub(crate) name: Symbol,
+    pub(crate) def_id: DefId,
     pub(crate) kind: GenericParamDefKind,
 }
 
 impl GenericParamDef {
-    pub(crate) fn lifetime(name: Symbol) -> Self {
-        Self { name, kind: GenericParamDefKind::Lifetime { outlives: ThinVec::new() } }
+    pub(crate) fn lifetime(def_id: DefId, name: Symbol) -> Self {
+        Self { name, def_id, kind: GenericParamDefKind::Lifetime { outlives: ThinVec::new() } }
     }
 
     pub(crate) fn is_synthetic_param(&self) -> bool {
@@ -1481,7 +1483,9 @@ pub(crate) enum Type {
     ///
     /// This is mostly Rustdoc's version of [`hir::Path`].
     /// It has to be different because Rustdoc's [`PathSegment`] can contain cleaned generics.
-    Path { path: Path },
+    Path {
+        path: Path,
+    },
     /// A `dyn Trait` object: `dyn for<'a> Trait<'a> + Send + 'static`
     DynTrait(Vec<PolyTrait>, Option<Lifetime>),
     /// A type parameter.
@@ -1498,10 +1502,15 @@ pub(crate) enum Type {
     ///
     /// The `String` field is a stringified version of the array's length parameter.
     Array(Box<Type>, Box<str>),
+    Pat(Box<Type>, Box<str>),
     /// A raw pointer type: `*const i32`, `*mut i32`
     RawPointer(Mutability, Box<Type>),
     /// A reference type: `&i32`, `&'a mut Foo`
-    BorrowedRef { lifetime: Option<Lifetime>, mutability: Mutability, type_: Box<Type> },
+    BorrowedRef {
+        lifetime: Option<Lifetime>,
+        mutability: Mutability,
+        type_: Box<Type>,
+    },
 
     /// A qualified path to an associated item: `<Type as Trait>::Name`
     QPath(Box<QPathData>),
@@ -1698,6 +1707,7 @@ impl Type {
             BareFunction(..) => PrimitiveType::Fn,
             Slice(..) => PrimitiveType::Slice,
             Array(..) => PrimitiveType::Array,
+            Type::Pat(..) => PrimitiveType::Pat,
             RawPointer(..) => PrimitiveType::RawPointer,
             QPath(box QPathData { ref self_type, .. }) => return self_type.inner_def_id(cache),
             Generic(_) | Infer | ImplTrait(_) => return None,
@@ -1742,13 +1752,16 @@ pub(crate) enum PrimitiveType {
     U32,
     U64,
     U128,
+    F16,
     F32,
     F64,
+    F128,
     Char,
     Bool,
     Str,
     Slice,
     Array,
+    Pat,
     Tuple,
     Unit,
     RawPointer,
@@ -1774,8 +1787,10 @@ impl PrimitiveType {
             hir::PrimTy::Uint(UintTy::U32) => PrimitiveType::U32,
             hir::PrimTy::Uint(UintTy::U64) => PrimitiveType::U64,
             hir::PrimTy::Uint(UintTy::U128) => PrimitiveType::U128,
+            hir::PrimTy::Float(FloatTy::F16) => PrimitiveType::F16,
             hir::PrimTy::Float(FloatTy::F32) => PrimitiveType::F32,
             hir::PrimTy::Float(FloatTy::F64) => PrimitiveType::F64,
+            hir::PrimTy::Float(FloatTy::F128) => PrimitiveType::F128,
             hir::PrimTy::Str => PrimitiveType::Str,
             hir::PrimTy::Bool => PrimitiveType::Bool,
             hir::PrimTy::Char => PrimitiveType::Char,
@@ -1799,8 +1814,10 @@ impl PrimitiveType {
             sym::bool => Some(PrimitiveType::Bool),
             sym::char => Some(PrimitiveType::Char),
             sym::str => Some(PrimitiveType::Str),
+            sym::f16 => Some(PrimitiveType::F16),
             sym::f32 => Some(PrimitiveType::F32),
             sym::f64 => Some(PrimitiveType::F64),
+            sym::f128 => Some(PrimitiveType::F128),
             sym::array => Some(PrimitiveType::Array),
             sym::slice => Some(PrimitiveType::Slice),
             sym::tuple => Some(PrimitiveType::Tuple),
@@ -1833,8 +1850,10 @@ impl PrimitiveType {
                 U32 => single(SimplifiedType::Uint(UintTy::U32)),
                 U64 => single(SimplifiedType::Uint(UintTy::U64)),
                 U128 => single(SimplifiedType::Uint(UintTy::U128)),
+                F16 => single(SimplifiedType::Float(FloatTy::F16)),
                 F32 => single(SimplifiedType::Float(FloatTy::F32)),
                 F64 => single(SimplifiedType::Float(FloatTy::F64)),
+                F128 => single(SimplifiedType::Float(FloatTy::F128)),
                 Str => single(SimplifiedType::Str),
                 Bool => single(SimplifiedType::Bool),
                 Char => single(SimplifiedType::Char),
@@ -1889,12 +1908,15 @@ impl PrimitiveType {
             U32 => sym::u32,
             U64 => sym::u64,
             U128 => sym::u128,
+            F16 => sym::f16,
             F32 => sym::f32,
             F64 => sym::f64,
+            F128 => sym::f128,
             Str => sym::str,
             Bool => sym::bool,
             Char => sym::char,
             Array => sym::array,
+            Pat => sym::pat,
             Slice => sym::slice,
             Tuple => sym::tuple,
             Unit => sym::unit,
@@ -1972,8 +1994,10 @@ impl From<ast::UintTy> for PrimitiveType {
 impl From<ast::FloatTy> for PrimitiveType {
     fn from(float_ty: ast::FloatTy) -> PrimitiveType {
         match float_ty {
+            ast::FloatTy::F16 => PrimitiveType::F16,
             ast::FloatTy::F32 => PrimitiveType::F32,
             ast::FloatTy::F64 => PrimitiveType::F64,
+            ast::FloatTy::F128 => PrimitiveType::F128,
         }
     }
 }
@@ -2007,8 +2031,10 @@ impl From<ty::UintTy> for PrimitiveType {
 impl From<ty::FloatTy> for PrimitiveType {
     fn from(float_ty: ty::FloatTy) -> PrimitiveType {
         match float_ty {
+            ty::FloatTy::F16 => PrimitiveType::F16,
             ty::FloatTy::F32 => PrimitiveType::F32,
             ty::FloatTy::F64 => PrimitiveType::F64,
+            ty::FloatTy::F128 => PrimitiveType::F128,
         }
     }
 }
@@ -2226,6 +2252,16 @@ pub(crate) enum GenericArg {
     Type(Type),
     Const(Box<Constant>),
     Infer,
+}
+
+impl GenericArg {
+    pub(crate) fn as_lt(&self) -> Option<&Lifetime> {
+        if let Self::Lifetime(lt) = self { Some(lt) } else { None }
+    }
+
+    pub(crate) fn as_ty(&self) -> Option<&Type> {
+        if let Self::Type(ty) = self { Some(ty) } else { None }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -2528,35 +2564,6 @@ pub(crate) struct TypeBinding {
 pub(crate) enum TypeBindingKind {
     Equality { term: Term },
     Constraint { bounds: Vec<GenericBound> },
-}
-
-/// The type, lifetime, or constant that a private type alias's parameter should be
-/// replaced with when expanding a use of that type alias.
-///
-/// For example:
-///
-/// ```
-/// type PrivAlias<T> = Vec<T>;
-///
-/// pub fn public_fn() -> PrivAlias<i32> { vec![] }
-/// ```
-///
-/// `public_fn`'s docs will show it as returning `Vec<i32>`, since `PrivAlias` is private.
-/// [`SubstParam`] is used to record that `T` should be mapped to `i32`.
-pub(crate) enum SubstParam {
-    Type(Type),
-    Lifetime(Lifetime),
-    Constant,
-}
-
-impl SubstParam {
-    pub(crate) fn as_ty(&self) -> Option<&Type> {
-        if let Self::Type(ty) = self { Some(ty) } else { None }
-    }
-
-    pub(crate) fn as_lt(&self) -> Option<&Lifetime> {
-        if let Self::Lifetime(lt) = self { Some(lt) } else { None }
-    }
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.

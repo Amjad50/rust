@@ -417,7 +417,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         to_add.push(llvm::CreateAttrString(cx.llcx, "cmse_nonsecure_entry"));
     }
     if let Some(align) = codegen_fn_attrs.alignment {
-        llvm::set_alignment(llfn, align as usize);
+        llvm::set_alignment(llfn, align);
     }
     to_add.extend(sanitize_attrs(cx, codegen_fn_attrs.no_sanitize));
 
@@ -479,7 +479,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         // `+multivalue` feature because the purpose of the wasm abi is to match
         // the WebAssembly specification, which has this feature. This won't be
         // needed when LLVM enables this `multivalue` feature by default.
-        if !cx.tcx.is_closure_or_coroutine(instance.def_id()) {
+        if !cx.tcx.is_closure_like(instance.def_id()) {
             let abi = cx.tcx.fn_sig(instance.def_id()).skip_binder().abi();
             if abi == Abi::Wasm {
                 function_features.push("+multivalue".to_string());

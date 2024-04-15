@@ -1,10 +1,13 @@
 // miri has some special hacks here that make things unused.
 #![cfg_attr(miri, allow(unused))]
 
+#[cfg(test)]
+mod tests;
+
 use crate::os::unix::prelude::*;
 
 use crate::ffi::{CStr, OsStr, OsString};
-use crate::fmt;
+use crate::fmt::{self, Write as _};
 use crate::io::{self, BorrowedCursor, Error, IoSlice, IoSliceMut, SeekFrom};
 use crate::mem;
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
@@ -23,6 +26,7 @@ use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
     target_os = "ios",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "visionos",
 ))]
 use crate::sys::weak::syscall;
 #[cfg(any(target_os = "android", target_os = "macos", target_os = "solaris"))]
@@ -35,6 +39,7 @@ use libc::{c_int, mode_t};
     target_os = "ios",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "visionos",
     target_os = "solaris",
     all(target_os = "linux", target_env = "gnu")
 ))]
@@ -193,20 +198,17 @@ cfg_has_statx! {{
                 return Some(Err(err));
             }
 
-            // Availability not checked yet.
+            // `ENOSYS` might come from a faulty FUSE driver.
             //
-            // First try the cheap way.
-            if err.raw_os_error() == Some(libc::ENOSYS) {
-                STATX_SAVED_STATE.store(STATX_STATE::Unavailable as u8, Ordering::Relaxed);
-                return None;
-            }
-
-            // Error other than `ENOSYS` is not a good enough indicator -- it is
+            // Other errors are not a good enough indicator either -- it is
             // known that `EPERM` can be returned as a result of using seccomp to
             // block the syscall.
+            //
             // Availability is checked by performing a call which expects `EFAULT`
             // if the syscall is usable.
+            //
             // See: https://github.com/rust-lang/rust/issues/65662
+            //
             // FIXME this can probably just do the call if `EPERM` was received, but
             // previous iteration of the code checked it for all errors and for now
             // this is retained.
@@ -354,7 +356,7 @@ pub struct DirEntry {
     entry: dirent64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenOptions {
     // generic
     read: bool,
@@ -368,7 +370,7 @@ pub struct OpenOptions {
     mode: mode_t,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FilePermissions {
     mode: mode_t,
 }
@@ -377,11 +379,17 @@ pub struct FilePermissions {
 pub struct FileTimes {
     accessed: Option<SystemTime>,
     modified: Option<SystemTime>,
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "tvos"
+    ))]
     created: Option<SystemTime>,
 }
 
-#[derive(Copy, Clone, Eq, Debug)]
+#[derive(Copy, Clone, Eq)]
 pub struct FileType {
     mode: mode_t,
 }
@@ -398,10 +406,12 @@ impl core::hash::Hash for FileType {
     }
 }
 
-#[derive(Debug)]
 pub struct DirBuilder {
     mode: mode_t,
 }
+
+#[derive(Copy, Clone)]
+struct Mode(mode_t);
 
 cfg_has_statx! {{
     impl FileAttr {
@@ -463,15 +473,15 @@ impl FileAttr {
 #[cfg(target_os = "netbsd")]
 impl FileAttr {
     pub fn modified(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_mtime as i64, self.stat.st_mtimensec as i64))
+        SystemTime::new(self.stat.st_mtime as i64, self.stat.st_mtimensec as i64)
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_atime as i64, self.stat.st_atimensec as i64))
+        SystemTime::new(self.stat.st_atime as i64, self.stat.st_atimensec as i64)
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_birthtime as i64, self.stat.st_birthtimensec as i64))
+        SystemTime::new(self.stat.st_birthtime as i64, self.stat.st_birthtimensec as i64)
     }
 }
 
@@ -503,21 +513,21 @@ impl FileAttr {
         #[cfg(target_pointer_width = "32")]
         cfg_has_statx! {
             if let Some(mtime) = self.stx_mtime() {
-                return Ok(SystemTime::new(mtime.tv_sec, mtime.tv_nsec as i64));
+                return SystemTime::new(mtime.tv_sec, mtime.tv_nsec as i64);
             }
         }
 
-        Ok(SystemTime::new(self.stat.st_mtime as i64, self.stat.st_mtime_nsec as i64))
+        SystemTime::new(self.stat.st_mtime as i64, self.stat.st_mtime_nsec as i64)
     }
 
     #[cfg(any(target_os = "vxworks", target_os = "espidf", target_os = "vita"))]
     pub fn modified(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_mtime as i64, 0))
+        SystemTime::new(self.stat.st_mtime as i64, 0)
     }
 
     #[cfg(any(target_os = "horizon", target_os = "hurd"))]
     pub fn modified(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::from(self.stat.st_mtim))
+        SystemTime::new(self.stat.st_mtim.tv_sec as i64, self.stat.st_mtim.tv_nsec as i64)
     }
 
     #[cfg(not(any(
@@ -531,21 +541,21 @@ impl FileAttr {
         #[cfg(target_pointer_width = "32")]
         cfg_has_statx! {
             if let Some(atime) = self.stx_atime() {
-                return Ok(SystemTime::new(atime.tv_sec, atime.tv_nsec as i64));
+                return SystemTime::new(atime.tv_sec, atime.tv_nsec as i64);
             }
         }
 
-        Ok(SystemTime::new(self.stat.st_atime as i64, self.stat.st_atime_nsec as i64))
+        SystemTime::new(self.stat.st_atime as i64, self.stat.st_atime_nsec as i64)
     }
 
     #[cfg(any(target_os = "vxworks", target_os = "espidf", target_os = "vita"))]
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_atime as i64, 0))
+        SystemTime::new(self.stat.st_atime as i64, 0)
     }
 
     #[cfg(any(target_os = "horizon", target_os = "hurd"))]
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::from(self.stat.st_atim))
+        SystemTime::new(self.stat.st_atim.tv_sec as i64, self.stat.st_atim.tv_nsec as i64)
     }
 
     #[cfg(any(
@@ -555,9 +565,10 @@ impl FileAttr {
         target_os = "ios",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "visionos",
     ))]
     pub fn created(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_birthtime as i64, self.stat.st_birthtime_nsec as i64))
+        SystemTime::new(self.stat.st_birthtime as i64, self.stat.st_birthtime_nsec as i64)
     }
 
     #[cfg(not(any(
@@ -567,16 +578,17 @@ impl FileAttr {
         target_os = "ios",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "visionos",
         target_os = "vita",
     )))]
     pub fn created(&self) -> io::Result<SystemTime> {
         cfg_has_statx! {
             if let Some(ext) = &self.statx_extra_fields {
                 return if (ext.stx_mask & libc::STATX_BTIME) != 0 {
-                    Ok(SystemTime::new(ext.stx_btime.tv_sec, ext.stx_btime.tv_nsec as i64))
+                    SystemTime::new(ext.stx_btime.tv_sec, ext.stx_btime.tv_nsec as i64)
                 } else {
                     Err(io::const_io_error!(
-                        io::ErrorKind::Uncategorized,
+                        io::ErrorKind::Unsupported,
                         "creation time is not available for the filesystem",
                     ))
                 };
@@ -592,22 +604,22 @@ impl FileAttr {
 
     #[cfg(target_os = "vita")]
     pub fn created(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_ctime as i64, 0))
+        SystemTime::new(self.stat.st_ctime as i64, 0)
     }
 }
 
 #[cfg(target_os = "nto")]
 impl FileAttr {
     pub fn modified(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_mtim.tv_sec, self.stat.st_mtim.tv_nsec))
+        SystemTime::new(self.stat.st_mtim.tv_sec, self.stat.st_mtim.tv_nsec)
     }
 
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_atim.tv_sec, self.stat.st_atim.tv_nsec))
+        SystemTime::new(self.stat.st_atim.tv_sec, self.stat.st_atim.tv_nsec)
     }
 
     pub fn created(&self) -> io::Result<SystemTime> {
-        Ok(SystemTime::new(self.stat.st_ctim.tv_sec, self.stat.st_ctim.tv_nsec))
+        SystemTime::new(self.stat.st_ctim.tv_sec, self.stat.st_ctim.tv_nsec)
     }
 }
 
@@ -647,7 +659,13 @@ impl FileTimes {
         self.modified = Some(t);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "tvos"
+    ))]
     pub fn set_created(&mut self, t: SystemTime) {
         self.created = Some(t);
     }
@@ -673,9 +691,23 @@ impl FileType {
     }
 }
 
+impl fmt::Debug for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let FileType { mode } = self;
+        f.debug_struct("FileType").field("mode", &Mode(*mode)).finish()
+    }
+}
+
 impl FromInner<u32> for FilePermissions {
     fn from_inner(mode: u32) -> FilePermissions {
         FilePermissions { mode: mode as mode_t }
+    }
+}
+
+impl fmt::Debug for FilePermissions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let FilePermissions { mode } = self;
+        f.debug_struct("FilePermissions").field("mode", &Mode(*mode)).finish()
     }
 }
 
@@ -938,6 +970,7 @@ impl DirEntry {
         target_os = "ios",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "visionos",
         target_os = "linux",
         target_os = "emscripten",
         target_os = "android",
@@ -974,6 +1007,7 @@ impl DirEntry {
         target_os = "ios",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "visionos",
         target_os = "netbsd",
         target_os = "openbsd",
         target_os = "freebsd",
@@ -993,6 +1027,7 @@ impl DirEntry {
         target_os = "ios",
         target_os = "tvos",
         target_os = "watchos",
+        target_os = "visionos",
         target_os = "netbsd",
         target_os = "openbsd",
         target_os = "freebsd",
@@ -1116,9 +1151,26 @@ impl OpenOptions {
     }
 }
 
+impl fmt::Debug for OpenOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let OpenOptions { read, write, append, truncate, create, create_new, custom_flags, mode } =
+            self;
+        f.debug_struct("OpenOptions")
+            .field("read", read)
+            .field("write", write)
+            .field("append", append)
+            .field("truncate", truncate)
+            .field("create", create)
+            .field("create_new", create_new)
+            .field("custom_flags", custom_flags)
+            .field("mode", &Mode(*mode))
+            .finish()
+    }
+}
+
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        run_path_with_cstr(path, |path| File::open_c(path, opts))
+        run_path_with_cstr(path, &|path| File::open_c(path, opts))
     }
 
     pub fn open_c(path: &CStr, opts: &OpenOptions) -> io::Result<File> {
@@ -1162,6 +1214,7 @@ impl File {
             target_os = "ios",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "visionos",
         ))]
         unsafe fn os_fsync(fd: c_int) -> c_int {
             libc::fcntl(fd, libc::F_FULLFSYNC)
@@ -1171,6 +1224,7 @@ impl File {
             target_os = "ios",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "visionos",
         )))]
         unsafe fn os_fsync(fd: c_int) -> c_int {
             libc::fsync(fd)
@@ -1186,6 +1240,7 @@ impl File {
             target_os = "ios",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "visionos",
         ))]
         unsafe fn os_datasync(fd: c_int) -> c_int {
             libc::fcntl(fd, libc::F_FULLFSYNC)
@@ -1212,6 +1267,7 @@ impl File {
             target_os = "netbsd",
             target_os = "openbsd",
             target_os = "watchos",
+            target_os = "visionos",
             target_os = "nto",
             target_os = "hurd",
         )))]
@@ -1322,7 +1378,7 @@ impl File {
                     io::ErrorKind::Unsupported,
                     "setting file times not supported",
                 ))
-            } else if #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))] {
+            } else if #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos"))] {
                 let mut buf = [mem::MaybeUninit::<libc::timespec>::uninit(); 3];
                 let mut num_times = 0;
                 let mut attrlist: libc::attrlist = unsafe { mem::zeroed() };
@@ -1344,7 +1400,7 @@ impl File {
                 }
                 cvt(unsafe { libc::fsetattrlist(
                     self.as_raw_fd(),
-                    (&attrlist as *const libc::attrlist).cast::<libc::c_void>().cast_mut(),
+                    core::ptr::addr_of!(attrlist).cast::<libc::c_void>().cast_mut(),
                     buf.as_ptr().cast::<libc::c_void>().cast_mut(),
                     num_times * mem::size_of::<libc::timespec>(),
                     0
@@ -1394,11 +1450,18 @@ impl DirBuilder {
     }
 
     pub fn mkdir(&self, p: &Path) -> io::Result<()> {
-        run_path_with_cstr(p, |p| cvt(unsafe { libc::mkdir(p.as_ptr(), self.mode) }).map(|_| ()))
+        run_path_with_cstr(p, &|p| cvt(unsafe { libc::mkdir(p.as_ptr(), self.mode) }).map(|_| ()))
     }
 
     pub fn set_mode(&mut self, mode: u32) {
         self.mode = mode as mode_t;
+    }
+}
+
+impl fmt::Debug for DirBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let DirBuilder { mode } = self;
+        f.debug_struct("DirBuilder").field("mode", &Mode(*mode)).finish()
     }
 }
 
@@ -1574,8 +1637,75 @@ impl fmt::Debug for File {
     }
 }
 
+// Format in octal, followed by the mode format used in `ls -l`.
+//
+// References:
+//   https://pubs.opengroup.org/onlinepubs/009696899/utilities/ls.html
+//   https://www.gnu.org/software/libc/manual/html_node/Testing-File-Type.html
+//   https://www.gnu.org/software/libc/manual/html_node/Permission-Bits.html
+//
+// Example:
+//   0o100664 (-rw-rw-r--)
+impl fmt::Debug for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(mode) = *self;
+        write!(f, "0o{mode:06o}")?;
+
+        let entry_type = match mode & libc::S_IFMT {
+            libc::S_IFDIR => 'd',
+            libc::S_IFBLK => 'b',
+            libc::S_IFCHR => 'c',
+            libc::S_IFLNK => 'l',
+            libc::S_IFIFO => 'p',
+            libc::S_IFREG => '-',
+            _ => return Ok(()),
+        };
+
+        f.write_str(" (")?;
+        f.write_char(entry_type)?;
+
+        // Owner permissions
+        f.write_char(if mode & libc::S_IRUSR != 0 { 'r' } else { '-' })?;
+        f.write_char(if mode & libc::S_IWUSR != 0 { 'w' } else { '-' })?;
+        let owner_executable = mode & libc::S_IXUSR != 0;
+        let setuid = mode as c_int & libc::S_ISUID as c_int != 0;
+        f.write_char(match (owner_executable, setuid) {
+            (true, true) => 's',  // executable and setuid
+            (false, true) => 'S', // setuid
+            (true, false) => 'x', // executable
+            (false, false) => '-',
+        })?;
+
+        // Group permissions
+        f.write_char(if mode & libc::S_IRGRP != 0 { 'r' } else { '-' })?;
+        f.write_char(if mode & libc::S_IWGRP != 0 { 'w' } else { '-' })?;
+        let group_executable = mode & libc::S_IXGRP != 0;
+        let setgid = mode as c_int & libc::S_ISGID as c_int != 0;
+        f.write_char(match (group_executable, setgid) {
+            (true, true) => 's',  // executable and setgid
+            (false, true) => 'S', // setgid
+            (true, false) => 'x', // executable
+            (false, false) => '-',
+        })?;
+
+        // Other permissions
+        f.write_char(if mode & libc::S_IROTH != 0 { 'r' } else { '-' })?;
+        f.write_char(if mode & libc::S_IWOTH != 0 { 'w' } else { '-' })?;
+        let other_executable = mode & libc::S_IXOTH != 0;
+        let sticky = mode as c_int & libc::S_ISVTX as c_int != 0;
+        f.write_char(match (entry_type, other_executable, sticky) {
+            ('d', true, true) => 't',  // searchable and restricted deletion
+            ('d', false, true) => 'T', // restricted deletion
+            (_, true, _) => 'x',       // executable
+            (_, false, _) => '-',
+        })?;
+
+        f.write_char(')')
+    }
+}
+
 pub fn readdir(path: &Path) -> io::Result<ReadDir> {
-    let ptr = run_path_with_cstr(path, |p| unsafe { Ok(libc::opendir(p.as_ptr())) })?;
+    let ptr = run_path_with_cstr(path, &|p| unsafe { Ok(libc::opendir(p.as_ptr())) })?;
     if ptr.is_null() {
         Err(Error::last_os_error())
     } else {
@@ -1586,27 +1716,27 @@ pub fn readdir(path: &Path) -> io::Result<ReadDir> {
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
-    run_path_with_cstr(p, |p| cvt(unsafe { libc::unlink(p.as_ptr()) }).map(|_| ()))
+    run_path_with_cstr(p, &|p| cvt(unsafe { libc::unlink(p.as_ptr()) }).map(|_| ()))
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    run_path_with_cstr(old, |old| {
-        run_path_with_cstr(new, |new| {
+    run_path_with_cstr(old, &|old| {
+        run_path_with_cstr(new, &|new| {
             cvt(unsafe { libc::rename(old.as_ptr(), new.as_ptr()) }).map(|_| ())
         })
     })
 }
 
 pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
-    run_path_with_cstr(p, |p| cvt_r(|| unsafe { libc::chmod(p.as_ptr(), perm.mode) }).map(|_| ()))
+    run_path_with_cstr(p, &|p| cvt_r(|| unsafe { libc::chmod(p.as_ptr(), perm.mode) }).map(|_| ()))
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    run_path_with_cstr(p, |p| cvt(unsafe { libc::rmdir(p.as_ptr()) }).map(|_| ()))
+    run_path_with_cstr(p, &|p| cvt(unsafe { libc::rmdir(p.as_ptr()) }).map(|_| ()))
 }
 
 pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    run_path_with_cstr(p, |c_path| {
+    run_path_with_cstr(p, &|c_path| {
         let p = c_path.as_ptr();
 
         let mut buf = Vec::with_capacity(256);
@@ -1635,16 +1765,16 @@ pub fn readlink(p: &Path) -> io::Result<PathBuf> {
 }
 
 pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
-    run_path_with_cstr(original, |original| {
-        run_path_with_cstr(link, |link| {
+    run_path_with_cstr(original, &|original| {
+        run_path_with_cstr(link, &|link| {
             cvt(unsafe { libc::symlink(original.as_ptr(), link.as_ptr()) }).map(|_| ())
         })
     })
 }
 
 pub fn link(original: &Path, link: &Path) -> io::Result<()> {
-    run_path_with_cstr(original, |original| {
-        run_path_with_cstr(link, |link| {
+    run_path_with_cstr(original, &|original| {
+        run_path_with_cstr(link, &|link| {
             cfg_if::cfg_if! {
                 if #[cfg(any(target_os = "vxworks", target_os = "redox", target_os = "android", target_os = "espidf", target_os = "horizon", target_os = "vita"))] {
                     // VxWorks, Redox and ESP-IDF lack `linkat`, so use `link` instead. POSIX leaves
@@ -1678,7 +1808,7 @@ pub fn link(original: &Path, link: &Path) -> io::Result<()> {
 }
 
 pub fn stat(p: &Path) -> io::Result<FileAttr> {
-    run_path_with_cstr(p, |p| {
+    run_path_with_cstr(p, &|p| {
         cfg_has_statx! {
             if let Some(ret) = unsafe { try_statx(
                 libc::AT_FDCWD,
@@ -1697,7 +1827,7 @@ pub fn stat(p: &Path) -> io::Result<FileAttr> {
 }
 
 pub fn lstat(p: &Path) -> io::Result<FileAttr> {
-    run_path_with_cstr(p, |p| {
+    run_path_with_cstr(p, &|p| {
         cfg_has_statx! {
             if let Some(ret) = unsafe { try_statx(
                 libc::AT_FDCWD,
@@ -1716,7 +1846,7 @@ pub fn lstat(p: &Path) -> io::Result<FileAttr> {
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
-    let r = run_path_with_cstr(p, |path| unsafe {
+    let r = run_path_with_cstr(p, &|path| unsafe {
         Ok(libc::realpath(path.as_ptr(), ptr::null_mut()))
     })?;
     if r.is_null() {
@@ -1744,7 +1874,7 @@ fn open_from(from: &Path) -> io::Result<(crate::fs::File, crate::fs::Metadata)> 
 #[cfg(target_os = "espidf")]
 fn open_to_and_set_permissions(
     to: &Path,
-    reader_metadata: crate::fs::Metadata,
+    _reader_metadata: crate::fs::Metadata,
 ) -> io::Result<(crate::fs::File, crate::fs::Metadata)> {
     use crate::fs::OpenOptions;
     let writer = OpenOptions::new().open(to)?;
@@ -1787,6 +1917,7 @@ fn open_to_and_set_permissions(
     target_os = "ios",
     target_os = "tvos",
     target_os = "watchos",
+    target_os = "visionos",
 )))]
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     let (mut reader, reader_metadata) = open_from(from)?;
@@ -1813,43 +1944,19 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "watchos",
+    target_os = "visionos",
+    target_os = "tvos"
+))]
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     use crate::sync::atomic::{AtomicBool, Ordering};
 
-    const COPYFILE_ACL: u32 = 1 << 0;
-    const COPYFILE_STAT: u32 = 1 << 1;
-    const COPYFILE_XATTR: u32 = 1 << 2;
-    const COPYFILE_DATA: u32 = 1 << 3;
+    const COPYFILE_ALL: libc::copyfile_flags_t = libc::COPYFILE_METADATA | libc::COPYFILE_DATA;
 
-    const COPYFILE_SECURITY: u32 = COPYFILE_STAT | COPYFILE_ACL;
-    const COPYFILE_METADATA: u32 = COPYFILE_SECURITY | COPYFILE_XATTR;
-    const COPYFILE_ALL: u32 = COPYFILE_METADATA | COPYFILE_DATA;
-
-    const COPYFILE_STATE_COPIED: u32 = 8;
-
-    #[allow(non_camel_case_types)]
-    type copyfile_state_t = *mut libc::c_void;
-    #[allow(non_camel_case_types)]
-    type copyfile_flags_t = u32;
-
-    extern "C" {
-        fn fcopyfile(
-            from: libc::c_int,
-            to: libc::c_int,
-            state: copyfile_state_t,
-            flags: copyfile_flags_t,
-        ) -> libc::c_int;
-        fn copyfile_state_alloc() -> copyfile_state_t;
-        fn copyfile_state_free(state: copyfile_state_t) -> libc::c_int;
-        fn copyfile_state_get(
-            state: copyfile_state_t,
-            flag: u32,
-            dst: *mut libc::c_void,
-        ) -> libc::c_int;
-    }
-
-    struct FreeOnDrop(copyfile_state_t);
+    struct FreeOnDrop(libc::copyfile_state_t);
     impl Drop for FreeOnDrop {
         fn drop(&mut self) {
             // The code below ensures that `FreeOnDrop` is never a null pointer
@@ -1857,7 +1964,7 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
                 // `copyfile_state_free` returns -1 if the `to` or `from` files
                 // cannot be closed. However, this is not considered this an
                 // error.
-                copyfile_state_free(self.0);
+                libc::copyfile_state_free(self.0);
             }
         }
     }
@@ -1866,6 +1973,7 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     // We store the availability in a global to avoid unnecessary syscalls
     static HAS_FCLONEFILEAT: AtomicBool = AtomicBool::new(true);
     syscall! {
+        // Mirrors `libc::fclonefileat`
         fn fclonefileat(
             srcfd: libc::c_int,
             dst_dirfd: libc::c_int,
@@ -1879,7 +1987,7 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     // Opportunistically attempt to create a copy-on-write clone of `from`
     // using `fclonefileat`.
     if HAS_FCLONEFILEAT.load(Ordering::Relaxed) {
-        let clonefile_result = run_path_with_cstr(to, |to| {
+        let clonefile_result = run_path_with_cstr(to, &|to| {
             cvt(unsafe { fclonefileat(reader.as_raw_fd(), libc::AT_FDCWD, to.as_ptr(), 0) })
         });
         match clonefile_result {
@@ -1902,30 +2010,30 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     // We ensure that `FreeOnDrop` never contains a null pointer so it is
     // always safe to call `copyfile_state_free`
     let state = unsafe {
-        let state = copyfile_state_alloc();
+        let state = libc::copyfile_state_alloc();
         if state.is_null() {
             return Err(crate::io::Error::last_os_error());
         }
         FreeOnDrop(state)
     };
 
-    let flags = if writer_metadata.is_file() { COPYFILE_ALL } else { COPYFILE_DATA };
+    let flags = if writer_metadata.is_file() { COPYFILE_ALL } else { libc::COPYFILE_DATA };
 
-    cvt(unsafe { fcopyfile(reader.as_raw_fd(), writer.as_raw_fd(), state.0, flags) })?;
+    cvt(unsafe { libc::fcopyfile(reader.as_raw_fd(), writer.as_raw_fd(), state.0, flags) })?;
 
     let mut bytes_copied: libc::off_t = 0;
     cvt(unsafe {
-        copyfile_state_get(
+        libc::copyfile_state_get(
             state.0,
-            COPYFILE_STATE_COPIED,
-            &mut bytes_copied as *mut libc::off_t as *mut libc::c_void,
+            libc::COPYFILE_STATE_COPIED as u32,
+            core::ptr::addr_of_mut!(bytes_copied) as *mut libc::c_void,
         )
     })?;
     Ok(bytes_copied as u64)
 }
 
 pub fn chown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    run_path_with_cstr(path, |path| {
+    run_path_with_cstr(path, &|path| {
         cvt(unsafe { libc::chown(path.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) })
             .map(|_| ())
     })
@@ -1937,7 +2045,7 @@ pub fn fchown(fd: c_int, uid: u32, gid: u32) -> io::Result<()> {
 }
 
 pub fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    run_path_with_cstr(path, |path| {
+    run_path_with_cstr(path, &|path| {
         cvt(unsafe { libc::lchown(path.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) })
             .map(|_| ())
     })
@@ -1945,7 +2053,7 @@ pub fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 
 #[cfg(not(any(target_os = "fuchsia", target_os = "vxworks")))]
 pub fn chroot(dir: &Path) -> io::Result<()> {
-    run_path_with_cstr(dir, |dir| cvt(unsafe { libc::chroot(dir.as_ptr()) }).map(|_| ()))
+    run_path_with_cstr(dir, &|dir| cvt(unsafe { libc::chroot(dir.as_ptr()) }).map(|_| ()))
 }
 
 pub use remove_dir_impl::remove_dir_all;
@@ -2140,7 +2248,7 @@ mod remove_dir_impl {
         if attr.file_type().is_symlink() {
             crate::fs::remove_file(p)
         } else {
-            run_path_with_cstr(p, |p| remove_dir_all_recursive(None, &p))
+            run_path_with_cstr(p, &|p| remove_dir_all_recursive(None, &p))
         }
     }
 

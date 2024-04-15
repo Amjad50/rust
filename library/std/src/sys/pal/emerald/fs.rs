@@ -127,7 +127,7 @@ impl FileType {
 
 impl ReadDir {
     fn new(path: &Path) -> io::Result<ReadDir> {
-        let raw_fd = run_path_with_cstr(path, |path| unsafe {
+        let raw_fd = run_path_with_cstr(path, &|path| unsafe {
             emerald_std::io::syscall_open_dir(path).map_err(syscall_to_io_error)
         })?;
 
@@ -247,7 +247,7 @@ impl OpenOptions {
 
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        let fd = run_path_with_cstr(path, |path| Self::openc(path, opts))?;
+        let fd = run_path_with_cstr(path, &|path| Self::openc(path, opts))?;
 
         Ok(File { path: path.to_owned(), fd })
     }
@@ -451,7 +451,7 @@ pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
 }
 
 pub fn stat(p: &Path) -> io::Result<FileAttr> {
-    run_path_with_cstr(p, |c_path| {
+    run_path_with_cstr(p, &|c_path| {
         // will be overwritten by syscall
         let mut stat = FileStat::default();
 

@@ -1,6 +1,6 @@
 // ignore-tidy-filelength :(
 
-mod ambiguity;
+pub mod ambiguity;
 mod infer_ctxt_ext;
 pub mod on_unimplemented;
 pub mod suggestions;
@@ -40,7 +40,7 @@ pub struct ImplCandidate<'tcx> {
 
 enum GetSafeTransmuteErrorAndReason {
     Silent,
-    Error { err_msg: String, safe_transmute_explanation: String },
+    Error { err_msg: String, safe_transmute_explanation: Option<String> },
 }
 
 struct UnsatisfiedConst(pub bool);
@@ -152,9 +152,9 @@ impl ArgKind {
 struct HasNumericInferVisitor;
 
 impl<'tcx> ty::TypeVisitor<TyCtxt<'tcx>> for HasNumericInferVisitor {
-    type BreakTy = ();
+    type Result = ControlFlow<()>;
 
-    fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+    fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
         if matches!(ty.kind(), ty::Infer(ty::FloatVar(_) | ty::IntVar(_))) {
             ControlFlow::Break(())
         } else {

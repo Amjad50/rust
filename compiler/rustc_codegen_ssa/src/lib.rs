@@ -4,7 +4,7 @@
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![feature(associated_type_bounds)]
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(let_chains)]
@@ -24,8 +24,10 @@ extern crate tracing;
 extern crate rustc_middle;
 
 use rustc_ast as ast;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::unord::UnordMap;
 use rustc_hir::def_id::CrateNum;
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile;
@@ -77,13 +79,26 @@ impl<M> ModuleCodegen<M> {
         emit_obj: bool,
         emit_dwarf_obj: bool,
         emit_bc: bool,
+        emit_asm: bool,
+        emit_ir: bool,
         outputs: &OutputFilenames,
     ) -> CompiledModule {
         let object = emit_obj.then(|| outputs.temp_path(OutputType::Object, Some(&self.name)));
         let dwarf_object = emit_dwarf_obj.then(|| outputs.temp_path_dwo(Some(&self.name)));
         let bytecode = emit_bc.then(|| outputs.temp_path(OutputType::Bitcode, Some(&self.name)));
+        let assembly = emit_asm.then(|| outputs.temp_path(OutputType::Assembly, Some(&self.name)));
+        let llvm_ir =
+            emit_ir.then(|| outputs.temp_path(OutputType::LlvmAssembly, Some(&self.name)));
 
-        CompiledModule { name: self.name.clone(), kind: self.kind, object, dwarf_object, bytecode }
+        CompiledModule {
+            name: self.name.clone(),
+            kind: self.kind,
+            object,
+            dwarf_object,
+            bytecode,
+            assembly,
+            llvm_ir,
+        }
     }
 }
 
@@ -94,6 +109,8 @@ pub struct CompiledModule {
     pub object: Option<PathBuf>,
     pub dwarf_object: Option<PathBuf>,
     pub bytecode: Option<PathBuf>,
+    pub assembly: Option<PathBuf>, // --emit=asm
+    pub llvm_ir: Option<PathBuf>,  // --emit=llvm-ir, llvm-bc is in bytecode
 }
 
 pub struct CachedModuleCodegen {
@@ -152,16 +169,16 @@ impl From<&cstore::NativeLib> for NativeLib {
 pub struct CrateInfo {
     pub target_cpu: String,
     pub crate_types: Vec<CrateType>,
-    pub exported_symbols: FxHashMap<CrateType, Vec<String>>,
-    pub linked_symbols: FxHashMap<CrateType, Vec<(String, SymbolExportKind)>>,
+    pub exported_symbols: UnordMap<CrateType, Vec<String>>,
+    pub linked_symbols: FxIndexMap<CrateType, Vec<(String, SymbolExportKind)>>,
     pub local_crate_name: Symbol,
     pub compiler_builtins: Option<CrateNum>,
     pub profiler_runtime: Option<CrateNum>,
     pub is_no_builtins: FxHashSet<CrateNum>,
-    pub native_libraries: FxHashMap<CrateNum, Vec<NativeLib>>,
-    pub crate_name: FxHashMap<CrateNum, Symbol>,
+    pub native_libraries: FxIndexMap<CrateNum, Vec<NativeLib>>,
+    pub crate_name: UnordMap<CrateNum, Symbol>,
     pub used_libraries: Vec<NativeLib>,
-    pub used_crate_source: FxHashMap<CrateNum, Lrc<CrateSource>>,
+    pub used_crate_source: UnordMap<CrateNum, Lrc<CrateSource>>,
     pub used_crates: Vec<CrateNum>,
     pub dependency_formats: Lrc<Dependencies>,
     pub windows_subsystem: Option<String>,

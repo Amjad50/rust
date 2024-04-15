@@ -304,21 +304,21 @@ use crate::ops::{Deref, DerefMut};
 use crate::slice;
 use crate::str;
 use crate::sys;
-use crate::sys_common::memchr;
+use core::slice::memchr;
 
 #[stable(feature = "bufwriter_into_parts", since = "1.56.0")]
 pub use self::buffered::WriterPanicked;
 #[unstable(feature = "raw_os_error_ty", issue = "107792")]
 pub use self::error::RawOsError;
 pub(crate) use self::stdio::attempt_print_to_stderr;
-#[unstable(feature = "internal_output_capture", issue = "none")]
-#[doc(no_inline, hidden)]
-pub use self::stdio::set_output_capture;
 #[stable(feature = "is_terminal", since = "1.70.0")]
 pub use self::stdio::IsTerminal;
 #[unstable(feature = "print_internals", issue = "none")]
 #[doc(hidden)]
 pub use self::stdio::{_eprint, _print};
+#[unstable(feature = "internal_output_capture", issue = "none")]
+#[doc(no_inline, hidden)]
+pub use self::stdio::{set_output_capture, try_set_output_capture};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::{
     buffered::{BufReader, BufWriter, IntoInnerError, LineWriter},
@@ -385,12 +385,7 @@ where
     let mut g = Guard { len: buf.len(), buf: buf.as_mut_vec() };
     let ret = f(g.buf);
     if str::from_utf8(&g.buf[g.len..]).is_err() {
-        ret.and_then(|_| {
-            Err(error::const_io_error!(
-                ErrorKind::InvalidData,
-                "stream did not contain valid UTF-8"
-            ))
-        })
+        ret.and_then(|_| Err(Error::INVALID_UTF8))
     } else {
         g.len = g.buf.len();
         ret
@@ -465,7 +460,7 @@ pub(crate) fn default_read_to_end<R: Read + ?Sized>(
 
         if buf.len() == buf.capacity() {
             // buf is full, need more space
-            buf.try_reserve(PROBE_SIZE).map_err(|_| ErrorKind::OutOfMemory)?;
+            buf.try_reserve(PROBE_SIZE)?;
         }
 
         let mut spare = buf.spare_capacity_mut();
@@ -566,11 +561,7 @@ pub(crate) fn default_read_exact<R: Read + ?Sized>(this: &mut R, mut buf: &mut [
             Err(e) => return Err(e),
         }
     }
-    if !buf.is_empty() {
-        Err(error::const_io_error!(ErrorKind::UnexpectedEof, "failed to fill whole buffer"))
-    } else {
-        Ok(())
-    }
+    if !buf.is_empty() { Err(Error::READ_EXACT_EOF) } else { Ok(()) }
 }
 
 pub(crate) fn default_read_buf<F>(read: F, mut cursor: BorrowedCursor<'_>) -> Result<()>
@@ -578,15 +569,27 @@ where
     F: FnOnce(&mut [u8]) -> Result<usize>,
 {
     let n = read(cursor.ensure_init().init_mut())?;
-    assert!(
-        n <= cursor.capacity(),
-        "read should not return more bytes than there is capacity for in the read buffer"
-    );
-    unsafe {
-        // SAFETY: we initialised using `ensure_init` so there is no uninit data to advance to
-        // and we have checked that the read amount is not over capacity (see #120603)
-        cursor.advance(n);
+    cursor.advance(n);
+    Ok(())
+}
+
+pub(crate) fn default_read_buf_exact<R: Read + ?Sized>(
+    this: &mut R,
+    mut cursor: BorrowedCursor<'_>,
+) -> Result<()> {
+    while cursor.capacity() > 0 {
+        let prev_written = cursor.written();
+        match this.read_buf(cursor.reborrow()) {
+            Ok(()) => {}
+            Err(e) if e.is_interrupted() => continue,
+            Err(e) => return Err(e),
+        }
+
+        if cursor.written() == prev_written {
+            return Err(Error::READ_EXACT_EOF);
+        }
     }
+
     Ok(())
 }
 
@@ -700,10 +703,9 @@ pub trait Read {
     /// Callers have to ensure that no unchecked out-of-bounds accesses are possible even if
     /// `n > buf.len()`.
     ///
-    /// No guarantees are provided about the contents of `buf` when this
-    /// function is called, so implementations cannot rely on any property of the
-    /// contents of `buf` being true. It is recommended that *implementations*
-    /// only write data to `buf` instead of reading its contents.
+    /// *Implementations* of this method can make no assumptions about the contents of `buf` when
+    /// this function is called. It is recommended that implementations only write data to `buf`
+    /// instead of reading its contents.
     ///
     /// Correspondingly, however, *callers* of this method in unsafe code must not assume
     /// any guarantees about how the implementation uses `buf`. The trait is safe to implement,
@@ -842,7 +844,7 @@ pub trait Read {
     ///         if src_buf.is_empty() {
     ///             break;
     ///         }
-    ///         dest_vec.try_reserve(src_buf.len()).map_err(|_| io::ErrorKind::OutOfMemory)?;
+    ///         dest_vec.try_reserve(src_buf.len())?;
     ///         dest_vec.extend_from_slice(src_buf);
     ///
     ///         // Any irreversible side effects should happen after `try_reserve` succeeds,
@@ -909,12 +911,10 @@ pub trait Read {
     /// This function reads as many bytes as necessary to completely fill the
     /// specified buffer `buf`.
     ///
-    /// No guarantees are provided about the contents of `buf` when this
-    /// function is called, so implementations cannot rely on any property of the
-    /// contents of `buf` being true. It is recommended that implementations
-    /// only write data to `buf` instead of reading its contents. The
-    /// documentation on [`read`] has a more detailed explanation on this
-    /// subject.
+    /// *Implementations* of this method can make no assumptions about the contents of `buf` when
+    /// this function is called. It is recommended that implementations only write data to `buf`
+    /// instead of reading its contents. The documentation on [`read`] has a more detailed
+    /// explanation of this subject.
     ///
     /// # Errors
     ///
@@ -989,24 +989,8 @@ pub trait Read {
     ///
     /// If this function returns an error, all bytes read will be appended to `cursor`.
     #[unstable(feature = "read_buf", issue = "78485")]
-    fn read_buf_exact(&mut self, mut cursor: BorrowedCursor<'_>) -> Result<()> {
-        while cursor.capacity() > 0 {
-            let prev_written = cursor.written();
-            match self.read_buf(cursor.reborrow()) {
-                Ok(()) => {}
-                Err(e) if e.is_interrupted() => continue,
-                Err(e) => return Err(e),
-            }
-
-            if cursor.written() == prev_written {
-                return Err(error::const_io_error!(
-                    ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer"
-                ));
-            }
-        }
-
-        Ok(())
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> Result<()> {
+        default_read_buf_exact(self, cursor)
     }
 
     /// Creates a "by reference" adaptor for this instance of `Read`.
@@ -1713,10 +1697,7 @@ pub trait Write {
         while !buf.is_empty() {
             match self.write(buf) {
                 Ok(0) => {
-                    return Err(error::const_io_error!(
-                        ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return Err(Error::WRITE_ALL_EOF);
                 }
                 Ok(n) => buf = &buf[n..],
                 Err(ref e) if e.is_interrupted() => {}
@@ -1781,10 +1762,7 @@ pub trait Write {
         while !bufs.is_empty() {
             match self.write_vectored(bufs) {
                 Ok(0) => {
-                    return Err(error::const_io_error!(
-                        ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return Err(Error::WRITE_ALL_EOF);
                 }
                 Ok(n) => IoSlice::advance_slices(&mut bufs, n),
                 Err(ref e) if e.is_interrupted() => {}
@@ -2680,6 +2658,42 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
         }
         self.second.read_vectored(bufs)
     }
+
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        self.first.is_read_vectored() || self.second.is_read_vectored()
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        let mut read = 0;
+        if !self.done_first {
+            read += self.first.read_to_end(buf)?;
+            self.done_first = true;
+        }
+        read += self.second.read_to_end(buf)?;
+        Ok(read)
+    }
+
+    // We don't override `read_to_string` here because an UTF-8 sequence could
+    // be split between the two parts of the chain
+
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> Result<()> {
+        if buf.capacity() == 0 {
+            return Ok(());
+        }
+
+        if !self.done_first {
+            let old_len = buf.written();
+            self.first.read_buf(buf.reborrow())?;
+
+            if buf.written() != old_len {
+                return Ok(());
+            } else {
+                self.done_first = true;
+            }
+        }
+        self.second.read_buf(buf)
+    }
 }
 
 #[stable(feature = "chain_bufread", since = "1.9.0")]
@@ -2687,9 +2701,7 @@ impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
     fn fill_buf(&mut self) -> Result<&[u8]> {
         if !self.done_first {
             match self.first.fill_buf()? {
-                buf if buf.is_empty() => {
-                    self.done_first = true;
-                }
+                buf if buf.is_empty() => self.done_first = true,
                 buf => return Ok(buf),
             }
         }
@@ -2699,6 +2711,24 @@ impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
     fn consume(&mut self, amt: usize) {
         if !self.done_first { self.first.consume(amt) } else { self.second.consume(amt) }
     }
+
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> Result<usize> {
+        let mut read = 0;
+        if !self.done_first {
+            let n = self.first.read_until(byte, buf)?;
+            read += n;
+
+            match buf.last() {
+                Some(b) if *b == byte && n != 0 => return Ok(read),
+                _ => self.done_first = true,
+            }
+        }
+        read += self.second.read_until(byte, buf)?;
+        Ok(read)
+    }
+
+    // We don't override `read_line` here because an UTF-8 sequence could be
+    // split between the two parts of the chain
 }
 
 impl<T, U> SizeHint for Chain<T, U> {
@@ -2915,7 +2945,7 @@ impl<T: Read> Read for Take<T> {
 
             unsafe {
                 // SAFETY: filled bytes have been filled and therefore initialized
-                buf.advance(filled);
+                buf.advance_unchecked(filled);
                 // SAFETY: new_init bytes of buf's unfilled buffer have been initialized
                 buf.set_init(new_init);
             }

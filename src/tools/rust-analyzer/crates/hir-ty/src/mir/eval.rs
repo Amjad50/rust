@@ -25,7 +25,7 @@ use triomphe::Arc;
 
 use crate::{
     consteval::{intern_const_scalar, try_const_usize, ConstEvalError},
-    db::HirDatabase,
+    db::{HirDatabase, InternedClosure},
     display::{ClosureStyle, HirDisplay},
     infer::PointerCast,
     layout::{Layout, LayoutError, RustcEnumVariantIdx},
@@ -376,6 +376,10 @@ impl MirEvalError {
                         Ok(s) => s.map(|it| it.syntax_node_ptr()),
                         Err(_) => continue,
                     },
+                    MirSpan::SelfParam => match source_map.self_param_syntax() {
+                        Some(s) => s.map(|it| it.syntax_node_ptr()),
+                        None => continue,
+                    },
                     MirSpan::Unknown => continue,
                 };
                 let file_id = span.file_id.original_file(db.upcast());
@@ -647,7 +651,7 @@ impl Evaluator<'_> {
             ty.clone(),
             self.db,
             |c, subst, f| {
-                let (def, _) = self.db.lookup_intern_closure(c.into());
+                let InternedClosure(def, _) = self.db.lookup_intern_closure(c.into());
                 let infer = self.db.infer(def);
                 let (captures, _) = infer.closure_info(&c);
                 let parent_subst = ClosureSubst(subst).parent_subst();
@@ -1763,7 +1767,7 @@ impl Evaluator<'_> {
             }
         };
         mem.get(pos..pos + size)
-            .ok_or_else(|| MirEvalError::UndefinedBehavior("out of bound memory read".to_string()))
+            .ok_or_else(|| MirEvalError::UndefinedBehavior("out of bound memory read".to_owned()))
     }
 
     fn write_memory_using_ref(&mut self, addr: Address, size: usize) -> Result<&mut [u8]> {
@@ -1777,7 +1781,7 @@ impl Evaluator<'_> {
             }
         };
         mem.get_mut(pos..pos + size)
-            .ok_or_else(|| MirEvalError::UndefinedBehavior("out of bound memory write".to_string()))
+            .ok_or_else(|| MirEvalError::UndefinedBehavior("out of bound memory write".to_owned()))
     }
 
     fn write_memory(&mut self, addr: Address, r: &[u8]) -> Result<()> {
@@ -1800,7 +1804,7 @@ impl Evaluator<'_> {
             return Ok(());
         }
 
-        let oob = || MirEvalError::UndefinedBehavior("out of bounds memory write".to_string());
+        let oob = || MirEvalError::UndefinedBehavior("out of bounds memory write".to_owned());
 
         match (addr, r.addr) {
             (Stack(dst), Stack(src)) => {
@@ -1927,7 +1931,11 @@ impl Evaluator<'_> {
             ty: &Ty,
             locals: &Locals,
             mm: &mut ComplexMemoryMap,
+            stack_depth_limit: usize,
         ) -> Result<()> {
+            if stack_depth_limit.checked_sub(1).is_none() {
+                return Err(MirEvalError::StackOverflow);
+            }
             match ty.kind(Interner) {
                 TyKind::Ref(_, _, t) => {
                     let size = this.size_align_of(t, locals)?;
@@ -1966,7 +1974,14 @@ impl Evaluator<'_> {
                             if let Some(ty) = check_inner {
                                 for i in 0..count {
                                     let offset = element_size * i;
-                                    rec(this, &b[offset..offset + element_size], ty, locals, mm)?;
+                                    rec(
+                                        this,
+                                        &b[offset..offset + element_size],
+                                        ty,
+                                        locals,
+                                        mm,
+                                        stack_depth_limit - 1,
+                                    )?;
                                 }
                             }
                         }
@@ -1980,7 +1995,14 @@ impl Evaluator<'_> {
                     let size = this.size_of_sized(inner, locals, "inner of array")?;
                     for i in 0..len {
                         let offset = i * size;
-                        rec(this, &bytes[offset..offset + size], inner, locals, mm)?;
+                        rec(
+                            this,
+                            &bytes[offset..offset + size],
+                            inner,
+                            locals,
+                            mm,
+                            stack_depth_limit - 1,
+                        )?;
                     }
                 }
                 chalk_ir::TyKind::Tuple(_, subst) => {
@@ -1989,7 +2011,14 @@ impl Evaluator<'_> {
                         let ty = ty.assert_ty_ref(Interner); // Tuple only has type argument
                         let offset = layout.fields.offset(id).bytes_usize();
                         let size = this.layout(ty)?.size.bytes_usize();
-                        rec(this, &bytes[offset..offset + size], ty, locals, mm)?;
+                        rec(
+                            this,
+                            &bytes[offset..offset + size],
+                            ty,
+                            locals,
+                            mm,
+                            stack_depth_limit - 1,
+                        )?;
                     }
                 }
                 chalk_ir::TyKind::Adt(adt, subst) => match adt.0 {
@@ -2004,7 +2033,14 @@ impl Evaluator<'_> {
                                 .bytes_usize();
                             let ty = &field_types[f].clone().substitute(Interner, subst);
                             let size = this.layout(ty)?.size.bytes_usize();
-                            rec(this, &bytes[offset..offset + size], ty, locals, mm)?;
+                            rec(
+                                this,
+                                &bytes[offset..offset + size],
+                                ty,
+                                locals,
+                                mm,
+                                stack_depth_limit - 1,
+                            )?;
                         }
                     }
                     AdtId::EnumId(e) => {
@@ -2023,7 +2059,14 @@ impl Evaluator<'_> {
                                     l.fields.offset(u32::from(f.into_raw()) as usize).bytes_usize();
                                 let ty = &field_types[f].clone().substitute(Interner, subst);
                                 let size = this.layout(ty)?.size.bytes_usize();
-                                rec(this, &bytes[offset..offset + size], ty, locals, mm)?;
+                                rec(
+                                    this,
+                                    &bytes[offset..offset + size],
+                                    ty,
+                                    locals,
+                                    mm,
+                                    stack_depth_limit - 1,
+                                )?;
                             }
                         }
                     }
@@ -2034,7 +2077,7 @@ impl Evaluator<'_> {
             Ok(())
         }
         let mut mm = ComplexMemoryMap::default();
-        rec(self, bytes, ty, locals, &mut mm)?;
+        rec(self, bytes, ty, locals, &mut mm, self.stack_depth_limit - 1)?;
         Ok(mm)
     }
 
@@ -2313,7 +2356,7 @@ impl Evaluator<'_> {
 
     fn exec_fn_with_args(
         &mut self,
-        def: FunctionId,
+        mut def: FunctionId,
         args: &[IntervalAndTy],
         generic_args: Substitution,
         locals: &Locals,
@@ -2330,6 +2373,9 @@ impl Evaluator<'_> {
             span,
         )? {
             return Ok(None);
+        }
+        if let Some(redirect_def) = self.detect_and_redirect_special_function(def)? {
+            def = redirect_def;
         }
         let arg_bytes = args.iter().map(|it| IntervalOrOwned::Borrowed(it.interval));
         match self.get_mir_or_dyn_index(def, generic_args.clone(), locals, span)? {
@@ -2653,7 +2699,7 @@ pub fn render_const_using_debug_impl(
         ptr: ArenaMap::new(),
         body: db
             .mir_body(owner.into())
-            .map_err(|_| MirEvalError::NotSupported("unreachable".to_string()))?,
+            .map_err(|_| MirEvalError::NotSupported("unreachable".to_owned()))?,
         drop_flags: DropFlags::default(),
     };
     let data = evaluator.allocate_const_in_heap(locals, c)?;

@@ -20,8 +20,6 @@ pub mod io;
 pub mod kernel_copy;
 #[cfg(target_os = "l4re")]
 mod l4re;
-pub mod locks;
-pub mod memchr;
 #[cfg(not(target_os = "l4re"))]
 pub mod net;
 #[cfg(target_os = "l4re")]
@@ -39,7 +37,7 @@ pub mod thread_parking;
 pub mod time;
 
 #[cfg(target_os = "espidf")]
-pub fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {}
+pub fn init(_argc: isize, _argv: *const *const u8, _sigpipe: u8) {}
 
 #[cfg(not(target_os = "espidf"))]
 // SAFETY: must be called only once during runtime initialization.
@@ -85,6 +83,7 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
             target_os = "ios",
             target_os = "tvos",
             target_os = "watchos",
+            target_os = "visionos",
             target_os = "redox",
             target_os = "l4re",
             target_os = "horizon",
@@ -407,7 +406,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "macos")] {
         #[link(name = "System")]
         extern "C" {}
-    } else if #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos"))] {
+    } else if #[cfg(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos"))] {
         #[link(name = "System")]
         #[link(name = "objc")]
         #[link(name = "Foundation", kind = "framework")]
@@ -434,6 +433,6 @@ mod unsupported {
     }
 
     pub fn unsupported_err() -> io::Error {
-        io::const_io_error!(io::ErrorKind::Unsupported, "operation not supported on this platform",)
+        io::Error::UNSUPPORTED_PLATFORM
     }
 }

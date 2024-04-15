@@ -20,8 +20,8 @@ struct Foo<'lt, T, const C: usize> {
             en Enum      Enum
             ma makro!(…) macro_rules! makro
             md module
-            sp Self      Foo<'_, {unknown}, _>
-            st Foo<…>    Foo<'_, {unknown}, _>
+            sp Self      Foo<'static, {unknown}, _>
+            st Foo<…>    Foo<'static, {unknown}, _>
             st Record    Record
             st Tuple     Tuple
             st Unit      Unit
@@ -45,8 +45,8 @@ struct Foo<'lt, T, const C: usize>(f$0);
             en Enum       Enum
             ma makro!(…)  macro_rules! makro
             md module
-            sp Self       Foo<'_, {unknown}, _>
-            st Foo<…>     Foo<'_, {unknown}, _>
+            sp Self       Foo<'static, {unknown}, _>
+            st Foo<…>     Foo<'static, {unknown}, _>
             st Record     Record
             st Tuple      Tuple
             st Unit       Unit
@@ -986,6 +986,46 @@ fn foo<'a>() { S::<'static, F$0, _, _>; }
             ma makro!(…) macro_rules! makro
             kw crate::
             kw self::
+        "#]],
+    );
+}
+
+#[test]
+fn complete_traits_on_impl_trait_block() {
+    check(
+        r#"
+trait Foo {}
+
+struct Bar;
+
+impl $0 for Bar { }
+"#,
+        expect![[r#"
+            md module
+            tt Foo
+            tt Trait
+            kw crate::
+            kw self::
+        "#]],
+    );
+}
+
+#[test]
+fn complete_traits_with_path_on_impl_trait_block() {
+    check(
+        r#"
+mod outer {
+    pub trait Foo {}
+    pub struct Bar;
+    pub mod inner {
+    }
+}
+
+impl outer::$0 for Bar { }
+"#,
+        expect![[r#"
+            md inner
+            tt Foo
         "#]],
     );
 }

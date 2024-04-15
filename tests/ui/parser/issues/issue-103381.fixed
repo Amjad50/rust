@@ -1,4 +1,4 @@
-// run-rustfix
+//@ run-rustfix
 
 #![feature(let_chains)]
 #![allow(unused_variables)]
@@ -35,21 +35,6 @@ fn should_ok_2() {
 
 fn should_ok_3() {
     if true && if true { true } else { false } {}
-}
-
-fn shoule_match_ok() {
-    #[cfg(feature = "full")]
-    {
-        let a = 1;
-        let b = 2;
-        if match a {
-            1 if b == 1 => true,
-            _ => false,
-        } && if a > 1 { true } else { false }
-        {
-            true
-        }
-    }
 }
 
 fn should_ok_in_nested() {

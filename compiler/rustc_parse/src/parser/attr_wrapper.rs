@@ -40,8 +40,8 @@ impl AttrWrapper {
         AttrWrapper { attrs: AttrVec::new(), start_pos: usize::MAX }
     }
 
-    pub(crate) fn take_for_recovery(self, sess: &ParseSess) -> AttrVec {
-        sess.dcx.span_delayed_bug(
+    pub(crate) fn take_for_recovery(self, psess: &ParseSess) -> AttrVec {
+        psess.dcx.span_delayed_bug(
             self.attrs.get(0).map(|attr| attr.span).unwrap_or(DUMMY_SP),
             "AttrVec is taken for recovery but no error is produced",
         );
@@ -454,7 +454,7 @@ fn make_token_stream(
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

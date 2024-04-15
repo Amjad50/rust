@@ -19,19 +19,14 @@ pub mod env;
 pub mod fs;
 #[path = "../unsupported/io.rs"]
 pub mod io;
-#[path = "../unsupported/locks/mod.rs"]
-pub mod locks;
 #[path = "../unsupported/net.rs"]
 pub mod net;
-#[path = "../unsupported/once.rs"]
-pub mod once;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
 #[path = "../unsupported/process.rs"]
 pub mod process;
 pub mod stdio;
-#[path = "../unsupported/thread.rs"]
 pub mod thread;
 #[path = "../unsupported/thread_local_key.rs"]
 pub mod thread_local_key;
@@ -50,10 +45,6 @@ use crate::io as std_io;
 use crate::os::uefi;
 use crate::ptr::NonNull;
 use crate::sync::atomic::{AtomicPtr, Ordering};
-
-pub mod memchr {
-    pub use core::slice::memchr::{memchr, memrchr};
-}
 
 static EXIT_BOOT_SERVICE_EVENT: AtomicPtr<crate::ffi::c_void> =
     AtomicPtr::new(crate::ptr::null_mut());

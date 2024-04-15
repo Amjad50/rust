@@ -4,17 +4,15 @@
 #![allow(rustc::untranslatable_diagnostic)]
 
 use either::Either;
+use hir::ClosureKind;
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxIndexSet;
-use rustc_errors::{
-    codes::*, struct_span_code_err, Applicability, Diagnostic, DiagnosticBuilder, MultiSpan,
-};
+use rustc_errors::{codes::*, struct_span_code_err, Applicability, Diag, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::intravisit::{walk_block, walk_expr, Visitor};
+use rustc_hir::intravisit::{walk_block, walk_expr, Map, Visitor};
 use rustc_hir::{CoroutineDesugaring, PatField};
 use rustc_hir::{CoroutineKind, CoroutineSource, LangItem};
-use rustc_infer::traits::ObligationCause;
 use rustc_middle::hir::nested_filter::OnlyBodies;
 use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::{
@@ -23,16 +21,21 @@ use rustc_middle::mir::{
     PlaceRef, ProjectionElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
     VarBindingForm,
 };
-use rustc_middle::ty::{self, suggest_constraining_type_params, PredicateKind, Ty, TyCtxt};
+use rustc_middle::ty::{
+    self, suggest_constraining_type_params, PredicateKind, ToPredicate, Ty, TyCtxt,
+    TypeSuperVisitable, TypeVisitor,
+};
 use rustc_middle::util::CallKind;
 use rustc_mir_dataflow::move_paths::{InitKind, MoveOutIndex, MovePathIndex};
+use rustc_span::def_id::DefId;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{BytePos, Span, Symbol};
 use rustc_trait_selection::infer::InferCtxtExt;
+use rustc_trait_selection::traits::error_reporting::suggestions::TypeErrCtxtExt;
 use rustc_trait_selection::traits::error_reporting::FindExprBySpan;
-use rustc_trait_selection::traits::ObligationCtxt;
+use rustc_trait_selection::traits::{Obligation, ObligationCause, ObligationCtxt};
 use std::iter;
 
 use crate::borrow_set::TwoPhaseActivation;
@@ -41,7 +44,7 @@ use crate::diagnostics::conflict_errors::StorageDeadOrDrop::LocalStorageDead;
 use crate::diagnostics::{find_all_local_uses, CapturedMessageOpt};
 use crate::{
     borrow_set::BorrowData, diagnostics::Instance, prefixes::IsPrefixOf,
-    InitializationRequiringAction, MirBorrowckCtxt, PrefixSet, WriteKind,
+    InitializationRequiringAction, MirBorrowckCtxt, WriteKind,
 };
 
 use super::{
@@ -116,7 +119,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             self.buffer_error(err);
         } else {
             if let Some((reported_place, _)) = self.has_move_error(&move_out_indices) {
-                if self.prefixes(*reported_place, PrefixSet::All).any(|p| p == used_place) {
+                if used_place.is_prefix_of(*reported_place) {
                     debug!(
                         "report_use_of_moved_or_uninitialized place: error suppressed mois={:?}",
                         move_out_indices
@@ -200,13 +203,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
                 if !seen_spans.contains(&move_span) {
                     if !closure {
-                        self.suggest_ref_or_clone(
-                            mpi,
-                            move_span,
-                            &mut err,
-                            &mut in_pattern,
-                            move_spans,
-                        );
+                        self.suggest_ref_or_clone(mpi, &mut err, &mut in_pattern, move_spans);
                     }
 
                     let msg_opt = CapturedMessageOpt {
@@ -229,7 +226,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 seen_spans.insert(move_span);
             }
 
-            use_spans.var_path_only_subdiag(&mut err, desired_action);
+            use_spans.var_path_only_subdiag(self.dcx(), &mut err, desired_action);
 
             if !is_loop_move {
                 err.span_label(
@@ -280,29 +277,48 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 Some(name) => format!("`{name}`"),
                 None => "value".to_owned(),
             };
-            if self.suggest_borrow_fn_like(&mut err, ty, &move_site_vec, &note_msg) {
+            if self.suggest_borrow_fn_like(&mut err, ty, &move_site_vec, &note_msg)
+                || if let UseSpans::FnSelfUse { kind, .. } = use_spans
+                    && let CallKind::FnCall { fn_trait_id, self_ty } = kind
+                    && let ty::Param(_) = self_ty.kind()
+                    && ty == self_ty
+                    && Some(fn_trait_id) == self.infcx.tcx.lang_items().fn_once_trait()
+                {
+                    // this is a type parameter `T: FnOnce()`, don't suggest `T: FnOnce() + Clone`.
+                    true
+                } else {
+                    false
+                }
+            {
                 // Suppress the next suggestion since we don't want to put more bounds onto
                 // something that already has `Fn`-like bounds (or is a closure), so we can't
                 // restrict anyways.
             } else {
-                self.suggest_adding_copy_bounds(&mut err, ty, span);
+                let copy_did = self.infcx.tcx.require_lang_item(LangItem::Copy, Some(span));
+                self.suggest_adding_bounds(&mut err, ty, copy_did, span);
             }
 
             if needs_note {
                 if let Some(local) = place.as_local() {
                     let span = self.body.local_decls[local].source_info.span;
-                    err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
-                        is_partial_move,
-                        ty,
-                        place: &note_msg,
-                        span,
-                    });
+                    err.subdiagnostic(
+                        self.dcx(),
+                        crate::session_diagnostics::TypeNoCopy::Label {
+                            is_partial_move,
+                            ty,
+                            place: &note_msg,
+                            span,
+                        },
+                    );
                 } else {
-                    err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Note {
-                        is_partial_move,
-                        ty,
-                        place: &note_msg,
-                    });
+                    err.subdiagnostic(
+                        self.dcx(),
+                        crate::session_diagnostics::TypeNoCopy::Note {
+                            is_partial_move,
+                            ty,
+                            place: &note_msg,
+                        },
+                    );
                 };
             }
 
@@ -327,20 +343,30 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     fn suggest_ref_or_clone(
-        &mut self,
+        &self,
         mpi: MovePathIndex,
-        move_span: Span,
-        err: &mut DiagnosticBuilder<'tcx>,
+        err: &mut Diag<'tcx>,
         in_pattern: &mut bool,
         move_spans: UseSpans<'_>,
     ) {
+        let move_span = match move_spans {
+            UseSpans::ClosureUse { capture_kind_span, .. } => capture_kind_span,
+            _ => move_spans.args_or_use(),
+        };
         struct ExpressionFinder<'hir> {
             expr_span: Span,
             expr: Option<&'hir hir::Expr<'hir>>,
             pat: Option<&'hir hir::Pat<'hir>>,
             parent_pat: Option<&'hir hir::Pat<'hir>>,
+            hir: rustc_middle::hir::map::Map<'hir>,
         }
         impl<'hir> Visitor<'hir> for ExpressionFinder<'hir> {
+            type NestedFilter = OnlyBodies;
+
+            fn nested_visit_map(&mut self) -> Self::Map {
+                self.hir
+            }
+
             fn visit_expr(&mut self, e: &'hir hir::Expr<'hir>) {
                 if e.span == self.expr_span {
                     self.expr = Some(e);
@@ -375,8 +401,13 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             let expr = hir.body(body_id).value;
             let place = &self.move_data.move_paths[mpi].place;
             let span = place.as_local().map(|local| self.body.local_decls[local].source_info.span);
-            let mut finder =
-                ExpressionFinder { expr_span: move_span, expr: None, pat: None, parent_pat: None };
+            let mut finder = ExpressionFinder {
+                expr_span: move_span,
+                expr: None,
+                pat: None,
+                parent_pat: None,
+                hir,
+            };
             finder.visit_expr(expr);
             if let Some(span) = span
                 && let Some(expr) = finder.expr
@@ -403,8 +434,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     }
                 }
                 let typeck = self.infcx.tcx.typeck(self.mir_def_id());
-                let hir_id = hir.parent_id(expr.hir_id);
-                let parent = self.infcx.tcx.hir_node(hir_id);
+                let parent = self.infcx.tcx.parent_hir_node(expr.hir_id);
                 let (def_id, args, offset) = if let hir::Node::Expr(parent_expr) = parent
                     && let hir::ExprKind::MethodCall(_, _, args, _) = parent_expr.kind
                     && let Some(def_id) = typeck.type_dependent_def_id(parent_expr.hir_id)
@@ -419,8 +449,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     (None, &[][..], 0)
                 };
                 if let Some(def_id) = def_id
-                    && let node =
-                        self.infcx.tcx.hir_node(self.infcx.tcx.local_def_id_to_hir_id(def_id))
+                    && let node = self.infcx.tcx.hir_node_by_def_id(def_id)
                     && let Some(fn_sig) = node.fn_sig()
                     && let Some(ident) = node.ident()
                     && let Some(pos) = args.iter().position(|arg| arg.hir_id == expr.hir_id)
@@ -440,8 +469,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     err.span_note(
                         span,
                         format!(
-                            "consider changing this parameter type in {descr} `{ident}` to \
-                                 borrow instead if owning the value isn't necessary",
+                            "consider changing this parameter type in {descr} `{ident}` to borrow \
+                             instead if owning the value isn't necessary",
                         ),
                     );
                 }
@@ -456,8 +485,17 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 } else if let UseSpans::FnSelfUse { kind: CallKind::Normal { .. }, .. } = move_spans
                 {
                     // We already suggest cloning for these cases in `explain_captures`.
-                } else {
-                    self.suggest_cloning(err, ty, expr, move_span);
+                } else if let UseSpans::ClosureUse {
+                    closure_kind:
+                        ClosureKind::Coroutine(CoroutineKind::Desugared(_, CoroutineSource::Block)),
+                    ..
+                } = move_spans
+                {
+                    self.suggest_cloning(err, ty, expr, None);
+                } else if self.suggest_hoisting_call_outside_loop(err, expr) {
+                    // The place where the the type moves would be misleading to suggest clone.
+                    // #121466
+                    self.suggest_cloning(err, ty, expr, None);
                 }
             }
             if let Some(pat) = finder.pat {
@@ -483,7 +521,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         desired_action: InitializationRequiringAction,
         span: Span,
         use_spans: UseSpans<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         // We need all statements in the body where the binding was assigned to later find all
         // the branching code paths where the binding *wasn't* assigned to.
         let inits = &self.move_data.init_path_map[mpi];
@@ -558,7 +596,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             E0381,
             "{used} binding {desc}{isnt_initialized}"
         );
-        use_spans.var_path_only_subdiag(&mut err, desired_action);
+        use_spans.var_path_only_subdiag(self.dcx(), &mut err, desired_action);
 
         if let InitializationRequiringAction::PartialAssignment
         | InitializationRequiringAction::Assignment = desired_action
@@ -610,7 +648,12 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     if self.sugg_span.is_some() {
                         return;
                     }
-                    if let hir::StmtKind::Local(hir::Local { span, ty, init: None, .. }) = &ex.kind
+
+                    // FIXME: We make sure that this is a normal top-level binding,
+                    // but we could suggest `todo!()` for all uninitialized bindings in the pattern pattern
+                    if let hir::StmtKind::Let(hir::LetStmt { span, ty, init: None, pat, .. }) =
+                        &ex.kind
+                        && let hir::PatKind::Binding(..) = pat.kind
                         && span.contains(self.decl_span)
                     {
                         self.sugg_span = ty.map_or(Some(self.decl_span), |ty| Some(ty.span));
@@ -628,48 +671,92 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         err
     }
 
+    fn ty_kind_suggestion(&self, ty: Ty<'tcx>) -> Option<String> {
+        // Keep in sync with `rustc_hir_analysis/src/check/mod.rs:ty_kind_suggestion`.
+        // FIXME: deduplicate the above.
+        let tcx = self.infcx.tcx;
+        let implements_default = |ty| {
+            let Some(default_trait) = tcx.get_diagnostic_item(sym::Default) else {
+                return false;
+            };
+            self.infcx
+                .type_implements_trait(default_trait, [ty], self.param_env)
+                .must_apply_modulo_regions()
+        };
+
+        Some(match ty.kind() {
+            ty::Never | ty::Error(_) => return None,
+            ty::Bool => "false".to_string(),
+            ty::Char => "\'x\'".to_string(),
+            ty::Int(_) | ty::Uint(_) => "42".into(),
+            ty::Float(_) => "3.14159".into(),
+            ty::Slice(_) => "[]".to_string(),
+            ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::Vec) => {
+                "vec![]".to_string()
+            }
+            ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::String) => {
+                "String::new()".to_string()
+            }
+            ty::Adt(def, args) if def.is_box() => {
+                format!("Box::new({})", self.ty_kind_suggestion(args[0].expect_ty())?)
+            }
+            ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::Option) => {
+                "None".to_string()
+            }
+            ty::Adt(def, args) if Some(def.did()) == tcx.get_diagnostic_item(sym::Result) => {
+                format!("Ok({})", self.ty_kind_suggestion(args[0].expect_ty())?)
+            }
+            ty::Adt(_, _) if implements_default(ty) => "Default::default()".to_string(),
+            ty::Ref(_, ty, mutability) => {
+                if let (ty::Str, hir::Mutability::Not) = (ty.kind(), mutability) {
+                    "\"\"".to_string()
+                } else {
+                    let Some(ty) = self.ty_kind_suggestion(*ty) else {
+                        return None;
+                    };
+                    format!("&{}{ty}", mutability.prefix_str())
+                }
+            }
+            ty::Array(ty, len) => format!(
+                "[{}; {}]",
+                self.ty_kind_suggestion(*ty)?,
+                len.eval_target_usize(tcx, ty::ParamEnv::reveal_all()),
+            ),
+            ty::Tuple(tys) => format!(
+                "({})",
+                tys.iter()
+                    .map(|ty| self.ty_kind_suggestion(ty))
+                    .collect::<Option<Vec<String>>>()?
+                    .join(", ")
+            ),
+            _ => "value".to_string(),
+        })
+    }
+
     fn suggest_assign_value(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         moved_place: PlaceRef<'tcx>,
         sugg_span: Span,
     ) {
         let ty = moved_place.ty(self.body, self.infcx.tcx).ty;
         debug!("ty: {:?}, kind: {:?}", ty, ty.kind());
 
-        let tcx = self.infcx.tcx;
-        let implements_default = |ty, param_env| {
-            let Some(default_trait) = tcx.get_diagnostic_item(sym::Default) else {
-                return false;
-            };
-            self.infcx
-                .type_implements_trait(default_trait, [ty], param_env)
-                .must_apply_modulo_regions()
+        let Some(assign_value) = self.ty_kind_suggestion(ty) else {
+            return;
         };
 
-        let assign_value = match ty.kind() {
-            ty::Bool => "false",
-            ty::Float(_) => "0.0",
-            ty::Int(_) | ty::Uint(_) => "0",
-            ty::Never | ty::Error(_) => "",
-            ty::Adt(def, _) if Some(def.did()) == tcx.get_diagnostic_item(sym::Vec) => "vec![]",
-            ty::Adt(_, _) if implements_default(ty, self.param_env) => "Default::default()",
-            _ => "todo!()",
-        };
-
-        if !assign_value.is_empty() {
-            err.span_suggestion_verbose(
-                sugg_span.shrink_to_hi(),
-                "consider assigning a value",
-                format!(" = {assign_value}"),
-                Applicability::MaybeIncorrect,
-            );
-        }
+        err.span_suggestion_verbose(
+            sugg_span.shrink_to_hi(),
+            "consider assigning a value",
+            format!(" = {assign_value}"),
+            Applicability::MaybeIncorrect,
+        );
     }
 
     fn suggest_borrow_fn_like(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         ty: Ty<'tcx>,
         move_sites: &[MoveSite],
         value_name: &str,
@@ -692,7 +779,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         // If the type is opaque/param/closure, and it is Fn or FnMut, let's suggest (mutably)
         // borrowing the type, since `&mut F: FnMut` iff `F: FnMut` and similarly for `Fn`.
-        // These types seem reasonably opaque enough that they could be substituted with their
+        // These types seem reasonably opaque enough that they could be instantiated with their
         // borrowed variants in a function body when we see a move error.
         let borrow_level = match *ty.kind() {
             ty::Param(_) => tcx
@@ -702,7 +789,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 .copied()
                 .find_map(find_fn_kind_from_did),
             ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) => tcx
-                .explicit_item_bounds(def_id)
+                .explicit_item_super_predicates(def_id)
                 .iter_instantiated_copied(tcx, args)
                 .find_map(|(clause, span)| find_fn_kind_from_did((clause, span))),
             ty::Closure(_, args) => match args.as_closure().kind() {
@@ -735,14 +822,500 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         true
     }
 
-    fn suggest_cloning(
+    /// In a move error that occurs on a call within a loop, we try to identify cases where cloning
+    /// the value would lead to a logic error. We infer these cases by seeing if the moved value is
+    /// part of the logic to break the loop, either through an explicit `break` or if the expression
+    /// is part of a `while let`.
+    fn suggest_hoisting_call_outside_loop(&self, err: &mut Diag<'_>, expr: &hir::Expr<'_>) -> bool {
+        let tcx = self.infcx.tcx;
+        let mut can_suggest_clone = true;
+
+        // If the moved value is a locally declared binding, we'll look upwards on the expression
+        // tree until the scope where it is defined, and no further, as suggesting to move the
+        // expression beyond that point would be illogical.
+        let local_hir_id = if let hir::ExprKind::Path(hir::QPath::Resolved(
+            _,
+            hir::Path { res: hir::def::Res::Local(local_hir_id), .. },
+        )) = expr.kind
+        {
+            Some(local_hir_id)
+        } else {
+            // This case would be if the moved value comes from an argument binding, we'll just
+            // look within the entire item, that's fine.
+            None
+        };
+
+        /// This will allow us to look for a specific `HirId`, in our case `local_hir_id` where the
+        /// binding was declared, within any other expression. We'll use it to search for the
+        /// binding declaration within every scope we inspect.
+        struct Finder {
+            hir_id: hir::HirId,
+            found: bool,
+        }
+        impl<'hir> Visitor<'hir> for Finder {
+            fn visit_pat(&mut self, pat: &'hir hir::Pat<'hir>) {
+                if pat.hir_id == self.hir_id {
+                    self.found = true;
+                }
+                hir::intravisit::walk_pat(self, pat);
+            }
+            fn visit_expr(&mut self, ex: &'hir hir::Expr<'hir>) {
+                if ex.hir_id == self.hir_id {
+                    self.found = true;
+                }
+                hir::intravisit::walk_expr(self, ex);
+            }
+        }
+        // The immediate HIR parent of the moved expression. We'll look for it to be a call.
+        let mut parent = None;
+        // The top-most loop where the moved expression could be moved to a new binding.
+        let mut outer_most_loop: Option<&hir::Expr<'_>> = None;
+        for (_, node) in tcx.hir().parent_iter(expr.hir_id) {
+            let e = match node {
+                hir::Node::Expr(e) => e,
+                hir::Node::LetStmt(hir::LetStmt { els: Some(els), .. }) => {
+                    let mut finder = BreakFinder { found_breaks: vec![], found_continues: vec![] };
+                    finder.visit_block(els);
+                    if !finder.found_breaks.is_empty() {
+                        // Don't suggest clone as it could be will likely end in an infinite
+                        // loop.
+                        // let Some(_) = foo(non_copy.clone()) else { break; }
+                        // ---                       ^^^^^^^^         -----
+                        can_suggest_clone = false;
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Some(&hir_id) = local_hir_id {
+                let mut finder = Finder { hir_id, found: false };
+                finder.visit_expr(e);
+                if finder.found {
+                    // The current scope includes the declaration of the binding we're accessing, we
+                    // can't look up any further for loops.
+                    break;
+                }
+            }
+            if parent.is_none() {
+                parent = Some(e);
+            }
+            match e.kind {
+                hir::ExprKind::Let(_) => {
+                    match tcx.parent_hir_node(e.hir_id) {
+                        hir::Node::Expr(hir::Expr {
+                            kind: hir::ExprKind::If(cond, ..), ..
+                        }) => {
+                            let mut finder = Finder { hir_id: expr.hir_id, found: false };
+                            finder.visit_expr(cond);
+                            if finder.found {
+                                // The expression where the move error happened is in a `while let`
+                                // condition Don't suggest clone as it will likely end in an
+                                // infinite loop.
+                                // while let Some(_) = foo(non_copy.clone()) { }
+                                // ---------                       ^^^^^^^^
+                                can_suggest_clone = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                hir::ExprKind::Loop(..) => {
+                    outer_most_loop = Some(e);
+                }
+                _ => {}
+            }
+        }
+        let loop_count: usize = tcx
+            .hir()
+            .parent_iter(expr.hir_id)
+            .map(|(_, node)| match node {
+                hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Loop(..), .. }) => 1,
+                _ => 0,
+            })
+            .sum();
+
+        let sm = tcx.sess.source_map();
+        if let Some(in_loop) = outer_most_loop {
+            let mut finder = BreakFinder { found_breaks: vec![], found_continues: vec![] };
+            finder.visit_expr(in_loop);
+            // All of the spans for `break` and `continue` expressions.
+            let spans = finder
+                .found_breaks
+                .iter()
+                .chain(finder.found_continues.iter())
+                .map(|(_, span)| *span)
+                .filter(|span| {
+                    !matches!(
+                        span.desugaring_kind(),
+                        Some(DesugaringKind::ForLoop | DesugaringKind::WhileLoop)
+                    )
+                })
+                .collect::<Vec<Span>>();
+            // All of the spans for the loops above the expression with the move error.
+            let loop_spans: Vec<_> = tcx
+                .hir()
+                .parent_iter(expr.hir_id)
+                .filter_map(|(_, node)| match node {
+                    hir::Node::Expr(hir::Expr { span, kind: hir::ExprKind::Loop(..), .. }) => {
+                        Some(*span)
+                    }
+                    _ => None,
+                })
+                .collect();
+            // It is possible that a user written `break` or `continue` is in the wrong place. We
+            // point them out at the user for them to make a determination. (#92531)
+            if !spans.is_empty() && loop_count > 1 {
+                // Getting fancy: if the spans of the loops *do not* overlap, we only use the line
+                // number when referring to them. If there *are* overlaps (multiple loops on the
+                // same line) then we use the more verbose span output (`file.rs:col:ll`).
+                let mut lines: Vec<_> =
+                    loop_spans.iter().map(|sp| sm.lookup_char_pos(sp.lo()).line).collect();
+                lines.sort();
+                lines.dedup();
+                let fmt_span = |span: Span| {
+                    if lines.len() == loop_spans.len() {
+                        format!("line {}", sm.lookup_char_pos(span.lo()).line)
+                    } else {
+                        sm.span_to_diagnostic_string(span)
+                    }
+                };
+                let mut spans: MultiSpan = spans.into();
+                // Point at all the `continue`s and explicit `break`s in the relevant loops.
+                for (desc, elements) in [
+                    ("`break` exits", &finder.found_breaks),
+                    ("`continue` advances", &finder.found_continues),
+                ] {
+                    for (destination, sp) in elements {
+                        if let Ok(hir_id) = destination.target_id
+                            && let hir::Node::Expr(expr) = tcx.hir().hir_node(hir_id)
+                            && !matches!(
+                                sp.desugaring_kind(),
+                                Some(DesugaringKind::ForLoop | DesugaringKind::WhileLoop)
+                            )
+                        {
+                            spans.push_span_label(
+                                *sp,
+                                format!("this {desc} the loop at {}", fmt_span(expr.span)),
+                            );
+                        }
+                    }
+                }
+                // Point at all the loops that are between this move and the parent item.
+                for span in loop_spans {
+                    spans.push_span_label(sm.guess_head_span(span), "");
+                }
+
+                // note: verify that your loop breaking logic is correct
+                //   --> $DIR/nested-loop-moved-value-wrong-continue.rs:41:17
+                //    |
+                // 28 |     for foo in foos {
+                //    |     ---------------
+                // ...
+                // 33 |         for bar in &bars {
+                //    |         ----------------
+                // ...
+                // 41 |                 continue;
+                //    |                 ^^^^^^^^ this `continue` advances the loop at line 33
+                err.span_note(spans, "verify that your loop breaking logic is correct");
+            }
+            if let Some(parent) = parent
+                && let hir::ExprKind::MethodCall(..) | hir::ExprKind::Call(..) = parent.kind
+            {
+                // FIXME: We could check that the call's *parent* takes `&mut val` to make the
+                // suggestion more targeted to the `mk_iter(val).next()` case. Maybe do that only to
+                // check for whether to suggest `let value` or `let mut value`.
+
+                let span = in_loop.span;
+                if !finder.found_breaks.is_empty()
+                    && let Ok(value) = sm.span_to_snippet(parent.span)
+                {
+                    // We know with high certainty that this move would affect the early return of a
+                    // loop, so we suggest moving the expression with the move out of the loop.
+                    let indent = if let Some(indent) = sm.indentation_before(span) {
+                        format!("\n{indent}")
+                    } else {
+                        " ".to_string()
+                    };
+                    err.multipart_suggestion(
+                        "consider moving the expression out of the loop so it is only moved once",
+                        vec![
+                            (parent.span, "value".to_string()),
+                            (span.shrink_to_lo(), format!("let mut value = {value};{indent}")),
+                        ],
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+            }
+        }
+        can_suggest_clone
+    }
+
+    /// We have `S { foo: val, ..base }`, and we suggest instead writing
+    /// `S { foo: val, bar: base.bar.clone(), .. }` when valid.
+    fn suggest_cloning_on_functional_record_update(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
+        ty: Ty<'tcx>,
+        expr: &'cx hir::Expr<'cx>,
+    ) {
+        let typeck_results = self.infcx.tcx.typeck(self.mir_def_id());
+        let hir::ExprKind::Struct(struct_qpath, fields, Some(base)) = expr.kind else { return };
+        let hir::QPath::Resolved(_, path) = struct_qpath else { return };
+        let hir::def::Res::Def(_, def_id) = path.res else { return };
+        let Some(expr_ty) = typeck_results.node_type_opt(expr.hir_id) else { return };
+        let ty::Adt(def, args) = expr_ty.kind() else { return };
+        let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = base.kind else { return };
+        let (hir::def::Res::Local(_)
+        | hir::def::Res::Def(
+            DefKind::Const | DefKind::ConstParam | DefKind::Static { .. } | DefKind::AssocConst,
+            _,
+        )) = path.res
+        else {
+            return;
+        };
+        let Ok(base_str) = self.infcx.tcx.sess.source_map().span_to_snippet(base.span) else {
+            return;
+        };
+
+        // 1. look for the fields of type `ty`.
+        // 2. check if they are clone and add them to suggestion
+        // 3. check if there are any values left to `..` and remove it if not
+        // 4. emit suggestion to clone the field directly as `bar: base.bar.clone()`
+
+        let mut final_field_count = fields.len();
+        let Some(variant) = def.variants().iter().find(|variant| variant.def_id == def_id) else {
+            // When we have an enum, look for the variant that corresponds to the variant the user
+            // wrote.
+            return;
+        };
+        let mut sugg = vec![];
+        for field in &variant.fields {
+            // In practice unless there are more than one field with the same type, we'll be
+            // suggesting a single field at a type, because we don't aggregate multiple borrow
+            // checker errors involving the functional record update sytnax into a single one.
+            let field_ty = field.ty(self.infcx.tcx, args);
+            let ident = field.ident(self.infcx.tcx);
+            if field_ty == ty && fields.iter().all(|field| field.ident.name != ident.name) {
+                // Suggest adding field and cloning it.
+                sugg.push(format!("{ident}: {base_str}.{ident}.clone()"));
+                final_field_count += 1;
+            }
+        }
+        let (span, sugg) = match fields {
+            [.., last] => (
+                if final_field_count == variant.fields.len() {
+                    // We'll remove the `..base` as there aren't any fields left.
+                    last.span.shrink_to_hi().with_hi(base.span.hi())
+                } else {
+                    last.span.shrink_to_hi()
+                },
+                format!(", {}", sugg.join(", ")),
+            ),
+            // Account for no fields in suggestion span.
+            [] => (
+                expr.span.with_lo(struct_qpath.span().hi()),
+                if final_field_count == variant.fields.len() {
+                    // We'll remove the `..base` as there aren't any fields left.
+                    format!(" {{ {} }}", sugg.join(", "))
+                } else {
+                    format!(" {{ {}, ..{base_str} }}", sugg.join(", "))
+                },
+            ),
+        };
+        let prefix = if !self.implements_clone(ty) {
+            let msg = format!("`{ty}` doesn't implement `Copy` or `Clone`");
+            if let ty::Adt(def, _) = ty.kind() {
+                err.span_note(self.infcx.tcx.def_span(def.did()), msg);
+            } else {
+                err.note(msg);
+            }
+            format!("if `{ty}` implemented `Clone`, you could ")
+        } else {
+            String::new()
+        };
+        let msg = format!(
+            "{prefix}clone the value from the field instead of using the functional record update \
+             syntax",
+        );
+        err.span_suggestion_verbose(span, msg, sugg, Applicability::MachineApplicable);
+    }
+
+    pub(crate) fn suggest_cloning(
+        &self,
+        err: &mut Diag<'_>,
+        ty: Ty<'tcx>,
+        mut expr: &'cx hir::Expr<'cx>,
+        mut other_expr: Option<&'cx hir::Expr<'cx>>,
+    ) {
+        if let hir::ExprKind::Struct(_, _, Some(_)) = expr.kind {
+            // We have `S { foo: val, ..base }`. In `check_aggregate_rvalue` we have a single
+            // `Location` that covers both the `S { ... }` literal, all of its fields and the
+            // `base`. If the move happens because of `S { foo: val, bar: base.bar }` the `expr`
+            //  will already be correct. Instead, we see if we can suggest writing.
+            self.suggest_cloning_on_functional_record_update(err, ty, expr);
+            return;
+        }
+
+        if let Some(some_other_expr) = other_expr
+            && let Some(parent_binop) =
+                self.infcx.tcx.hir().parent_iter(expr.hir_id).find_map(|n| {
+                    if let (hir_id, hir::Node::Expr(e)) = n
+                        && let hir::ExprKind::AssignOp(_binop, target, _arg) = e.kind
+                        && target.hir_id == expr.hir_id
+                    {
+                        Some(hir_id)
+                    } else {
+                        None
+                    }
+                })
+            && let Some(other_parent_binop) =
+                self.infcx.tcx.hir().parent_iter(some_other_expr.hir_id).find_map(|n| {
+                    if let (hir_id, hir::Node::Expr(expr)) = n
+                        && let hir::ExprKind::AssignOp(..) = expr.kind
+                    {
+                        Some(hir_id)
+                    } else {
+                        None
+                    }
+                })
+            && parent_binop == other_parent_binop
+        {
+            // Explicitly look for `expr += other_expr;` and avoid suggesting
+            // `expr.clone() += other_expr;`, instead suggesting `expr += other_expr.clone();`.
+            other_expr = Some(expr);
+            expr = some_other_expr;
+        }
+        'outer: {
+            if let ty::Ref(..) = ty.kind() {
+                // We check for either `let binding = foo(expr, other_expr);` or
+                // `foo(expr, other_expr);` and if so we don't suggest an incorrect
+                // `foo(expr, other_expr).clone()`
+                if let Some(other_expr) = other_expr
+                    && let Some(parent_let) =
+                        self.infcx.tcx.hir().parent_iter(expr.hir_id).find_map(|n| {
+                            if let (hir_id, hir::Node::LetStmt(_) | hir::Node::Stmt(_)) = n {
+                                Some(hir_id)
+                            } else {
+                                None
+                            }
+                        })
+                    && let Some(other_parent_let) =
+                        self.infcx.tcx.hir().parent_iter(other_expr.hir_id).find_map(|n| {
+                            if let (hir_id, hir::Node::LetStmt(_) | hir::Node::Stmt(_)) = n {
+                                Some(hir_id)
+                            } else {
+                                None
+                            }
+                        })
+                    && parent_let == other_parent_let
+                {
+                    // Explicitly check that we don't have `foo(&*expr, other_expr)`, as cloning the
+                    // result of `foo(...)` won't help.
+                    break 'outer;
+                }
+
+                // We're suggesting `.clone()` on an borrowed value. See if the expression we have
+                // is an argument to a function or method call, and try to suggest cloning the
+                // *result* of the call, instead of the argument. This is closest to what people
+                // would actually be looking for in most cases, with maybe the exception of things
+                // like `fn(T) -> T`, but even then it is reasonable.
+                let typeck_results = self.infcx.tcx.typeck(self.mir_def_id());
+                let mut prev = expr;
+                while let hir::Node::Expr(parent) = self.infcx.tcx.parent_hir_node(prev.hir_id) {
+                    if let hir::ExprKind::Call(..) | hir::ExprKind::MethodCall(..) = parent.kind
+                        && let Some(call_ty) = typeck_results.node_type_opt(parent.hir_id)
+                        && let call_ty = call_ty.peel_refs()
+                        && (!call_ty
+                            .walk()
+                            .any(|t| matches!(t.unpack(), ty::GenericArgKind::Lifetime(_)))
+                            || if let ty::Alias(ty::Projection, _) = call_ty.kind() {
+                                // FIXME: this isn't quite right with lifetimes on assoc types,
+                                // but ignore for now. We will only suggest cloning if
+                                // `<Ty as Trait>::Assoc: Clone`, which should keep false positives
+                                // down to a managable ammount.
+                                true
+                            } else {
+                                false
+                            })
+                        && self.implements_clone(call_ty)
+                        && self.suggest_cloning_inner(err, call_ty, parent)
+                    {
+                        return;
+                    }
+                    prev = parent;
+                }
+            }
+        }
+        let ty = ty.peel_refs();
+        if self.implements_clone(ty) {
+            self.suggest_cloning_inner(err, ty, expr);
+        } else if let ty::Adt(def, args) = ty.kind()
+            && def.did().as_local().is_some()
+            && def.variants().iter().all(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .all(|field| self.implements_clone(field.ty(self.infcx.tcx, args)))
+            })
+        {
+            err.span_note(
+                self.infcx.tcx.def_span(def.did()),
+                format!("if `{ty}` implemented `Clone`, you could clone the value"),
+            );
+        }
+    }
+
+    fn implements_clone(&self, ty: Ty<'tcx>) -> bool {
+        let Some(clone_trait_def) = self.infcx.tcx.lang_items().clone_trait() else { return false };
+        self.infcx
+            .type_implements_trait(clone_trait_def, [ty], self.param_env)
+            .must_apply_modulo_regions()
+    }
+
+    /// Given an expression, check if it is a method call `foo.clone()`, where `foo` and
+    /// `foo.clone()` both have the same type, returning the span for `.clone()` if so.
+    pub(crate) fn clone_on_reference(&self, expr: &hir::Expr<'_>) -> Option<Span> {
+        let typeck_results = self.infcx.tcx.typeck(self.mir_def_id());
+        if let hir::ExprKind::MethodCall(segment, rcvr, args, span) = expr.kind
+            && let Some(expr_ty) = typeck_results.node_type_opt(expr.hir_id)
+            && let Some(rcvr_ty) = typeck_results.node_type_opt(rcvr.hir_id)
+            && rcvr_ty == expr_ty
+            && segment.ident.name == sym::clone
+            && args.is_empty()
+        {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn in_move_closure(&self, expr: &hir::Expr<'_>) -> bool {
+        for (_, node) in self.infcx.tcx.hir().parent_iter(expr.hir_id) {
+            if let hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(closure), .. }) = node
+                && let hir::CaptureBy::Value { .. } = closure.capture_clause
+            {
+                // `move || x.clone()` will not work. FIXME: suggest `let y = x.clone(); move || y`
+                return true;
+            }
+        }
+        false
+    }
+
+    fn suggest_cloning_inner(
+        &self,
+        err: &mut Diag<'_>,
         ty: Ty<'tcx>,
         expr: &hir::Expr<'_>,
-        span: Span,
-    ) {
+    ) -> bool {
         let tcx = self.infcx.tcx;
+        if let Some(_) = self.clone_on_reference(expr) {
+            // Avoid redundant clone suggestion already suggested in `explain_captures`.
+            // See `tests/ui/moves/needs-clone-through-deref.rs`
+            return false;
+        }
+        if self.in_move_closure(expr) {
+            return false;
+        }
         // Try to find predicates on *generic params* that would allow copying `ty`
         let suggestion =
             if let Some(symbol) = tcx.hir().maybe_get_struct_pattern_shorthand_field(expr) {
@@ -750,30 +1323,42 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             } else {
                 ".clone()".to_owned()
             };
-        if let Some(clone_trait_def) = tcx.lang_items().clone_trait()
-            && self
-                .infcx
-                .type_implements_trait(clone_trait_def, [ty], self.param_env)
-                .must_apply_modulo_regions()
+        let mut sugg = Vec::with_capacity(2);
+        let mut inner_expr = expr;
+        // Remove uses of `&` and `*` when suggesting `.clone()`.
+        while let hir::ExprKind::AddrOf(.., inner) | hir::ExprKind::Unary(hir::UnOp::Deref, inner) =
+            &inner_expr.kind
         {
-            let msg = if let ty::Adt(def, _) = ty.kind()
-                && [tcx.get_diagnostic_item(sym::Arc), tcx.get_diagnostic_item(sym::Rc)]
-                    .contains(&Some(def.did()))
-            {
-                "clone the value to increment its reference count"
-            } else {
-                "consider cloning the value if the performance cost is acceptable"
-            };
-            err.span_suggestion_verbose(
-                span.shrink_to_hi(),
-                msg,
-                suggestion,
-                Applicability::MachineApplicable,
-            );
+            if let hir::ExprKind::AddrOf(_, hir::Mutability::Mut, _) = inner_expr.kind {
+                // We assume that `&mut` refs are desired for their side-effects, so cloning the
+                // value wouldn't do what the user wanted.
+                return false;
+            }
+            inner_expr = inner;
         }
+        if inner_expr.span.lo() != expr.span.lo() {
+            sugg.push((expr.span.with_hi(inner_expr.span.lo()), String::new()));
+        }
+        let span = if inner_expr.span.hi() != expr.span.hi() {
+            // Account for `(*x)` to suggest `x.clone()`.
+            expr.span.with_lo(inner_expr.span.hi())
+        } else {
+            expr.span.shrink_to_hi()
+        };
+        sugg.push((span, suggestion));
+        let msg = if let ty::Adt(def, _) = ty.kind()
+            && [tcx.get_diagnostic_item(sym::Arc), tcx.get_diagnostic_item(sym::Rc)]
+                .contains(&Some(def.did()))
+        {
+            "clone the value to increment its reference count"
+        } else {
+            "consider cloning the value if the performance cost is acceptable"
+        };
+        err.multipart_suggestion_verbose(msg, sugg, Applicability::MachineApplicable);
+        true
     }
 
-    fn suggest_adding_copy_bounds(&self, err: &mut Diagnostic, ty: Ty<'tcx>, span: Span) {
+    fn suggest_adding_bounds(&self, err: &mut Diag<'_>, ty: Ty<'tcx>, def_id: DefId, span: Span) {
         let tcx = self.infcx.tcx;
         let generics = tcx.generics_of(self.mir_def_id());
 
@@ -786,10 +1371,9 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         };
         // Try to find predicates on *generic params* that would allow copying `ty`
         let ocx = ObligationCtxt::new(self.infcx);
-        let copy_did = tcx.require_lang_item(LangItem::Copy, Some(span));
         let cause = ObligationCause::misc(span, self.mir_def_id());
 
-        ocx.register_bound(cause, self.param_env, ty, copy_did);
+        ocx.register_bound(cause, self.param_env, ty, def_id);
         let errors = ocx.select_all_or_error();
 
         // Only emit suggestion if all required predicates are on generic
@@ -849,9 +1433,13 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             &value_msg,
         );
 
-        borrow_spans.var_path_only_subdiag(&mut err, crate::InitializationRequiringAction::Borrow);
+        borrow_spans.var_path_only_subdiag(
+            self.dcx(),
+            &mut err,
+            crate::InitializationRequiringAction::Borrow,
+        );
 
-        move_spans.var_subdiag(None, &mut err, None, |kind, var_span| {
+        move_spans.var_subdiag(self.dcx(), &mut err, None, |kind, var_span| {
             use crate::session_diagnostics::CaptureVarCause::*;
             match kind {
                 hir::ClosureKind::Coroutine(_) => MoveUseInCoroutine { var_span },
@@ -871,15 +1459,22 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 Some(borrow_span),
                 None,
             );
+        self.suggest_copy_for_type_in_cloned_ref(&mut err, place);
+        let typeck_results = self.infcx.tcx.typeck(self.mir_def_id());
+        if let Some(expr) = self.find_expr(borrow_span)
+            && let Some(ty) = typeck_results.node_type_opt(expr.hir_id)
+        {
+            self.suggest_cloning(&mut err, ty, expr, self.find_expr(span));
+        }
         self.buffer_error(err);
     }
 
     pub(crate) fn report_use_while_mutably_borrowed(
-        &mut self,
+        &self,
         location: Location,
         (place, _span): (Place<'tcx>, Span),
         borrow: &BorrowData<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         let borrow_spans = self.retrieve_borrow_spans(borrow);
         let borrow_span = borrow_spans.args_or_use();
 
@@ -896,7 +1491,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             borrow_span,
             &self.describe_any_place(borrow.borrowed_place.as_ref()),
         );
-        borrow_spans.var_subdiag(None, &mut err, Some(borrow.kind), |kind, var_span| {
+        borrow_spans.var_subdiag(self.dcx(), &mut err, Some(borrow.kind), |kind, var_span| {
             use crate::session_diagnostics::CaptureVarCause::*;
             let place = &borrow.borrowed_place;
             let desc_place = self.describe_any_place(place.as_ref());
@@ -924,12 +1519,12 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     pub(crate) fn report_conflicting_borrow(
-        &mut self,
+        &self,
         location: Location,
         (place, span): (Place<'tcx>, Span),
         gen_borrow_kind: BorrowKind,
         issued_borrow: &BorrowData<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         let issued_spans = self.retrieve_borrow_spans(issued_borrow);
         let issued_span = issued_spans.args_or_use();
 
@@ -1044,7 +1639,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                         "mutably borrow",
                     );
                     borrow_spans.var_subdiag(
-                        None,
+                        self.dcx(),
                         &mut err,
                         Some(BorrowKind::Mut { kind: MutBorrowKind::ClosureCapture }),
                         |kind, var_span| {
@@ -1132,22 +1727,31 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         };
 
         if issued_spans == borrow_spans {
-            borrow_spans.var_subdiag(None, &mut err, Some(gen_borrow_kind), |kind, var_span| {
-                use crate::session_diagnostics::CaptureVarCause::*;
-                match kind {
-                    hir::ClosureKind::Coroutine(_) => BorrowUsePlaceCoroutine {
-                        place: desc_place,
-                        var_span,
-                        is_single_var: false,
-                    },
-                    hir::ClosureKind::Closure | hir::ClosureKind::CoroutineClosure(_) => {
-                        BorrowUsePlaceClosure { place: desc_place, var_span, is_single_var: false }
+            borrow_spans.var_subdiag(
+                self.dcx(),
+                &mut err,
+                Some(gen_borrow_kind),
+                |kind, var_span| {
+                    use crate::session_diagnostics::CaptureVarCause::*;
+                    match kind {
+                        hir::ClosureKind::Coroutine(_) => BorrowUsePlaceCoroutine {
+                            place: desc_place,
+                            var_span,
+                            is_single_var: false,
+                        },
+                        hir::ClosureKind::Closure | hir::ClosureKind::CoroutineClosure(_) => {
+                            BorrowUsePlaceClosure {
+                                place: desc_place,
+                                var_span,
+                                is_single_var: false,
+                            }
+                        }
                     }
-                }
-            });
+                },
+            );
         } else {
             issued_spans.var_subdiag(
-                Some(self.dcx()),
+                self.dcx(),
                 &mut err,
                 Some(issued_borrow.kind),
                 |kind, var_span| {
@@ -1166,7 +1770,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             );
 
             borrow_spans.var_subdiag(
-                Some(self.dcx()),
+                self.dcx(),
                 &mut err,
                 Some(gen_borrow_kind),
                 |kind, var_span| {
@@ -1200,14 +1804,123 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         );
 
         self.suggest_using_local_if_applicable(&mut err, location, issued_borrow, explanation);
+        self.suggest_copy_for_type_in_cloned_ref(&mut err, place);
 
         err
+    }
+
+    fn suggest_copy_for_type_in_cloned_ref(&self, err: &mut Diag<'tcx>, place: Place<'tcx>) {
+        let tcx = self.infcx.tcx;
+        let hir = tcx.hir();
+        let Some(body_id) = tcx.hir_node(self.mir_hir_id()).body_id() else { return };
+        struct FindUselessClone<'hir> {
+            tcx: TyCtxt<'hir>,
+            def_id: DefId,
+            pub clones: Vec<&'hir hir::Expr<'hir>>,
+        }
+        impl<'hir> FindUselessClone<'hir> {
+            pub fn new(tcx: TyCtxt<'hir>, def_id: DefId) -> Self {
+                Self { tcx, def_id, clones: vec![] }
+            }
+        }
+
+        impl<'v> Visitor<'v> for FindUselessClone<'v> {
+            fn visit_expr(&mut self, ex: &'v hir::Expr<'v>) {
+                if let hir::ExprKind::MethodCall(segment, _rcvr, args, _span) = ex.kind
+                    && segment.ident.name == sym::clone
+                    && args.len() == 0
+                    && let Some(def_id) = self.def_id.as_local()
+                    && let Some(method) = self.tcx.lookup_method_for_diagnostic((def_id, ex.hir_id))
+                    && Some(self.tcx.parent(method)) == self.tcx.lang_items().clone_trait()
+                {
+                    self.clones.push(ex);
+                }
+                hir::intravisit::walk_expr(self, ex);
+            }
+        }
+        let mut expr_finder = FindUselessClone::new(tcx, self.mir_def_id().into());
+
+        let body = hir.body(body_id).value;
+        expr_finder.visit_expr(body);
+
+        pub struct Holds<'tcx> {
+            ty: Ty<'tcx>,
+            holds: bool,
+        }
+
+        impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for Holds<'tcx> {
+            type Result = std::ops::ControlFlow<()>;
+
+            fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
+                if t == self.ty {
+                    self.holds = true;
+                }
+                t.super_visit_with(self)
+            }
+        }
+
+        let mut types_to_constrain = FxIndexSet::default();
+
+        let local_ty = self.body.local_decls[place.local].ty;
+        let typeck_results = tcx.typeck(self.mir_def_id());
+        let clone = tcx.require_lang_item(LangItem::Clone, Some(body.span));
+        for expr in expr_finder.clones {
+            if let hir::ExprKind::MethodCall(_, rcvr, _, span) = expr.kind
+                && let Some(rcvr_ty) = typeck_results.node_type_opt(rcvr.hir_id)
+                && let Some(ty) = typeck_results.node_type_opt(expr.hir_id)
+                && rcvr_ty == ty
+                && let ty::Ref(_, inner, _) = rcvr_ty.kind()
+                && let inner = inner.peel_refs()
+                && let mut v = (Holds { ty: inner, holds: false })
+                && let _ = v.visit_ty(local_ty)
+                && v.holds
+                && let None = self.infcx.type_implements_trait_shallow(clone, inner, self.param_env)
+            {
+                err.span_label(
+                    span,
+                    format!(
+                        "this call doesn't do anything, the result is still `{rcvr_ty}` \
+                             because `{inner}` doesn't implement `Clone`",
+                    ),
+                );
+                types_to_constrain.insert(inner);
+            }
+        }
+        for ty in types_to_constrain {
+            self.suggest_adding_bounds_or_derive(err, ty, clone, body.span);
+        }
+    }
+
+    pub(crate) fn suggest_adding_bounds_or_derive(
+        &self,
+        err: &mut Diag<'_>,
+        ty: Ty<'tcx>,
+        trait_def_id: DefId,
+        span: Span,
+    ) {
+        self.suggest_adding_bounds(err, ty, trait_def_id, span);
+        if let ty::Adt(..) = ty.kind() {
+            // The type doesn't implement the trait.
+            let trait_ref =
+                ty::Binder::dummy(ty::TraitRef::new(self.infcx.tcx, trait_def_id, [ty]));
+            let obligation = Obligation::new(
+                self.infcx.tcx,
+                ObligationCause::dummy(),
+                self.param_env,
+                trait_ref,
+            );
+            self.infcx.err_ctxt().suggest_derive(
+                &obligation,
+                err,
+                trait_ref.to_predicate(self.infcx.tcx),
+            );
+        }
     }
 
     #[instrument(level = "debug", skip(self, err))]
     fn suggest_using_local_if_applicable(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         location: Location,
         issued_borrow: &BorrowData<'tcx>,
         explanation: BorrowExplanation<'tcx>,
@@ -1301,9 +2014,17 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         );
     }
 
+    pub(crate) fn find_expr(&self, span: Span) -> Option<&hir::Expr<'_>> {
+        let tcx = self.infcx.tcx;
+        let body_id = tcx.hir_node(self.mir_hir_id()).body_id()?;
+        let mut expr_finder = FindExprBySpan::new(span);
+        expr_finder.visit_expr(tcx.hir().body(body_id).value);
+        expr_finder.result
+    }
+
     fn suggest_slice_method_if_applicable(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         place: Place<'tcx>,
         borrowed_place: Place<'tcx>,
     ) {
@@ -1412,7 +2133,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     /// ```
     pub(crate) fn explain_iterator_advancement_in_for_loop_if_applicable(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         span: Span,
         issued_spans: &UseSpans<'tcx>,
     ) {
@@ -1538,7 +2259,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     // A bare path doesn't need a `let` assignment, it's already a simple
                     // binding access.
                     // As a new binding wasn't added, we don't need to modify the advancing call.
-                    sugg.push((loop_span.with_hi(pat_span.lo()), format!("while let Some(")));
+                    sugg.push((loop_span.with_hi(pat_span.lo()), "while let Some(".to_string()));
                     sugg.push((
                         pat_span.shrink_to_hi().with_hi(head.span.lo()),
                         ") = ".to_string(),
@@ -1599,7 +2320,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     /// ```
     fn suggest_using_closure_argument_instead_of_capture(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         borrowed_place: Place<'tcx>,
         issued_spans: &UseSpans<'tcx>,
     ) {
@@ -1660,8 +2381,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         // Check that the parent of the closure is a method call,
         // with receiver matching with local's type (modulo refs)
-        let parent = hir.parent_id(closure_expr.hir_id);
-        if let hir::Node::Expr(parent) = tcx.hir_node(parent) {
+        if let hir::Node::Expr(parent) = tcx.parent_hir_node(closure_expr.hir_id) {
             if let hir::ExprKind::MethodCall(_, recv, ..) = parent.kind {
                 let recv_ty = typeck_results.expr_ty(recv);
 
@@ -1734,7 +2454,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
     fn suggest_binding_for_closure_capture_self(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         issued_spans: &UseSpans<'tcx>,
     ) {
         let UseSpans::ClosureUse { capture_kind_span, .. } = issued_spans else { return };
@@ -1782,7 +2502,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 hir::intravisit::walk_expr(self, e);
             }
 
-            fn visit_local(&mut self, local: &'hir hir::Local<'hir>) {
+            fn visit_local(&mut self, local: &'hir hir::LetStmt<'hir>) {
                 if let hir::Pat { kind: hir::PatKind::Binding(_, hir_id, _ident, _), .. } =
                     local.pat
                     && let Some(init) = local.init
@@ -1981,21 +2701,14 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         kind: Option<WriteKind>,
     ) {
         let drop_span = place_span.1;
-        let root_place =
-            self.prefixes(borrow.borrowed_place.as_ref(), PrefixSet::All).last().unwrap();
+        let borrowed_local = borrow.borrowed_place.local;
 
         let borrow_spans = self.retrieve_borrow_spans(borrow);
         let borrow_span = borrow_spans.var_or_use_path_span();
 
-        assert!(root_place.projection.is_empty());
-        let proper_span = self.body.local_decls[root_place.local].source_info.span;
+        let proper_span = self.body.local_decls[borrowed_local].source_info.span;
 
-        let root_place_projection = self.infcx.tcx.mk_place_elems(root_place.projection);
-
-        if self.access_place_error_reported.contains(&(
-            Place { local: root_place.local, projection: root_place_projection },
-            borrow_span,
-        )) {
+        if self.access_place_error_reported.contains(&(Place::from(borrowed_local), borrow_span)) {
             debug!(
                 "suppressing access_place error when borrow doesn't live long enough for {:?}",
                 borrow_span
@@ -2003,12 +2716,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             return;
         }
 
-        self.access_place_error_reported.insert((
-            Place { local: root_place.local, projection: root_place_projection },
-            borrow_span,
-        ));
+        self.access_place_error_reported.insert((Place::from(borrowed_local), borrow_span));
 
-        let borrowed_local = borrow.borrowed_place.local;
         if self.body.local_decls[borrowed_local].is_ref_to_thread_local() {
             let err =
                 self.report_thread_local_value_does_not_live_long_enough(drop_span, borrow_span);
@@ -2122,14 +2831,14 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     fn report_local_value_does_not_live_long_enough(
-        &mut self,
+        &self,
         location: Location,
         name: &str,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         borrow_spans: UseSpans<'tcx>,
         explanation: BorrowExplanation<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         debug!(
             "report_local_value_does_not_live_long_enough(\
              {:?}, {:?}, {:?}, {:?}, {:?}\
@@ -2219,7 +2928,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             err.span_label(borrow_span, "borrowed value does not live long enough");
             err.span_label(drop_span, format!("`{name}` dropped here while still borrowed"));
 
-            borrow_spans.args_subdiag(&mut err, |args_span| {
+            borrow_spans.args_subdiag(self.dcx(), &mut err, |args_span| {
                 crate::session_diagnostics::CaptureArgLabel::Capture {
                     is_within: borrow_spans.for_coroutine(),
                     args_span,
@@ -2301,10 +3010,10 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     fn report_thread_local_value_does_not_live_long_enough(
-        &mut self,
+        &self,
         drop_span: Span,
         borrow_span: Span,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         debug!(
             "report_thread_local_value_does_not_live_long_enough(\
              {:?}, {:?}\
@@ -2322,14 +3031,14 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
     #[instrument(level = "debug", skip(self))]
     fn report_temporary_value_does_not_live_long_enough(
-        &mut self,
+        &self,
         location: Location,
         borrow: &BorrowData<'tcx>,
         drop_span: Span,
         borrow_spans: UseSpans<'tcx>,
         proper_span: Span,
         explanation: BorrowExplanation<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         if let BorrowExplanation::MustBeValidFor { category, span, from_closure: false, .. } =
             explanation
         {
@@ -2478,7 +3187,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             None,
         );
 
-        borrow_spans.args_subdiag(&mut err, |args_span| {
+        borrow_spans.args_subdiag(self.dcx(), &mut err, |args_span| {
             crate::session_diagnostics::CaptureArgLabel::Capture {
                 is_within: borrow_spans.for_coroutine(),
                 args_span,
@@ -2495,7 +3204,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         return_span: Span,
         category: ConstraintCategory<'tcx>,
         opt_place_desc: Option<&String>,
-    ) -> Option<DiagnosticBuilder<'tcx>> {
+    ) -> Option<Diag<'tcx>> {
         let return_kind = match category {
             ConstraintCategory::Return(_) => "return",
             ConstraintCategory::Yield => "yield",
@@ -2530,9 +3239,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             };
             (format!("{local_kind}`{place_desc}`"), format!("`{place_desc}` is borrowed here"))
         } else {
-            let root_place =
-                self.prefixes(borrow.borrowed_place.as_ref(), PrefixSet::All).last().unwrap();
-            let local = root_place.local;
+            let local = borrow.borrowed_place.local;
             match self.body.local_kind(local) {
                 LocalKind::Arg => (
                     "function parameter".to_string(),
@@ -2582,7 +3289,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
     #[instrument(level = "debug", skip(self))]
     fn report_escaping_closure_capture(
-        &mut self,
+        &self,
         use_span: UseSpans<'tcx>,
         var_span: Span,
         fr_name: &RegionName,
@@ -2590,7 +3297,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         constraint_span: Span,
         captured_var: &str,
         scope: &str,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         let tcx = self.infcx.tcx;
         let args_span = use_span.args_or_use();
 
@@ -2692,13 +3399,13 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     fn report_escaping_data(
-        &mut self,
+        &self,
         borrow_span: Span,
         name: &Option<String>,
         upvar_span: Span,
         upvar_name: Symbol,
         escape_span: Span,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         let tcx = self.infcx.tcx;
 
         let escapes_from = tcx.def_descr(self.mir_def_id().to_def_id());
@@ -2726,7 +3433,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     }
 
     fn get_moved_indexes(
-        &mut self,
+        &self,
         location: Location,
         mpi: MovePathIndex,
     ) -> (Vec<MoveSite>, Vec<Location>) {
@@ -2937,7 +3644,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     "assign",
                 );
 
-                loan_spans.var_subdiag(None, &mut err, Some(loan.kind), |kind, var_span| {
+                loan_spans.var_subdiag(self.dcx(), &mut err, Some(loan.kind), |kind, var_span| {
                     use crate::session_diagnostics::CaptureVarCause::*;
                     match kind {
                         hir::ClosureKind::Coroutine(_) => BorrowUseInCoroutine { var_span },
@@ -2955,7 +3662,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         let mut err = self.cannot_assign_to_borrowed(span, loan_span, &descr_place);
 
-        loan_spans.var_subdiag(None, &mut err, Some(loan.kind), |kind, var_span| {
+        loan_spans.var_subdiag(self.dcx(), &mut err, Some(loan.kind), |kind, var_span| {
             use crate::session_diagnostics::CaptureVarCause::*;
             match kind {
                 hir::ClosureKind::Coroutine(_) => BorrowUseInCoroutine { var_span },
@@ -2980,7 +3687,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         self.buffer_error(err);
     }
 
-    fn explain_deref_coercion(&mut self, loan: &BorrowData<'tcx>, err: &mut Diagnostic) {
+    fn explain_deref_coercion(&mut self, loan: &BorrowData<'tcx>, err: &mut Diag<'_>) {
         let tcx = self.infcx.tcx;
         if let (
             Some(Terminator {
@@ -3020,7 +3727,6 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     /// assignment to `x.f`).
     pub(crate) fn report_illegal_reassignment(
         &mut self,
-        _location: Location,
         (place, span): (Place<'tcx>, Span),
         assigned_span: Span,
         err_place: Place<'tcx>,
@@ -3161,7 +3867,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     ) -> Option<AnnotatedBorrowFnSignature<'tcx>> {
         // Define a fallback for when we can't match a closure.
         let fallback = || {
-            let is_closure = self.infcx.tcx.is_closure_or_coroutine(self.mir_def_id().to_def_id());
+            let is_closure = self.infcx.tcx.is_closure_like(self.mir_def_id().to_def_id());
             if is_closure {
                 None
             } else {
@@ -3372,7 +4078,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         sig: ty::PolyFnSig<'tcx>,
     ) -> Option<AnnotatedBorrowFnSignature<'tcx>> {
         debug!("annotate_fn_sig: did={:?} sig={:?}", did, sig);
-        let is_closure = self.infcx.tcx.is_closure_or_coroutine(did.to_def_id());
+        let is_closure = self.infcx.tcx.is_closure_like(did.to_def_id());
         let fn_hir_id = self.infcx.tcx.local_def_id_to_hir_id(did);
         let fn_decl = self.infcx.tcx.hir().fn_decl_by_hir_id(fn_hir_id)?;
 
@@ -3516,7 +4222,7 @@ enum AnnotatedBorrowFnSignature<'tcx> {
 impl<'tcx> AnnotatedBorrowFnSignature<'tcx> {
     /// Annotate the provided diagnostic with information about borrow from the fn signature that
     /// helps explain.
-    pub(crate) fn emit(&self, cx: &mut MirBorrowckCtxt<'_, 'tcx>, diag: &mut Diagnostic) -> String {
+    pub(crate) fn emit(&self, cx: &MirBorrowckCtxt<'_, 'tcx>, diag: &mut Diag<'_>) -> String {
         match self {
             &AnnotatedBorrowFnSignature::Closure { argument_ty, argument_span } => {
                 diag.span_label(
@@ -3587,6 +4293,28 @@ impl<'a, 'v> Visitor<'v> for ReferencedStatementsVisitor<'a> {
             }
             _ => {}
         }
+    }
+}
+
+/// Look for `break` expressions within any arbitrary expressions. We'll do this to infer
+/// whether this is a case where the moved value would affect the exit of a loop, making it
+/// unsuitable for a `.clone()` suggestion.
+struct BreakFinder {
+    found_breaks: Vec<(hir::Destination, Span)>,
+    found_continues: Vec<(hir::Destination, Span)>,
+}
+impl<'hir> Visitor<'hir> for BreakFinder {
+    fn visit_expr(&mut self, ex: &'hir hir::Expr<'hir>) {
+        match ex.kind {
+            hir::ExprKind::Break(destination, _) => {
+                self.found_breaks.push((destination, ex.span));
+            }
+            hir::ExprKind::Continue(destination) => {
+                self.found_continues.push((destination, ex.span));
+            }
+            _ => {}
+        }
+        hir::intravisit::walk_expr(self, ex);
     }
 }
 

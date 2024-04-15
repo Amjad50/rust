@@ -9,6 +9,7 @@ mod engine;
 pub mod error_reporting;
 mod fulfill;
 pub mod misc;
+pub mod normalize;
 mod object_safety;
 pub mod outlives_bounds;
 pub mod project;
@@ -40,17 +41,15 @@ use rustc_span::Span;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
 
-pub(crate) use self::project::{needs_normalization, BoundVarReplacer, PlaceholderReplacer};
-
 pub use self::coherence::{add_placeholder_note, orphan_check, overlapping_impls};
-pub use self::coherence::{OrphanCheckErr, OverlapResult};
+pub use self::coherence::{IsFirstInputType, OrphanCheckErr, OverlapResult};
 pub use self::engine::{ObligationCtxt, TraitEngineExt};
 pub use self::fulfill::{FulfillmentContext, PendingPredicateObligation};
-pub use self::object_safety::astconv_object_safety_violations;
+pub use self::normalize::NormalizeExt;
+pub use self::object_safety::hir_ty_lowering_object_safety_violations;
 pub use self::object_safety::is_vtable_safe_method;
 pub use self::object_safety::object_safety_violations_for_assoc_item;
 pub use self::object_safety::ObjectSafetyViolation;
-pub use self::project::NormalizeExt;
 pub use self::project::{normalize_inherent_projection, normalize_projection_type};
 pub use self::select::{EvaluationCache, SelectionCache, SelectionContext};
 pub use self::select::{EvaluationResult, IntercrateAmbiguityCause, OverflowError};
@@ -62,12 +61,13 @@ pub use self::specialize::{
 pub use self::structural_match::search_for_structural_match_violation;
 pub use self::structural_normalize::StructurallyNormalizeExt;
 pub use self::util::elaborate;
-pub use self::util::{
-    check_args_compatible, supertrait_def_ids, supertraits, transitive_bounds,
-    transitive_bounds_that_define_assoc_item, SupertraitDefIds,
-};
-pub use self::util::{expand_trait_aliases, TraitAliasExpander};
+pub use self::util::{expand_trait_aliases, TraitAliasExpander, TraitAliasExpansionInfo};
 pub use self::util::{get_vtable_index_of_object_method, impl_item_is_final, upcast_choices};
+pub use self::util::{
+    supertrait_def_ids, supertraits, transitive_bounds, transitive_bounds_that_define_assoc_item,
+    SupertraitDefIds,
+};
+pub use self::util::{with_replaced_escaping_bound_vars, BoundVarReplacer, PlaceholderReplacer};
 
 pub use rustc_infer::traits::*;
 
@@ -443,11 +443,11 @@ pub fn impossible_predicates<'tcx>(tcx: TyCtxt<'tcx>, predicates: Vec<ty::Clause
     result
 }
 
-fn subst_and_check_impossible_predicates<'tcx>(
+fn instantiate_and_check_impossible_predicates<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: (DefId, GenericArgsRef<'tcx>),
 ) -> bool {
-    debug!("subst_and_check_impossible_predicates(key={:?})", key);
+    debug!("instantiate_and_check_impossible_predicates(key={:?})", key);
 
     let mut predicates = tcx.predicates_of(key.0).instantiate(tcx, key.1).predicates;
 
@@ -461,7 +461,7 @@ fn subst_and_check_impossible_predicates<'tcx>(
     predicates.retain(|predicate| !predicate.has_param());
     let result = impossible_predicates(tcx, predicates);
 
-    debug!("subst_and_check_impossible_predicates(key={:?}) = {:?}", key, result);
+    debug!("instantiate_and_check_impossible_predicates(key={:?}) = {:?}", key, result);
     result
 }
 
@@ -479,8 +479,8 @@ fn is_impossible_associated_item(
         trait_item_def_id: DefId,
     }
     impl<'tcx> ty::TypeVisitor<TyCtxt<'tcx>> for ReferencesOnlyParentGenerics<'tcx> {
-        type BreakTy = ();
-        fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+        type Result = ControlFlow<()>;
+        fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
             // If this is a parameter from the trait item's own generics, then bail
             if let ty::Param(param) = t.kind()
                 && let param_def_id = self.generics.type_param(param, self.tcx).def_id
@@ -490,7 +490,7 @@ fn is_impossible_associated_item(
             }
             t.super_visit_with(self)
         }
-        fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
+        fn visit_region(&mut self, r: ty::Region<'tcx>) -> Self::Result {
             if let ty::ReEarlyParam(param) = r.kind()
                 && let param_def_id = self.generics.region_param(&param, self.tcx).def_id
                 && self.tcx.parent(param_def_id) == self.trait_item_def_id
@@ -499,7 +499,7 @@ fn is_impossible_associated_item(
             }
             ControlFlow::Continue(())
         }
-        fn visit_const(&mut self, ct: ty::Const<'tcx>) -> ControlFlow<Self::BreakTy> {
+        fn visit_const(&mut self, ct: ty::Const<'tcx>) -> Self::Result {
             if let ty::ConstKind::Param(param) = ct.kind()
                 && let param_def_id = self.generics.const_param(&param, self.tcx).def_id
                 && self.tcx.parent(param_def_id) == self.trait_item_def_id
@@ -548,7 +548,7 @@ pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         specialization_graph_of: specialize::specialization_graph_provider,
         specializes: specialize::specializes,
-        subst_and_check_impossible_predicates,
+        instantiate_and_check_impossible_predicates,
         check_tys_might_be_eq: misc::check_tys_might_be_eq,
         is_impossible_associated_item,
         ..*providers

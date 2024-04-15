@@ -1,16 +1,23 @@
-// edition:2021
-
-// FIXME(async_closures): This needs a better error message!
+//@ edition:2021
 
 #![feature(async_closure)]
 
-fn main() {
-    fn needs_async_fn(_: impl async Fn()) {}
+fn needs_async_fn(_: impl async Fn()) {}
 
+fn a() {
     let mut x = 1;
     needs_async_fn(async || {
-        //~^ ERROR i16: ops::async_function::internal_implementation_detail::AsyncFnKindHelper<i8>
-        // FIXME: Should say "closure is `async FnMut` but it needs `async Fn`" or sth.
+        //~^ ERROR cannot borrow `x` as mutable, as it is a captured variable in a `Fn` closure
         x += 1;
     });
 }
+
+fn b() {
+    let x = String::new();
+    needs_async_fn(move || async move {
+        //~^ ERROR expected a closure that implements the `async Fn` trait, but this closure only implements `async FnOnce`
+        println!("{x}");
+    });
+}
+
+fn main() {}

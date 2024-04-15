@@ -13,6 +13,7 @@ mod version;
 
 use indexmap::IndexSet;
 use paths::AbsPathBuf;
+use rustc_hash::FxHashMap;
 use span::Span;
 use std::{
     fmt, io,
@@ -34,8 +35,11 @@ pub use version::{read_dylib_info, read_version, RustCInfo};
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ProcMacroKind {
     CustomDerive,
-    FuncLike,
     Attr,
+    // This used to be called FuncLike, so that's what the server expects currently.
+    #[serde(alias = "bang")]
+    #[serde(rename(serialize = "FuncLike", deserialize = "FuncLike"))]
+    Bang,
 }
 
 /// A handle to an external process which load dylibs with macros (.so or .dll)
@@ -107,8 +111,11 @@ pub struct MacroPanic {
 
 impl ProcMacroServer {
     /// Spawns an external process as the proc macro server and returns a client connected to it.
-    pub fn spawn(process_path: AbsPathBuf) -> io::Result<ProcMacroServer> {
-        let process = ProcMacroProcessSrv::run(process_path)?;
+    pub fn spawn(
+        process_path: AbsPathBuf,
+        env: &FxHashMap<String, String>,
+    ) -> io::Result<ProcMacroServer> {
+        let process = ProcMacroProcessSrv::run(process_path, env)?;
         Ok(ProcMacroServer { process: Arc::new(Mutex::new(process)) })
     }
 
@@ -197,7 +204,7 @@ impl ProcMacro {
                     &deserialize_span_data_index_map(&resp.span_data_table),
                 )
             })),
-            _ => Err(ServerError { message: "unexpected response".to_string(), io: None }),
+            _ => Err(ServerError { message: "unexpected response".to_owned(), io: None }),
         }
     }
 }

@@ -68,7 +68,7 @@ ast_passes_extern_block_suggestion = if you meant to declare an externally defin
 
 ast_passes_extern_fn_qualifiers = functions in `extern` blocks cannot have qualifiers
     .label = in this `extern` block
-    .suggestion = remove the qualifiers
+    .suggestion = remove this qualifier
 
 ast_passes_extern_item_ascii = items in `extern` blocks cannot use non-ascii identifiers
     .label = in this `extern` block
@@ -273,6 +273,7 @@ ast_passes_visibility_not_permitted =
     .trait_impl = trait items always share the visibility of their trait
     .individual_impl_items = place qualifiers on individual impl items instead
     .individual_foreign_items = place qualifiers on individual foreign items instead
+    .remove_qualifier_sugg = remove the qualifier
 
 ast_passes_where_clause_after_type_alias = where clauses are not allowed after the type for type aliases
     .note = see issue #112792 <https://github.com/rust-lang/rust/issues/112792> for more information
@@ -280,4 +281,5 @@ ast_passes_where_clause_after_type_alias = where clauses are not allowed after t
 
 ast_passes_where_clause_before_type_alias = where clauses are not allowed before the type for type aliases
     .note = see issue #89122 <https://github.com/rust-lang/rust/issues/89122> for more information
-    .suggestion = move it to the end of the type declaration
+    .remove_suggestion = remove this `where`
+    .move_suggestion = move it to the end of the type declaration

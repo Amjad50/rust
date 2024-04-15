@@ -1,6 +1,5 @@
 use super::command::Command;
 use super::symbol_export;
-use crate::back::link::SearchPaths;
 use crate::errors;
 use rustc_span::symbol::sym;
 
@@ -153,6 +152,7 @@ pub fn get_linker<'a>(
         LinkerFlavor::Msvc(..) => Box::new(MsvcLinker { cmd, sess }) as Box<dyn Linker>,
         LinkerFlavor::EmCc => Box::new(EmLinker { cmd, sess }) as Box<dyn Linker>,
         LinkerFlavor::Bpf => Box::new(BpfLinker { cmd, sess }) as Box<dyn Linker>,
+        LinkerFlavor::Llbc => Box::new(LlbcLinker { cmd, sess }) as Box<dyn Linker>,
         LinkerFlavor::Ptx => Box::new(PtxLinker { cmd, sess }) as Box<dyn Linker>,
     }
 }
@@ -171,13 +171,7 @@ pub trait Linker {
     fn link_framework_by_name(&mut self, _name: &str, _verbatim: bool, _as_needed: bool) {
         bug!("framework linked with unsupported linker")
     }
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        verbatim: bool,
-        whole_archive: bool,
-        search_paths: &SearchPaths,
-    );
+    fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool);
     fn link_staticlib_by_path(&mut self, path: &Path, whole_archive: bool);
     fn include_path(&mut self, path: &Path);
     fn framework_path(&mut self, path: &Path);
@@ -481,13 +475,7 @@ impl<'a> Linker for GccLinker<'a> {
         self.cmd.arg("-framework").arg(name);
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        verbatim: bool,
-        whole_archive: bool,
-        search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool) {
         self.hint_static();
         let colon = if verbatim && self.is_gnu { ":" } else { "" };
         if !whole_archive {
@@ -496,8 +484,7 @@ impl<'a> Linker for GccLinker<'a> {
             // -force_load is the macOS equivalent of --whole-archive, but it
             // involves passing the full path to the library to link.
             self.linker_arg("-force_load");
-            let search_paths = search_paths.get(self.sess);
-            self.linker_arg(find_native_static_library(name, verbatim, search_paths, self.sess));
+            self.linker_arg(find_native_static_library(name, verbatim, self.sess));
         } else {
             self.linker_arg("--whole-archive");
             self.cmd.arg(format!("-l{colon}{name}"));
@@ -626,7 +613,7 @@ impl<'a> Linker for GccLinker<'a> {
                 // it does support --strip-all as a compatibility alias for -s.
                 // The --strip-debug case is handled by running an external
                 // `strip` utility as a separate step after linking.
-                if self.sess.target.os != "illumos" {
+                if !self.sess.target.is_like_solaris {
                     self.linker_arg("--strip-debug");
                 }
             }
@@ -824,13 +811,7 @@ impl<'a> Linker for MsvcLinker<'a> {
         self.cmd.arg(format!("{}{}", name, if verbatim { "" } else { ".lib" }));
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        verbatim: bool,
-        whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool) {
         let prefix = if whole_archive { "/WHOLEARCHIVE:" } else { "" };
         let suffix = if verbatim { "" } else { ".lib" };
         self.cmd.arg(format!("{prefix}{name}{suffix}"));
@@ -927,6 +908,15 @@ impl<'a> Linker for MsvcLinker<'a> {
                 // This will cause the Microsoft linker to generate a PDB file
                 // from the CodeView line tables in the object files.
                 self.cmd.arg("/DEBUG");
+
+                // Default to emitting only the file name of the PDB file into
+                // the binary instead of the full path. Emitting the full path
+                // may leak private information (such as user names).
+                // See https://github.com/rust-lang/rust/issues/87825.
+                //
+                // This default behavior can be overridden by explicitly passing
+                // `-Clink-arg=/PDBALTPATH:...` to rustc.
+                self.cmd.arg("/PDBALTPATH:%_PDB%");
 
                 // This will cause the Microsoft linker to embed .natvis info into the PDB file
                 let natvis_dir_path = self.sess.sysroot.join("lib\\rustlib\\etc");
@@ -1054,13 +1044,7 @@ impl<'a> Linker for EmLinker<'a> {
         self.cmd.arg("-l").arg(name);
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        _verbatim: bool,
-        _whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, _verbatim: bool, _whole_archive: bool) {
         self.cmd.arg("-l").arg(name);
     }
 
@@ -1233,13 +1217,7 @@ impl<'a> Linker for WasmLd<'a> {
         self.cmd.arg("-l").arg(name);
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        _verbatim: bool,
-        whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, _verbatim: bool, whole_archive: bool) {
         if !whole_archive {
             self.cmd.arg("-l").arg(name);
         } else {
@@ -1386,13 +1364,7 @@ impl<'a> Linker for L4Bender<'a> {
         bug!("dylibs are not supported on L4Re");
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        _verbatim: bool,
-        whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, _verbatim: bool, whole_archive: bool) {
         self.hint_static();
         if !whole_archive {
             self.cmd.arg(format!("-PC{name}"));
@@ -1570,20 +1542,13 @@ impl<'a> Linker for AixLinker<'a> {
         self.cmd.arg(format!("-l{name}"));
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        name: &str,
-        verbatim: bool,
-        whole_archive: bool,
-        search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool) {
         self.hint_static();
         if !whole_archive {
             self.cmd.arg(format!("-l{name}"));
         } else {
             let mut arg = OsString::from("-bkeepfile:");
-            let search_path = search_paths.get(self.sess);
-            arg.push(find_native_static_library(name, verbatim, search_path, self.sess));
+            arg.push(find_native_static_library(name, verbatim, self.sess));
             self.cmd.arg(arg);
         }
     }
@@ -1631,22 +1596,15 @@ impl<'a> Linker for AixLinker<'a> {
 
     fn optimize(&mut self) {}
 
-    fn pgo_gen(&mut self) {}
+    fn pgo_gen(&mut self) {
+        self.cmd.arg("-bdbg:namedsects:ss");
+    }
 
     fn control_flow_guard(&mut self) {}
 
     fn ehcont_guard(&mut self) {}
 
-    fn debuginfo(&mut self, strip: Strip, _: &[PathBuf]) {
-        match strip {
-            Strip::None => {}
-            // FIXME: -s strips the symbol table, line number information
-            // and relocation information.
-            Strip::Debuginfo | Strip::Symbols => {
-                self.cmd.arg("-s");
-            }
-        }
-    }
+    fn debuginfo(&mut self, _: Strip, _: &[PathBuf]) {}
 
     fn no_crt_objects(&mut self) {}
 
@@ -1789,13 +1747,7 @@ impl<'a> Linker for PtxLinker<'a> {
         panic!("external dylibs not supported")
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        _name: &str,
-        _verbatim: bool,
-        _whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
         panic!("staticlibs not supported")
     }
 
@@ -1822,7 +1774,7 @@ impl<'a> Linker for PtxLinker<'a> {
             }
 
             Lto::No => {}
-        };
+        }
     }
 
     fn output_filename(&mut self, path: &Path) {
@@ -1860,6 +1812,98 @@ impl<'a> Linker for PtxLinker<'a> {
     fn linker_plugin_lto(&mut self) {}
 }
 
+/// The `self-contained` LLVM bitcode linker
+pub struct LlbcLinker<'a> {
+    cmd: Command,
+    sess: &'a Session,
+}
+
+impl<'a> Linker for LlbcLinker<'a> {
+    fn cmd(&mut self) -> &mut Command {
+        &mut self.cmd
+    }
+
+    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+
+    fn link_dylib_by_name(&mut self, _name: &str, _verbatim: bool, _as_needed: bool) {
+        panic!("external dylibs not supported")
+    }
+
+    fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
+        panic!("staticlibs not supported")
+    }
+
+    fn link_staticlib_by_path(&mut self, path: &Path, _whole_archive: bool) {
+        self.cmd.arg(path);
+    }
+
+    fn include_path(&mut self, path: &Path) {
+        self.cmd.arg("-L").arg(path);
+    }
+
+    fn debuginfo(&mut self, _strip: Strip, _: &[PathBuf]) {
+        self.cmd.arg("--debug");
+    }
+
+    fn add_object(&mut self, path: &Path) {
+        self.cmd.arg(path);
+    }
+
+    fn optimize(&mut self) {
+        match self.sess.opts.optimize {
+            OptLevel::No => "-O0",
+            OptLevel::Less => "-O1",
+            OptLevel::Default => "-O2",
+            OptLevel::Aggressive => "-O3",
+            OptLevel::Size => "-Os",
+            OptLevel::SizeMin => "-Oz",
+        };
+    }
+
+    fn output_filename(&mut self, path: &Path) {
+        self.cmd.arg("-o").arg(path);
+    }
+
+    fn framework_path(&mut self, _path: &Path) {
+        panic!("frameworks not supported")
+    }
+
+    fn full_relro(&mut self) {}
+
+    fn partial_relro(&mut self) {}
+
+    fn no_relro(&mut self) {}
+
+    fn gc_sections(&mut self, _keep_metadata: bool) {}
+
+    fn no_gc_sections(&mut self) {}
+
+    fn pgo_gen(&mut self) {}
+
+    fn no_crt_objects(&mut self) {}
+
+    fn no_default_libraries(&mut self) {}
+
+    fn control_flow_guard(&mut self) {}
+
+    fn ehcont_guard(&mut self) {}
+
+    fn export_symbols(&mut self, _tmpdir: &Path, _crate_type: CrateType, symbols: &[String]) {
+        match _crate_type {
+            CrateType::Cdylib => {
+                for sym in symbols {
+                    self.cmd.arg("--export-symbol").arg(sym);
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn subsystem(&mut self, _subsystem: &str) {}
+
+    fn linker_plugin_lto(&mut self) {}
+}
+
 pub struct BpfLinker<'a> {
     cmd: Command,
     sess: &'a Session,
@@ -1876,13 +1920,7 @@ impl<'a> Linker for BpfLinker<'a> {
         panic!("external dylibs not supported")
     }
 
-    fn link_staticlib_by_name(
-        &mut self,
-        _name: &str,
-        _verbatim: bool,
-        _whole_archive: bool,
-        _search_paths: &SearchPaths,
-    ) {
+    fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
         panic!("staticlibs not supported")
     }
 

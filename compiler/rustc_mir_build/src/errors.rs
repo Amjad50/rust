@@ -1,12 +1,12 @@
 use crate::fluent_generated as fluent;
-use rustc_errors::DiagnosticArgValue;
+use rustc_errors::DiagArgValue;
 use rustc_errors::{
-    codes::*, AddToDiagnostic, Applicability, DiagCtxt, Diagnostic, DiagnosticBuilder,
-    IntoDiagnostic, Level, MultiSpan, SubdiagnosticMessageOp,
+    codes::*, Applicability, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level, MultiSpan,
+    SubdiagMessageOp, Subdiagnostic,
 };
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
-use rustc_pattern_analysis::{errors::Uncovered, rustc::RustcMatchCheckCtxt};
+use rustc_pattern_analysis::{errors::Uncovered, rustc::RustcPatCtxt};
 use rustc_span::symbol::Symbol;
 use rustc_span::Span;
 
@@ -127,11 +127,11 @@ pub struct UnsafeOpInUnsafeFnCallToFunctionWithRequiresUnsafe {
     #[label]
     pub span: Span,
     pub function: String,
-    pub missing_target_features: DiagnosticArgValue,
+    pub missing_target_features: DiagArgValue,
     pub missing_target_features_count: usize,
     #[note]
     pub note: Option<()>,
-    pub build_target_features: DiagnosticArgValue,
+    pub build_target_features: DiagArgValue,
     pub build_target_features_count: usize,
     #[subdiagnostic]
     pub unsafe_not_inherited_note: Option<UnsafeNotInheritedLintNote>,
@@ -379,11 +379,11 @@ pub struct CallToFunctionWithRequiresUnsafe {
     #[label]
     pub span: Span,
     pub function: String,
-    pub missing_target_features: DiagnosticArgValue,
+    pub missing_target_features: DiagArgValue,
     pub missing_target_features_count: usize,
     #[note]
     pub note: Option<()>,
-    pub build_target_features: DiagnosticArgValue,
+    pub build_target_features: DiagArgValue,
     pub build_target_features_count: usize,
     #[subdiagnostic]
     pub unsafe_not_inherited_note: Option<UnsafeNotInheritedNote>,
@@ -397,11 +397,11 @@ pub struct CallToFunctionWithRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
     #[label]
     pub span: Span,
     pub function: String,
-    pub missing_target_features: DiagnosticArgValue,
+    pub missing_target_features: DiagArgValue,
     pub missing_target_features_count: usize,
     #[note]
     pub note: Option<()>,
-    pub build_target_features: DiagnosticArgValue,
+    pub build_target_features: DiagArgValue,
     pub build_target_features_count: usize,
     #[subdiagnostic]
     pub unsafe_not_inherited_note: Option<UnsafeNotInheritedNote>,
@@ -419,8 +419,12 @@ pub struct UnsafeNotInheritedLintNote {
     pub body_span: Span,
 }
 
-impl AddToDiagnostic for UnsafeNotInheritedLintNote {
-    fn add_to_diagnostic_with<F: SubdiagnosticMessageOp>(self, diag: &mut Diagnostic, _: F) {
+impl Subdiagnostic for UnsafeNotInheritedLintNote {
+    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
+        self,
+        diag: &mut Diag<'_, G>,
+        _f: F,
+    ) {
         diag.span_note(self.signature_span, fluent::mir_build_unsafe_fn_safe_body);
         let body_start = self.body_span.shrink_to_lo();
         let body_end = self.body_span.shrink_to_hi();
@@ -451,20 +455,17 @@ pub enum UnusedUnsafeEnclosing {
 }
 
 pub(crate) struct NonExhaustivePatternsTypeNotEmpty<'p, 'tcx, 'm> {
-    pub cx: &'m RustcMatchCheckCtxt<'p, 'tcx>,
-    pub expr_span: Span,
-    pub span: Span,
+    pub cx: &'m RustcPatCtxt<'p, 'tcx>,
+    pub scrut_span: Span,
+    pub braces_span: Option<Span>,
     pub ty: Ty<'tcx>,
 }
 
-impl<'a> IntoDiagnostic<'a> for NonExhaustivePatternsTypeNotEmpty<'_, '_, '_> {
-    fn into_diagnostic(self, dcx: &'a DiagCtxt, level: Level) -> DiagnosticBuilder<'_> {
-        let mut diag = DiagnosticBuilder::new(
-            dcx,
-            level,
-            fluent::mir_build_non_exhaustive_patterns_type_not_empty,
-        );
-        diag.span(self.span);
+impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for NonExhaustivePatternsTypeNotEmpty<'_, '_, '_> {
+    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'_, G> {
+        let mut diag =
+            Diag::new(dcx, level, fluent::mir_build_non_exhaustive_patterns_type_not_empty);
+        diag.span(self.scrut_span);
         diag.code(E0004);
         let peeled_ty = self.ty.peel_refs();
         diag.arg("ty", self.ty);
@@ -501,26 +502,19 @@ impl<'a> IntoDiagnostic<'a> for NonExhaustivePatternsTypeNotEmpty<'_, '_, '_> {
             }
         }
 
-        let mut suggestion = None;
         let sm = self.cx.tcx.sess.source_map();
-        if self.span.eq_ctxt(self.expr_span) {
+        if let Some(braces_span) = self.braces_span {
             // Get the span for the empty match body `{}`.
-            let (indentation, more) = if let Some(snippet) = sm.indentation_before(self.span) {
+            let (indentation, more) = if let Some(snippet) = sm.indentation_before(self.scrut_span)
+            {
                 (format!("\n{snippet}"), "    ")
             } else {
                 (" ".to_string(), "")
             };
-            suggestion = Some((
-                self.span.shrink_to_hi().with_hi(self.expr_span.hi()),
-                format!(" {{{indentation}{more}_ => todo!(),{indentation}}}",),
-            ));
-        }
-
-        if let Some((span, sugg)) = suggestion {
             diag.span_suggestion_verbose(
-                span,
+                braces_span,
                 fluent::mir_build_suggestion,
-                sugg,
+                format!(" {{{indentation}{more}_ => todo!(),{indentation}}}"),
                 Applicability::HasPlaceholders,
             );
         } else {
@@ -762,6 +756,14 @@ pub struct TypeNotStructural<'tcx> {
 }
 
 #[derive(Diagnostic)]
+#[diag(mir_build_non_partial_eq_match)]
+pub struct TypeNotPartialEq<'tcx> {
+    #[primary_span]
+    pub span: Span,
+    pub non_peq_ty: Ty<'tcx>,
+}
+
+#[derive(Diagnostic)]
 #[diag(mir_build_invalid_pattern)]
 pub struct InvalidPattern<'tcx> {
     #[primary_span]
@@ -816,12 +818,6 @@ pub struct NontrivialStructuralMatch<'tcx> {
     pub non_sm_ty: Ty<'tcx>,
 }
 
-#[derive(LintDiagnostic)]
-#[diag(mir_build_non_partial_eq_match)]
-pub struct NonPartialEqMatch<'tcx> {
-    pub non_peq_ty: Ty<'tcx>,
-}
-
 #[derive(Diagnostic)]
 #[diag(mir_build_pattern_not_covered, code = E0005)]
 pub(crate) struct PatternNotCovered<'s, 'tcx> {
@@ -862,8 +858,12 @@ pub struct Variant {
     pub span: Span,
 }
 
-impl<'tcx> AddToDiagnostic for AdtDefinedHere<'tcx> {
-    fn add_to_diagnostic_with<F: SubdiagnosticMessageOp>(self, diag: &mut Diagnostic, _: F) {
+impl<'tcx> Subdiagnostic for AdtDefinedHere<'tcx> {
+    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
+        self,
+        diag: &mut Diag<'_, G>,
+        _f: F,
+    ) {
         diag.arg("ty", self.ty);
         let mut spans = MultiSpan::from(self.adt_def_span);
 

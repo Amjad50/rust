@@ -1,6 +1,6 @@
 use crate::ffi::CStr;
 use crate::io;
-use crate::num::NonZeroUsize;
+use crate::num::NonZero;
 use crate::os::windows::io::AsRawHandle;
 use crate::os::windows::io::HandleOrNull;
 use crate::ptr;
@@ -9,7 +9,6 @@ use crate::sys::handle::Handle;
 use crate::sys::stack_overflow;
 use crate::sys_common::FromInner;
 use crate::time::Duration;
-
 use core::ffi::c_void;
 
 use super::time::WaitableTimer;
@@ -26,11 +25,8 @@ impl Thread {
     pub unsafe fn new(stack: usize, p: Box<dyn FnOnce()>) -> io::Result<Thread> {
         let p = Box::into_raw(Box::new(p));
 
-        // FIXME On UNIX, we guard against stack sizes that are too small but
-        // that's because pthreads enforces that stacks are at least
-        // PTHREAD_STACK_MIN bytes big. Windows has no such lower limit, it's
-        // just that below a certain threshold you can't do anything useful.
-        // That threshold is application and architecture-specific, however.
+        // CreateThread rounds up values for the stack size to the nearest page size (at least 4kb).
+        // If a value of zero is given then the default stack size is used instead.
         let ret = c::CreateThread(
             ptr::null_mut(),
             stack,
@@ -49,14 +45,11 @@ impl Thread {
             Err(io::Error::last_os_error())
         };
 
-        extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
-            unsafe {
-                // Next, set up our stack overflow handler which may get triggered if we run
-                // out of stack.
-                let _handler = stack_overflow::Handler::new();
-                // Finally, let's run some code.
-                Box::from_raw(main as *mut Box<dyn FnOnce()>)();
-            }
+        unsafe extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
+            // Next, reserve some stack space for if we otherwise run out of stack.
+            stack_overflow::reserve_stack();
+            // Finally, let's run some code.
+            Box::from_raw(main as *mut Box<dyn FnOnce()>)();
             0
         }
     }
@@ -65,10 +58,18 @@ impl Thread {
         if let Ok(utf8) = name.to_str() {
             if let Ok(utf16) = to_u16s(utf8) {
                 unsafe {
-                    c::SetThreadDescription(c::GetCurrentThread(), utf16.as_ptr());
-                };
+                    // SAFETY: the vec returned by `to_u16s` ends with a zero value
+                    Self::set_name_wide(&utf16)
+                }
             };
         };
+    }
+
+    /// # Safety
+    ///
+    /// `name` must end with a zero value
+    pub unsafe fn set_name_wide(name: &[u16]) {
+        c::SetThreadDescription(c::GetCurrentThread(), name.as_ptr());
     }
 
     pub fn join(self) {
@@ -110,28 +111,14 @@ impl Thread {
     }
 }
 
-pub fn available_parallelism() -> io::Result<NonZeroUsize> {
+pub fn available_parallelism() -> io::Result<NonZero<usize>> {
     let res = unsafe {
         let mut sysinfo: c::SYSTEM_INFO = crate::mem::zeroed();
         c::GetSystemInfo(&mut sysinfo);
         sysinfo.dwNumberOfProcessors as usize
     };
     match res {
-        0 => Err(io::const_io_error!(
-            io::ErrorKind::NotFound,
-            "The number of hardware threads is not known for the target platform",
-        )),
-        cpus => Ok(unsafe { NonZeroUsize::new_unchecked(cpus) }),
-    }
-}
-
-#[cfg_attr(test, allow(dead_code))]
-pub mod guard {
-    pub type Guard = !;
-    pub unsafe fn current() -> Option<Guard> {
-        None
-    }
-    pub unsafe fn init() -> Option<Guard> {
-        None
+        0 => Err(io::Error::UNKNOWN_THREAD_COUNT),
+        cpus => Ok(unsafe { NonZero::new_unchecked(cpus) }),
     }
 }

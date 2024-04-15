@@ -1,6 +1,7 @@
-// revisions: next current
-//[next] compile-flags: -Znext-solver
-// check-pass
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
+//@ check-pass
 
 #![allow(warnings)]
 trait Trait<U> {

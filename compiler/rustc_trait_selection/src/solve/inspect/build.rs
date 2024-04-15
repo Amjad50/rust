@@ -7,7 +7,7 @@ use std::mem;
 
 use rustc_middle::traits::query::NoSolution;
 use rustc_middle::traits::solve::{
-    CanonicalInput, Certainty, Goal, GoalSource, IsNormalizesToHack, QueryInput, QueryResult,
+    CanonicalInput, Certainty, Goal, GoalSource, QueryInput, QueryResult,
 };
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::config::DumpSolverProofTree;
@@ -87,7 +87,6 @@ struct WipGoalEvaluation<'tcx> {
     pub uncanonicalized_goal: Goal<'tcx, ty::Predicate<'tcx>>,
     pub kind: WipGoalEvaluationKind<'tcx>,
     pub evaluation: Option<WipCanonicalGoalEvaluation<'tcx>>,
-    pub returned_goals: Vec<Goal<'tcx, ty::Predicate<'tcx>>>,
 }
 
 impl<'tcx> WipGoalEvaluation<'tcx> {
@@ -98,12 +97,9 @@ impl<'tcx> WipGoalEvaluation<'tcx> {
                 WipGoalEvaluationKind::Root { orig_values } => {
                     inspect::GoalEvaluationKind::Root { orig_values }
                 }
-                WipGoalEvaluationKind::Nested { is_normalizes_to_hack } => {
-                    inspect::GoalEvaluationKind::Nested { is_normalizes_to_hack }
-                }
+                WipGoalEvaluationKind::Nested => inspect::GoalEvaluationKind::Nested,
             },
             evaluation: self.evaluation.unwrap().finalize(),
-            returned_goals: self.returned_goals,
         }
     }
 }
@@ -111,7 +107,7 @@ impl<'tcx> WipGoalEvaluation<'tcx> {
 #[derive(Eq, PartialEq, Debug)]
 pub(in crate::solve) enum WipGoalEvaluationKind<'tcx> {
     Root { orig_values: Vec<ty::GenericArg<'tcx>> },
-    Nested { is_normalizes_to_hack: IsNormalizesToHack },
+    Nested,
 }
 
 #[derive(Eq, PartialEq)]
@@ -224,8 +220,6 @@ enum WipProbeStep<'tcx> {
     AddGoal(GoalSource, inspect::CanonicalState<'tcx, Goal<'tcx, ty::Predicate<'tcx>>>),
     EvaluateGoals(WipAddedGoalsEvaluation<'tcx>),
     NestedProbe(WipProbe<'tcx>),
-    CommitIfOkStart,
-    CommitIfOkSuccess,
 }
 
 impl<'tcx> WipProbeStep<'tcx> {
@@ -234,8 +228,6 @@ impl<'tcx> WipProbeStep<'tcx> {
             WipProbeStep::AddGoal(source, goal) => inspect::ProbeStep::AddGoal(source, goal),
             WipProbeStep::EvaluateGoals(eval) => inspect::ProbeStep::EvaluateGoals(eval.finalize()),
             WipProbeStep::NestedProbe(probe) => inspect::ProbeStep::NestedProbe(probe.finalize()),
-            WipProbeStep::CommitIfOkStart => inspect::ProbeStep::CommitIfOkStart,
-            WipProbeStep::CommitIfOkSuccess => inspect::ProbeStep::CommitIfOkSuccess,
         }
     }
 }
@@ -307,12 +299,9 @@ impl<'tcx> ProofTreeBuilder<'tcx> {
                 solve::GoalEvaluationKind::Root => {
                     WipGoalEvaluationKind::Root { orig_values: orig_values.to_vec() }
                 }
-                solve::GoalEvaluationKind::Nested { is_normalizes_to_hack } => {
-                    WipGoalEvaluationKind::Nested { is_normalizes_to_hack }
-                }
+                solve::GoalEvaluationKind::Nested => WipGoalEvaluationKind::Nested,
             },
             evaluation: None,
-            returned_goals: vec![],
         })
     }
 
@@ -369,17 +358,6 @@ impl<'tcx> ProofTreeBuilder<'tcx> {
         }
     }
 
-    pub fn returned_goals(&mut self, goals: &[Goal<'tcx, ty::Predicate<'tcx>>]) {
-        if let Some(this) = self.as_mut() {
-            match this {
-                DebugSolver::GoalEvaluation(evaluation) => {
-                    assert!(evaluation.returned_goals.is_empty());
-                    evaluation.returned_goals.extend(goals);
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
     pub fn goal_evaluation(&mut self, goal_evaluation: ProofTreeBuilder<'tcx>) {
         if let Some(this) = self.as_mut() {
             match (this, *goal_evaluation.state.unwrap()) {
@@ -433,6 +411,17 @@ impl<'tcx> ProofTreeBuilder<'tcx> {
         }
     }
 
+    pub fn add_normalizes_to_goal(
+        ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, ty::NormalizesTo<'tcx>>,
+    ) {
+        if ecx.inspect.is_noop() {
+            return;
+        }
+
+        Self::add_goal(ecx, GoalSource::Misc, goal.with(ecx.tcx(), goal.predicate));
+    }
+
     pub fn add_goal(
         ecx: &mut EvalCtxt<'_, 'tcx>,
         source: GoalSource,
@@ -469,29 +458,6 @@ impl<'tcx> ProofTreeBuilder<'tcx> {
                     }),
                     DebugSolver::Probe(probe),
                 ) => steps.push(WipProbeStep::NestedProbe(probe)),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    /// Used by `EvalCtxt::commit_if_ok` to flatten the work done inside
-    /// of the probe into the parent.
-    pub fn integrate_snapshot(&mut self, probe: ProofTreeBuilder<'tcx>) {
-        if let Some(this) = self.as_mut() {
-            match (this, *probe.state.unwrap()) {
-                (
-                    DebugSolver::Probe(WipProbe { steps, .. })
-                    | DebugSolver::GoalEvaluationStep(WipGoalEvaluationStep {
-                        evaluation: WipProbe { steps, .. },
-                        ..
-                    }),
-                    DebugSolver::Probe(probe),
-                ) => {
-                    steps.push(WipProbeStep::CommitIfOkStart);
-                    assert_eq!(probe.kind, None);
-                    steps.extend(probe.steps);
-                    steps.push(WipProbeStep::CommitIfOkSuccess);
-                }
                 _ => unreachable!(),
             }
         }

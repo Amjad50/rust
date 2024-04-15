@@ -84,7 +84,7 @@ use crate::rc::Rc;
 use crate::str::FromStr;
 use crate::sync::Arc;
 
-use crate::ffi::{OsStr, OsString};
+use crate::ffi::{os_str, OsStr, OsString};
 use crate::sys;
 use crate::sys::path::{is_sep_byte, is_verbatim_sep, parse_prefix, MAIN_SEP_STR};
 
@@ -1270,6 +1270,7 @@ impl PathBuf {
     /// assert_eq!(path, PathBuf::from("/etc"));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_confusables("append", "put")]
     pub fn push<P: AsRef<Path>>(&mut self, path: P) {
         self._push(path.as_ref())
     }
@@ -2142,10 +2143,10 @@ impl Path {
     /// # Examples
     ///
     /// ```
-    /// use std::path::Path;
+    /// use std::path::{Path, PathBuf};
     ///
     /// let path_buf = Path::new("foo.txt").to_path_buf();
-    /// assert_eq!(path_buf, std::path::PathBuf::from("foo.txt"));
+    /// assert_eq!(path_buf, PathBuf::from("foo.txt"));
     /// ```
     #[rustc_conversion_suggestion]
     #[must_use = "this returns the result of the operation, \
@@ -2277,10 +2278,9 @@ impl Path {
     /// Produces an iterator over `Path` and its ancestors.
     ///
     /// The iterator will yield the `Path` that is returned if the [`parent`] method is used zero
-    /// or more times. That means, the iterator will yield `&self`, `&self.parent().unwrap()`,
-    /// `&self.parent().unwrap().parent().unwrap()` and so on. If the [`parent`] method returns
-    /// [`None`], the iterator will do likewise. The iterator will always yield at least one value,
-    /// namely `&self`.
+    /// or more times. If the [`parent`] method returns [`None`], the iterator will do likewise.
+    /// The iterator will always yield at least one value, namely `Some(&self)`. Next it will yield
+    /// `&self.parent()`, `&self.parent().and_then(Path::parent)` and so on.
     ///
     /// # Examples
     ///
@@ -2725,7 +2725,7 @@ impl Path {
                   it returns an object that can be displayed"]
     #[inline]
     pub fn display(&self) -> Display<'_> {
-        Display { path: self }
+        Display { inner: self.inner.display() }
     }
 
     /// Queries the file system to get information about a file, directory, etc.
@@ -3032,20 +3032,20 @@ impl fmt::Debug for Path {
 /// [`format!`]: crate::format
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Display<'a> {
-    path: &'a Path,
+    inner: os_str::Display<'a>,
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for Display<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.path, f)
+        fmt::Debug::fmt(&self.inner, f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Display for Display<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.path.inner.display(f)
+        fmt::Display::fmt(&self.inner, f)
     }
 }
 

@@ -49,7 +49,9 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
         let _prof_timer = tcx.sess.prof.generic_activity("build_extern_trait_impls");
         for &cnum in tcx.crates(()) {
             for &impl_def_id in tcx.trait_impls_in_crate(cnum) {
-                inline::build_impl(cx, impl_def_id, None, &mut new_items_external);
+                cx.with_param_env(impl_def_id, |cx| {
+                    inline::build_impl(cx, impl_def_id, None, &mut new_items_external);
+                });
             }
         }
     }
@@ -74,7 +76,9 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
                 );
                 parent = tcx.opt_parent(did);
             }
-            inline::build_impl(cx, impl_def_id, Some((&attr_buf, None)), &mut new_items_local);
+            cx.with_param_env(impl_def_id, |cx| {
+                inline::build_impl(cx, impl_def_id, Some((&attr_buf, None)), &mut new_items_local);
+            });
             attr_buf.clear();
         }
     }
@@ -83,7 +87,9 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
         for def_id in PrimitiveType::all_impls(tcx) {
             // Try to inline primitive impls from other crates.
             if !def_id.is_local() {
-                inline::build_impl(cx, def_id, None, &mut new_items_external);
+                cx.with_param_env(def_id, |cx| {
+                    inline::build_impl(cx, def_id, None, &mut new_items_external);
+                });
             }
         }
         for (prim, did) in PrimitiveType::primitive_locations(tcx) {
@@ -109,16 +115,14 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
                     // form that is valid for use in type inference.
                     let ty = tcx.type_of(def_id).instantiate_identity();
                     match ty.kind() {
-                        ty::Slice(ty)
-                        | ty::Ref(_, ty, _)
-                        | ty::RawPtr(ty::TypeAndMut { ty, .. }) => {
+                        ty::Slice(ty) | ty::Ref(_, ty, _) | ty::RawPtr(ty, _) => {
                             matches!(ty.kind(), ty::Param(..))
                         }
                         ty::Tuple(tys) => tys.iter().all(|ty| matches!(ty.kind(), ty::Param(..))),
                         _ => true,
                     }
                 }) {
-                    let impls = get_auto_trait_and_blanket_impls(cx, def_id);
+                    let impls = synthesize_auto_trait_and_blanket_impls(cx, def_id);
                     new_items_external.extend(impls.filter(|i| cx.inlined.insert(i.item_id)));
                 }
             }
@@ -226,8 +230,10 @@ impl<'a, 'tcx> DocVisitor for SyntheticImplCollector<'a, 'tcx> {
         if i.is_struct() || i.is_enum() || i.is_union() {
             // FIXME(eddyb) is this `doc(hidden)` check needed?
             if !self.cx.tcx.is_doc_hidden(i.item_id.expect_def_id()) {
-                self.impls
-                    .extend(get_auto_trait_and_blanket_impls(self.cx, i.item_id.expect_def_id()));
+                self.impls.extend(synthesize_auto_trait_and_blanket_impls(
+                    self.cx,
+                    i.item_id.expect_def_id(),
+                ));
             }
         }
 

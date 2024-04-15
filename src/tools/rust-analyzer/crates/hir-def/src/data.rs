@@ -453,8 +453,8 @@ impl ProcMacroData {
             (
                 def.name,
                 match def.kind {
-                    ProcMacroKind::CustomDerive { helpers } => Some(helpers),
-                    ProcMacroKind::FnLike | ProcMacroKind::Attr => None,
+                    ProcMacroKind::Derive { helpers } => Some(helpers),
+                    ProcMacroKind::Bang | ProcMacroKind::Attr => None,
                 },
             )
         } else {
@@ -484,10 +484,11 @@ impl ExternCrateDeclData {
         let extern_crate = &item_tree[loc.id.value];
 
         let name = extern_crate.name.clone();
+        let krate = loc.container.krate();
         let crate_id = if name == hir_expand::name![self] {
-            Some(loc.container.krate())
+            Some(krate)
         } else {
-            db.crate_def_map(loc.container.krate())
+            db.crate_def_map(krate)
                 .extern_prelude()
                 .find(|&(prelude_name, ..)| *prelude_name == name)
                 .map(|(_, (root, _))| root.krate())
@@ -634,7 +635,6 @@ impl<'a> AssocItemCollector<'a> {
                     attr,
                 ) {
                     Ok(ResolvedAttr::Macro(call_id)) => {
-                        self.attr_calls.push((ast_id, call_id));
                         // If proc attribute macro expansion is disabled, skip expanding it here
                         if !self.db.expand_proc_attr_macros() {
                             continue 'attrs;
@@ -647,9 +647,20 @@ impl<'a> AssocItemCollector<'a> {
                             // disabled. This is analogous to the handling in
                             // `DefCollector::collect_macros`.
                             if exp.is_dummy() {
+                                self.diagnostics.push(DefDiagnostic::unresolved_proc_macro(
+                                    self.module_id.local_id,
+                                    loc.kind,
+                                    loc.def.krate,
+                                ));
+
+                                continue 'attrs;
+                            }
+                            if exp.is_disabled() {
                                 continue 'attrs;
                             }
                         }
+
+                        self.attr_calls.push((ast_id, call_id));
 
                         let res =
                             self.expander.enter_expand_id::<ast::MacroItems>(self.db, call_id);
@@ -705,7 +716,7 @@ impl<'a> AssocItemCollector<'a> {
             }
             AssocItem::MacroCall(call) => {
                 let file_id = self.expander.current_file_id();
-                let MacroCall { ast_id, expand_to, call_site, ref path } = item_tree[call];
+                let MacroCall { ast_id, expand_to, ctxt, ref path } = item_tree[call];
                 let module = self.expander.module.local_id;
 
                 let resolver = |path| {
@@ -724,7 +735,7 @@ impl<'a> AssocItemCollector<'a> {
                 match macro_call_as_call_id(
                     self.db.upcast(),
                     &AstIdWithPath::new(file_id, ast_id, Clone::clone(path)),
-                    call_site,
+                    ctxt,
                     expand_to,
                     self.expander.module.krate(),
                     resolver,
@@ -735,6 +746,7 @@ impl<'a> AssocItemCollector<'a> {
                         self.collect_macro_items(res, &|| hir_expand::MacroCallKind::FnLike {
                             ast_id: InFile::new(file_id, ast_id),
                             expand_to: hir_expand::ExpandTo::Items,
+                            eager: None,
                         });
                     }
                     Ok(None) => (),
@@ -744,6 +756,7 @@ impl<'a> AssocItemCollector<'a> {
                             MacroCallKind::FnLike {
                                 ast_id: InFile::new(file_id, ast_id),
                                 expand_to,
+                                eager: None,
                             },
                             Clone::clone(path),
                         ));
@@ -778,11 +791,12 @@ impl<'a> AssocItemCollector<'a> {
             };
             self.diagnostics.push(diag);
         }
-        if let errors @ [_, ..] = parse.errors() {
+        let errors = parse.errors();
+        if !errors.is_empty() {
             self.diagnostics.push(DefDiagnostic::macro_expansion_parse_error(
                 self.module_id.local_id,
                 error_call_kind(),
-                errors,
+                errors.into_boxed_slice(),
             ));
         }
 

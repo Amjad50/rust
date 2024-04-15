@@ -35,6 +35,15 @@ impl FlagComputation {
         result
     }
 
+    pub fn for_clauses(clauses: &[ty::Clause<'_>]) -> FlagComputation {
+        let mut result = FlagComputation::new();
+        for c in clauses {
+            result.add_flags(c.as_predicate().flags());
+            result.add_exclusive_binder(c.as_predicate().outer_exclusive_binder());
+        }
+        result
+    }
+
     fn add_flags(&mut self, flags: TypeFlags) {
         self.flags = self.flags | flags;
     }
@@ -181,9 +190,10 @@ impl FlagComputation {
 
             &ty::Alias(kind, data) => {
                 self.add_flags(match kind {
-                    ty::Weak | ty::Projection => TypeFlags::HAS_TY_PROJECTION,
-                    ty::Inherent => TypeFlags::HAS_TY_INHERENT,
+                    ty::Projection => TypeFlags::HAS_TY_PROJECTION,
+                    ty::Weak => TypeFlags::HAS_TY_WEAK,
                     ty::Opaque => TypeFlags::HAS_TY_OPAQUE,
+                    ty::Inherent => TypeFlags::HAS_TY_INHERENT,
                 });
 
                 self.add_alias_ty(data);
@@ -208,10 +218,24 @@ impl FlagComputation {
                 self.add_const(len);
             }
 
+            &ty::Pat(ty, pat) => {
+                self.add_ty(ty);
+                match *pat {
+                    ty::PatternKind::Range { start, end, include_end: _ } => {
+                        if let Some(start) = start {
+                            self.add_const(start)
+                        }
+                        if let Some(end) = end {
+                            self.add_const(end)
+                        }
+                    }
+                }
+            }
+
             &ty::Slice(tt) => self.add_ty(tt),
 
-            ty::RawPtr(m) => {
-                self.add_ty(m.ty);
+            &ty::RawPtr(ty, _) => {
+                self.add_ty(ty);
             }
 
             &ty::Ref(r, ty, _) => {

@@ -4,7 +4,7 @@ use super::{Expectation, FnCtxt, TupleArgumentsFlag};
 
 use crate::errors;
 use rustc_ast::util::parser::PREC_POSTFIX;
-use rustc_errors::{Applicability, Diagnostic, ErrorGuaranteed, StashKey};
+use rustc_errors::{Applicability, Diag, ErrorGuaranteed, StashKey};
 use rustc_hir as hir;
 use rustc_hir::def::{self, CtorKind, Namespace, Res};
 use rustc_hir::def_id::DefId;
@@ -184,16 +184,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     kind: TypeVariableOriginKind::TypeInference,
                     span: callee_expr.span,
                 });
+                // We may actually receive a coroutine back whose kind is different
+                // from the closure that this dispatched from. This is because when
+                // we have no captures, we automatically implement `FnOnce`. This
+                // impl forces the closure kind to `FnOnce` i.e. `u8`.
+                let kind_ty = self.next_ty_var(TypeVariableOrigin {
+                    kind: TypeVariableOriginKind::TypeInference,
+                    span: callee_expr.span,
+                });
                 let call_sig = self.tcx.mk_fn_sig(
                     [coroutine_closure_sig.tupled_inputs_ty],
                     coroutine_closure_sig.to_coroutine(
                         self.tcx,
                         closure_args.parent_args(),
-                        // Inherit the kind ty of the closure, since we're calling this
-                        // coroutine with the most relaxed `AsyncFn*` trait that we can.
-                        // We don't necessarily need to do this here, but it saves us
-                        // computing one more infer var that will get constrained later.
-                        closure_args.kind_ty(),
+                        kind_ty,
                         self.tcx.coroutine_for_closure(def_id),
                         tupled_upvars_ty,
                     ),
@@ -347,7 +351,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// likely intention is to call the closure, suggest `(||{})()`. (#55851)
     fn identify_bad_closure_def_and_call(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         hir_id: hir::HirId,
         callee_node: &hir::ExprKind<'_>,
         callee_span: Span,
@@ -361,7 +365,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let fn_decl_span = if let hir::Node::Expr(hir::Expr {
             kind: hir::ExprKind::Closure(&hir::Closure { fn_decl_span, .. }),
             ..
-        }) = hir.get_parent(hir_id)
+        }) = self.tcx.parent_hir_node(hir_id)
         {
             fn_decl_span
         } else if let Some((
@@ -383,11 +387,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         {
             // Actually need to unwrap one more layer of HIR to get to
             // the _real_ closure...
-            let async_closure = hir.parent_id(parent_hir_id);
             if let hir::Node::Expr(hir::Expr {
                 kind: hir::ExprKind::Closure(&hir::Closure { fn_decl_span, .. }),
                 ..
-            }) = self.tcx.hir_node(async_closure)
+            }) = self.tcx.parent_hir_node(parent_hir_id)
             {
                 fn_decl_span
             } else {
@@ -411,12 +414,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// likely intention is to create an array containing tuples.
     fn maybe_suggest_bad_array_definition(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         call_expr: &'tcx hir::Expr<'tcx>,
         callee_expr: &'tcx hir::Expr<'tcx>,
     ) -> bool {
-        let hir_id = self.tcx.hir().parent_id(call_expr.hir_id);
-        let parent_node = self.tcx.hir_node(hir_id);
+        let parent_node = self.tcx.parent_hir_node(call_expr.hir_id);
         if let (
             hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Array(_), .. }),
             hir::ExprKind::Tup(exp),
@@ -486,12 +488,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 if let hir::ExprKind::Path(hir::QPath::Resolved(_, path)) = &callee_expr.kind
                     && let [segment] = path.segments
-                    && let Some(mut diag) =
-                        self.dcx().steal_diagnostic(segment.ident.span, StashKey::CallIntoMethod)
                 {
-                    // Try suggesting `foo(a)` -> `a.foo()` if possible.
-                    self.suggest_call_as_method(&mut diag, segment, arg_exprs, call_expr, expected);
-                    diag.emit();
+                    self.dcx().try_steal_modify_and_emit_err(
+                        segment.ident.span,
+                        StashKey::CallIntoMethod,
+                        |err| {
+                            // Try suggesting `foo(a)` -> `a.foo()` if possible.
+                            self.suggest_call_as_method(
+                                err, segment, arg_exprs, call_expr, expected,
+                            );
+                        },
+                    );
                 }
 
                 let err = self.report_invalid_callee(call_expr, callee_expr, callee_ty, arg_exprs);
@@ -542,8 +549,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         if let Some(def_id) = def_id
             && self.tcx.def_kind(def_id) == hir::def::DefKind::Fn
-            && self.tcx.is_intrinsic(def_id)
-            && self.tcx.item_name(def_id) == sym::const_eval_select
+            && self.tcx.is_intrinsic(def_id, sym::const_eval_select)
         {
             let fn_sig = self.resolve_vars_if_possible(fn_sig);
             for idx in 0..=1 {
@@ -604,7 +610,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// and suggesting the fix if the method probe is successful.
     fn suggest_call_as_method(
         &self,
-        diag: &mut Diagnostic,
+        diag: &mut Diag<'_>,
         segment: &'tcx hir::PathSegment<'tcx>,
         arg_exprs: &'tcx [hir::Expr<'tcx>],
         call_expr: &'tcx hir::Expr<'tcx>,
@@ -753,7 +759,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         if let hir::ExprKind::Path(hir::QPath::Resolved(None, path)) = callee_expr.kind
             && let Res::Local(_) = path.res
-            && let [segment] = &path.segments[..]
+            && let [segment] = &path.segments
         {
             for id in self.tcx.hir().items() {
                 if let Some(node) = self.tcx.hir().get_if_local(id.owner_id.into())
@@ -912,7 +918,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let param = callee_args.const_at(host_effect_index);
         let cause = self.misc(span);
-        match self.at(&cause, self.param_env).eq(infer::DefineOpaqueTypes::No, effect, param) {
+        // We know the type of `effect` to be `bool`, there will be no opaque type inference.
+        match self.at(&cause, self.param_env).eq(infer::DefineOpaqueTypes::Yes, effect, param) {
             Ok(infer::InferOk { obligations, value: () }) => {
                 self.register_predicates(obligations);
             }

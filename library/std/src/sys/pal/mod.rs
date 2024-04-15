@@ -37,6 +37,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "hermit")] {
         mod hermit;
         pub use self::hermit::*;
+    } else if #[cfg(all(target_os = "wasi", target_env = "p2"))] {
+        mod wasip2;
+        pub use self::wasip2::*;
     } else if #[cfg(target_os = "wasi")] {
         mod wasi;
         pub use self::wasi::*;

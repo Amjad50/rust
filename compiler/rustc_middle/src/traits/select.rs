@@ -49,7 +49,8 @@ pub type EvaluationCache<'tcx> = Cache<
 /// parameters don't unify with regular types, but they *can* unify
 /// with variables from blanket impls, and (unless we know its bounds
 /// will always be satisfied) picking the blanket impl will be wrong
-/// for at least *some* substitutions. To make this concrete, if we have
+/// for at least *some* generic parameters. To make this concrete, if
+/// we have
 ///
 /// ```rust, ignore
 /// trait AsDebug { type Out: fmt::Debug; fn debug(self) -> Self::Out; }
@@ -138,7 +139,7 @@ pub enum SelectionCandidate<'tcx> {
     /// generated for an `async ||` expression.
     AsyncClosureCandidate,
 
-    /// Implementation of the the `AsyncFnKindHelper` helper trait, which
+    /// Implementation of the `AsyncFnKindHelper` helper trait, which
     /// is used internally to delay computation for async closures until after
     /// upvar analysis is performed in HIR typeck.
     AsyncFnKindHelperCandidate,
@@ -192,7 +193,6 @@ pub enum SelectionCandidate<'tcx> {
 /// The evaluation results are ordered:
 ///     - `EvaluatedToOk` implies `EvaluatedToOkModuloRegions`
 ///       implies `EvaluatedToAmbig` implies `EvaluatedToAmbigStackDependent`
-///     - `EvaluatedToErr` implies `EvaluatedToErrStackDependent`
 ///     - the "union" of evaluation results is equal to their maximum -
 ///     all the "potential success" candidates can potentially succeed,
 ///     so they are noops when unioned with a definite error, and within
@@ -218,52 +218,9 @@ pub enum EvaluationResult {
     /// variables. We are somewhat imprecise there, so we don't actually
     /// know the real result.
     ///
-    /// This can't be trivially cached for the same reason as `EvaluatedToErrStackDependent`.
+    /// This can't be trivially cached because the result depends on the
+    /// stack results.
     EvaluatedToAmbigStackDependent,
-    /// Evaluation failed because we encountered an obligation we are already
-    /// trying to prove on this branch.
-    ///
-    /// We know this branch can't be a part of a minimal proof-tree for
-    /// the "root" of our cycle, because then we could cut out the recursion
-    /// and maintain a valid proof tree. However, this does not mean
-    /// that all the obligations on this branch do not hold -- it's possible
-    /// that we entered this branch "speculatively", and that there
-    /// might be some other way to prove this obligation that does not
-    /// go through this cycle -- so we can't cache this as a failure.
-    ///
-    /// For example, suppose we have this:
-    ///
-    /// ```rust,ignore (pseudo-Rust)
-    /// pub trait Trait { fn xyz(); }
-    /// // This impl is "useless", but we can still have
-    /// // an `impl Trait for SomeUnsizedType` somewhere.
-    /// impl<T: Trait + Sized> Trait for T { fn xyz() {} }
-    ///
-    /// pub fn foo<T: Trait + ?Sized>() {
-    ///     <T as Trait>::xyz();
-    /// }
-    /// ```
-    ///
-    /// When checking `foo`, we have to prove `T: Trait`. This basically
-    /// translates into this:
-    ///
-    /// ```plain,ignore
-    /// (T: Trait + Sized →_\impl T: Trait), T: Trait ⊢ T: Trait
-    /// ```
-    ///
-    /// When we try to prove it, we first go the first option, which
-    /// recurses. This shows us that the impl is "useless" -- it won't
-    /// tell us that `T: Trait` unless it already implemented `Trait`
-    /// by some other means. However, that does not prevent `T: Trait`
-    /// does not hold, because of the bound (which can indeed be satisfied
-    /// by `SomeUnsizedType` from another crate).
-    //
-    // FIXME: when an `EvaluatedToErrStackDependent` goes past its parent root, we
-    // ought to convert it to an `EvaluatedToErr`, because we know
-    // there definitely isn't a proof tree for that obligation. Not
-    // doing so is still sound -- there isn't any proof tree, so the
-    // branch still can't be a part of a minimal one -- but does not re-enable caching.
-    EvaluatedToErrStackDependent,
     /// Evaluation failed.
     EvaluatedToErr,
 }
@@ -289,13 +246,13 @@ impl EvaluationResult {
             | EvaluatedToAmbig
             | EvaluatedToAmbigStackDependent => true,
 
-            EvaluatedToErr | EvaluatedToErrStackDependent => false,
+            EvaluatedToErr => false,
         }
     }
 
     pub fn is_stack_dependent(self) -> bool {
         match self {
-            EvaluatedToAmbigStackDependent | EvaluatedToErrStackDependent => true,
+            EvaluatedToAmbigStackDependent => true,
 
             EvaluatedToOkModuloOpaqueTypes
             | EvaluatedToOk

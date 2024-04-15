@@ -10,7 +10,7 @@ use ide_db::{
             debug::{DebugQueryTable, TableEntry},
             Query, QueryTable,
         },
-        CrateData, FileId, FileTextQuery, ParseQuery, SourceDatabase, SourceRootId,
+        CompressedFileTextQuery, CrateData, FileId, ParseQuery, SourceDatabase, SourceRootId,
     },
     symbol_index::ModuleSymbolsQuery,
 };
@@ -38,7 +38,7 @@ use triomphe::Arc;
 pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
     let mut buf = String::new();
 
-    format_to!(buf, "{}\n", collect_query(FileTextQuery.in_db(db)));
+    format_to!(buf, "{}\n", collect_query(CompressedFileTextQuery.in_db(db)));
     format_to!(buf, "{}\n", collect_query(ParseQuery.in_db(db)));
     format_to!(buf, "{}\n", collect_query(ParseMacroExpansionQuery.in_db(db)));
     format_to!(buf, "{}\n", collect_query(LibrarySymbolsQuery.in_db(db)));
@@ -72,8 +72,6 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
                 dependencies,
                 origin,
                 is_proc_macro,
-                target_layout,
-                toolchain,
             } = &crate_graph[crate_id];
             format_to!(
                 buf,
@@ -91,12 +89,6 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
             format_to!(buf, "    Env: {:?}\n", env);
             format_to!(buf, "    Origin: {:?}\n", origin);
             format_to!(buf, "    Is a proc macro crate: {}\n", is_proc_macro);
-            format_to!(buf, "    Workspace Target Layout: {:?}\n", target_layout);
-            format_to!(
-                buf,
-                "    Workspace Toolchain: {}\n",
-                toolchain.as_ref().map_or_else(|| "n/a".into(), |v| v.to_string())
-            );
             let deps = dependencies
                 .iter()
                 .map(|dep| format!("{}={}", dep.name, dep.crate_id.into_raw()))
@@ -105,7 +97,7 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
         }
     }
 
-    buf.trim().to_string()
+    buf.trim().to_owned()
 }
 
 fn collect_query<'q, Q>(table: QueryTable<'q, Q>) -> <Q as QueryCollect>::Collector
@@ -168,7 +160,7 @@ impl QueryCollect for ParseMacroExpansionQuery {
     type Collector = SyntaxTreeStats<true>;
 }
 
-impl QueryCollect for FileTextQuery {
+impl QueryCollect for CompressedFileTextQuery {
     type Collector = FilesStats;
 }
 
@@ -196,8 +188,8 @@ impl fmt::Display for FilesStats {
     }
 }
 
-impl StatCollect<FileId, Arc<str>> for FilesStats {
-    fn collect_entry(&mut self, _: FileId, value: Option<Arc<str>>) {
+impl StatCollect<FileId, Arc<[u8]>> for FilesStats {
+    fn collect_entry(&mut self, _: FileId, value: Option<Arc<[u8]>>) {
         self.total += 1;
         self.size += value.unwrap().len();
     }

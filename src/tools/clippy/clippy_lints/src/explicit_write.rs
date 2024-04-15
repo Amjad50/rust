@@ -88,7 +88,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
                 cx,
                 EXPLICIT_WRITE,
                 expr.span,
-                &format!("use of `{used}.unwrap()`"),
+                format!("use of `{used}.unwrap()`"),
                 "try",
                 format!("{prefix}{sugg_mac}!({inputs_snippet})"),
                 applicability,
@@ -102,7 +102,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitWrite {
 fn look_in_block<'tcx, 'hir>(cx: &LateContext<'tcx>, kind: &'tcx ExprKind<'hir>) -> &'tcx ExprKind<'hir> {
     if let ExprKind::Block(block, _label @ None) = kind
         && let Block {
-            stmts: [Stmt { kind: StmtKind::Local(local), .. }],
+            stmts: [Stmt { kind: StmtKind::Let(local), .. }],
             expr: Some(expr_end_of_block),
             rules: BlockCheckMode::DefaultBlock,
             ..

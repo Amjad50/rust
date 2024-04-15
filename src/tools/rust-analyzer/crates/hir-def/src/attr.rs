@@ -24,11 +24,11 @@ use triomphe::Arc;
 
 use crate::{
     db::DefDatabase,
-    item_tree::{AttrOwner, Fields, ItemTreeId, ItemTreeModItemNode},
+    item_tree::{AttrOwner, Fields, ItemTreeNode},
     lang_item::LangItem,
     nameres::{ModuleOrigin, ModuleSource},
     src::{HasChildSource, HasSource},
-    AdtId, AssocItemLoc, AttrDefId, GenericParamId, ItemLoc, LocalFieldId, Lookup, MacroId,
+    AdtId, AttrDefId, GenericParamId, HasModule, ItemTreeLoc, LocalFieldId, Lookup, MacroId,
     VariantId,
 };
 
@@ -148,12 +148,12 @@ impl Attrs {
         }
     }
 
-    pub fn lang(&self) -> Option<&SmolStr> {
+    pub fn lang(&self) -> Option<&str> {
         self.by_key("lang").string_value()
     }
 
     pub fn lang_item(&self) -> Option<LangItem> {
-        self.by_key("lang").string_value().and_then(|it| LangItem::from_str(it))
+        self.by_key("lang").string_value().and_then(LangItem::from_str)
     }
 
     pub fn has_doc_hidden(&self) -> bool {
@@ -178,7 +178,7 @@ impl Attrs {
         self.doc_exprs().flat_map(|doc_expr| doc_expr.aliases().to_vec())
     }
 
-    pub fn export_name(&self) -> Option<&SmolStr> {
+    pub fn export_name(&self) -> Option<&str> {
         self.by_key("export_name").string_value()
     }
 
@@ -317,7 +317,7 @@ fn parse_comma_sep<S>(subtree: &tt::Subtree<S>) -> Vec<SmolStr> {
 }
 
 impl AttrsWithOwner {
-    pub fn attrs_with_owner(db: &dyn DefDatabase, owner: AttrDefId) -> Self {
+    pub fn new(db: &dyn DefDatabase, owner: AttrDefId) -> Self {
         Self { attrs: db.attrs(owner), owner }
     }
 
@@ -348,7 +348,7 @@ impl AttrsWithOwner {
                         .raw_attrs(AttrOwner::ModItem(definition_tree_id.value.into()))
                         .clone(),
                     ModuleOrigin::BlockExpr { id, .. } => {
-                        let tree = db.block_item_tree_query(id);
+                        let tree = db.block_item_tree(id);
                         tree.raw_attrs(AttrOwner::TopLevel).clone()
                     }
                 }
@@ -356,12 +356,7 @@ impl AttrsWithOwner {
             AttrDefId::FieldId(it) => {
                 return db.fields_attrs(it.parent)[it.local_id].clone();
             }
-            // FIXME: DRY this up
-            AttrDefId::EnumVariantId(it) => {
-                let id = it.lookup(db).id;
-                let tree = id.item_tree(db);
-                tree.raw_attrs(id.value.into()).clone()
-            }
+            AttrDefId::EnumVariantId(it) => attrs_from_item_tree_loc(db, it),
             AttrDefId::AdtId(it) => match it {
                 AdtId::StructId(it) => attrs_from_item_tree_loc(db, it),
                 AdtId::EnumId(it) => attrs_from_item_tree_loc(db, it),
@@ -370,39 +365,51 @@ impl AttrsWithOwner {
             AttrDefId::TraitId(it) => attrs_from_item_tree_loc(db, it),
             AttrDefId::TraitAliasId(it) => attrs_from_item_tree_loc(db, it),
             AttrDefId::MacroId(it) => match it {
-                MacroId::Macro2Id(it) => attrs_from_item_tree(db, it.lookup(db).id),
-                MacroId::MacroRulesId(it) => attrs_from_item_tree(db, it.lookup(db).id),
-                MacroId::ProcMacroId(it) => attrs_from_item_tree(db, it.lookup(db).id),
+                MacroId::Macro2Id(it) => attrs_from_item_tree_loc(db, it),
+                MacroId::MacroRulesId(it) => attrs_from_item_tree_loc(db, it),
+                MacroId::ProcMacroId(it) => attrs_from_item_tree_loc(db, it),
             },
             AttrDefId::ImplId(it) => attrs_from_item_tree_loc(db, it),
-            AttrDefId::ConstId(it) => attrs_from_item_tree_assoc(db, it),
-            AttrDefId::StaticId(it) => attrs_from_item_tree_assoc(db, it),
-            AttrDefId::FunctionId(it) => attrs_from_item_tree_assoc(db, it),
-            AttrDefId::TypeAliasId(it) => attrs_from_item_tree_assoc(db, it),
+            AttrDefId::ConstId(it) => attrs_from_item_tree_loc(db, it),
+            AttrDefId::StaticId(it) => attrs_from_item_tree_loc(db, it),
+            AttrDefId::FunctionId(it) => attrs_from_item_tree_loc(db, it),
+            AttrDefId::TypeAliasId(it) => attrs_from_item_tree_loc(db, it),
             AttrDefId::GenericParamId(it) => match it {
                 GenericParamId::ConstParamId(it) => {
                     let src = it.parent().child_source(db);
-                    RawAttrs::from_attrs_owner(
-                        db.upcast(),
-                        src.with_value(&src.value[it.local_id()]),
-                        db.span_map(src.file_id).as_ref(),
-                    )
+                    // FIXME: We should be never getting `None` here.
+                    match src.value.get(it.local_id()) {
+                        Some(val) => RawAttrs::from_attrs_owner(
+                            db.upcast(),
+                            src.with_value(val),
+                            db.span_map(src.file_id).as_ref(),
+                        ),
+                        None => RawAttrs::EMPTY,
+                    }
                 }
                 GenericParamId::TypeParamId(it) => {
                     let src = it.parent().child_source(db);
-                    RawAttrs::from_attrs_owner(
-                        db.upcast(),
-                        src.with_value(&src.value[it.local_id()]),
-                        db.span_map(src.file_id).as_ref(),
-                    )
+                    // FIXME: We should be never getting `None` here.
+                    match src.value.get(it.local_id()) {
+                        Some(val) => RawAttrs::from_attrs_owner(
+                            db.upcast(),
+                            src.with_value(val),
+                            db.span_map(src.file_id).as_ref(),
+                        ),
+                        None => RawAttrs::EMPTY,
+                    }
                 }
                 GenericParamId::LifetimeParamId(it) => {
                     let src = it.parent.child_source(db);
-                    RawAttrs::from_attrs_owner(
-                        db.upcast(),
-                        src.with_value(&src.value[it.local_id]),
-                        db.span_map(src.file_id).as_ref(),
-                    )
+                    // FIXME: We should be never getting `None` here.
+                    match src.value.get(it.local_id) {
+                        Some(val) => RawAttrs::from_attrs_owner(
+                            db.upcast(),
+                            src.with_value(val),
+                            db.span_map(src.file_id).as_ref(),
+                        ),
+                        None => RawAttrs::EMPTY,
+                    }
                 }
             },
             AttrDefId::ExternBlockId(it) => attrs_from_item_tree_loc(db, it),
@@ -558,7 +565,7 @@ impl<'attr> AttrQuery<'attr> {
         self.attrs().filter_map(|attr| attr.token_tree_value())
     }
 
-    pub fn string_value(self) -> Option<&'attr SmolStr> {
+    pub fn string_value(self) -> Option<&'attr str> {
         self.attrs().find_map(|attr| attr.string_value())
     }
 
@@ -603,29 +610,14 @@ fn any_has_attrs<'db>(
     id.lookup(db).source(db).map(ast::AnyHasAttrs::new)
 }
 
-fn attrs_from_item_tree<N: ItemTreeModItemNode>(
-    db: &dyn DefDatabase,
-    id: ItemTreeId<N>,
+fn attrs_from_item_tree_loc<'db, N: ItemTreeNode>(
+    db: &(dyn DefDatabase + 'db),
+    lookup: impl Lookup<Database<'db> = dyn DefDatabase + 'db, Data = impl ItemTreeLoc<Id = N>>,
 ) -> RawAttrs {
+    let id = lookup.lookup(db).item_tree_id();
     let tree = id.item_tree(db);
-    let mod_item = N::id_to_mod_item(id.value);
-    tree.raw_attrs(mod_item.into()).clone()
-}
-
-fn attrs_from_item_tree_loc<'db, N: ItemTreeModItemNode>(
-    db: &(dyn DefDatabase + 'db),
-    lookup: impl Lookup<Database<'db> = dyn DefDatabase + 'db, Data = ItemLoc<N>>,
-) -> RawAttrs {
-    let id = lookup.lookup(db).id;
-    attrs_from_item_tree(db, id)
-}
-
-fn attrs_from_item_tree_assoc<'db, N: ItemTreeModItemNode>(
-    db: &(dyn DefDatabase + 'db),
-    lookup: impl Lookup<Database<'db> = dyn DefDatabase + 'db, Data = AssocItemLoc<N>>,
-) -> RawAttrs {
-    let id = lookup.lookup(db).id;
-    attrs_from_item_tree(db, id)
+    let attr_owner = N::attr_owner(id.value);
+    tree.raw_attrs(attr_owner).clone()
 }
 
 pub(crate) fn fields_attrs_source_map(

@@ -43,6 +43,10 @@ pub(crate) struct IceBugReport<'a> {
 }
 
 #[derive(Diagnostic)]
+#[diag(driver_impl_ice_bug_report_update_note)]
+pub(crate) struct UpdateNightlyNote;
+
+#[derive(Diagnostic)]
 #[diag(driver_impl_ice_bug_report_internal_feature)]
 pub(crate) struct IceBugReportInternalFeature;
 

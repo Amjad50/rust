@@ -25,7 +25,7 @@ pub unsafe fn init(argc: isize, argv: *const *const u8) {
 pub struct Args(slice::Iter<'static, OsString>);
 
 pub fn args() -> Args {
-    let ptr = core::ptr::from_exposed_addr(ARGS.load(Ordering::Relaxed)) as *const ArgsStore;
+    let ptr = core::ptr::with_exposed_provenance(ARGS.load(Ordering::Relaxed)) as *const ArgsStore;
     let args = unsafe { ptr.as_ref() };
     if let Some(args) = args { Args(args.iter()) } else { Args([].iter()) }
 }

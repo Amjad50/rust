@@ -1,6 +1,4 @@
-// check-pass
-
-#![feature(associated_type_bounds)]
+//@ check-pass
 
 trait Trait1 {
     type Assoc1: Bar;

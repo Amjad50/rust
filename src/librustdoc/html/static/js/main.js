@@ -45,7 +45,7 @@ function setMobileTopbar() {
         const mobileTitle = document.createElement("h2");
         mobileTitle.className = "location";
         if (hasClass(document.querySelector(".rustdoc"), "crate")) {
-            mobileTitle.innerText = `Crate ${window.currentCrate}`;
+            mobileTitle.innerHTML = `Crate <a href="#">${window.currentCrate}</a>`;
         } else if (locationTitle) {
             mobileTitle.innerHTML = locationTitle.innerHTML;
         }
@@ -185,9 +185,12 @@ function preLoadCss(cssUrl) {
 (function() {
     const isHelpPage = window.location.pathname.endsWith("/help.html");
 
-    function loadScript(url) {
+    function loadScript(url, errorCallback) {
         const script = document.createElement("script");
         script.src = url;
+        if (errorCallback !== undefined) {
+            script.onerror = errorCallback;
+        }
         document.head.append(script);
     }
 
@@ -292,11 +295,16 @@ function preLoadCss(cssUrl) {
                 return;
             }
             let searchLoaded = false;
+            // If you're browsing the nightly docs, the page might need to be refreshed for the
+            // search to work because the hash of the JS scripts might have changed.
+            function sendSearchForm() {
+                document.getElementsByClassName("search-form")[0].submit();
+            }
             function loadSearch() {
                 if (!searchLoaded) {
                     searchLoaded = true;
-                    loadScript(getVar("static-root-path") + getVar("search-js"));
-                    loadScript(resourcePath("search-index", ".js"));
+                    loadScript(getVar("static-root-path") + getVar("search-js"), sendSearchForm);
+                    loadScript(resourcePath("search-index", ".js"), sendSearchForm);
                 }
             }
 
@@ -320,6 +328,30 @@ function preLoadCss(cssUrl) {
             const search = searchState.outputElement();
             search.innerHTML = "<h3 class=\"search-loading\">" + searchState.loadingText + "</h3>";
             searchState.showResults(search);
+        },
+        descShards: new Map(),
+        loadDesc: async function({descShard, descIndex}) {
+            if (descShard.promise === null) {
+                descShard.promise = new Promise((resolve, reject) => {
+                    // The `resolve` callback is stored in the `descShard`
+                    // object, which is itself stored in `this.descShards` map.
+                    // It is called in `loadedDescShard` by the
+                    // search.desc script.
+                    descShard.resolve = resolve;
+                    const ds = descShard;
+                    const fname = `${ds.crate}-desc-${ds.shard}-`;
+                    const url = resourcePath(
+                        `search.desc/${descShard.crate}/${fname}`,
+                        ".js",
+                    );
+                    loadScript(url, reject);
+                });
+            }
+            const list = await descShard.promise;
+            return list[descIndex];
+        },
+        loadedDescShard: function(crate, shard, data) {
+            this.descShards.get(crate)[shard].resolve(data.split("\n"));
         },
     };
 
@@ -373,7 +405,7 @@ function preLoadCss(cssUrl) {
                                     window.location.replace("#" + item.id);
                                 }, 0);
                             }
-                        }
+                        },
                     );
                 }
             }
@@ -577,7 +609,7 @@ function preLoadCss(cssUrl) {
         const script = document
             .querySelector("script[data-ignore-extern-crates]");
         const ignoreExternCrates = new Set(
-            (script ? script.getAttribute("data-ignore-extern-crates") : "").split(",")
+            (script ? script.getAttribute("data-ignore-extern-crates") : "").split(","),
         );
         for (const lib of libs) {
             if (lib === window.currentCrate || ignoreExternCrates.has(lib)) {
@@ -1090,7 +1122,7 @@ function preLoadCss(cssUrl) {
         } else {
             wrapper.style.setProperty(
                 "--popover-arrow-offset",
-                (wrapperPos.right - pos.right + 4) + "px"
+                (wrapperPos.right - pos.right + 4) + "px",
             );
         }
         wrapper.style.visibility = "";
@@ -1672,7 +1704,7 @@ href="https://doc.rust-lang.org/${channel}/rustdoc/read-documentation/search.htm
                 pendingSidebarResizingFrame = false;
                 document.documentElement.style.setProperty(
                     "--resizing-sidebar-width",
-                    desiredSidebarSize + "px"
+                    desiredSidebarSize + "px",
                 );
             }, 100);
         }

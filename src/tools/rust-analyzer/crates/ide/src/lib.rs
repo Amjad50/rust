@@ -12,17 +12,11 @@
 #![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
 #![recursion_limit = "128"]
 
-#[allow(unused)]
-macro_rules! eprintln {
-    ($($tt:tt)*) => { stdx::eprintln!($($tt)*) };
-}
-
 #[cfg(test)]
 mod fixture;
 
 mod markup;
 mod navigation_target;
-mod prime_caches;
 
 mod annotations;
 mod call_hierarchy;
@@ -56,6 +50,7 @@ mod static_index;
 mod status;
 mod syntax_highlighting;
 mod syntax_tree;
+mod test_explorer;
 mod typing;
 mod view_crate_graph;
 mod view_hir;
@@ -63,17 +58,15 @@ mod view_item_tree;
 mod view_memory_layout;
 mod view_mir;
 
-use std::ffi::OsStr;
-
 use cfg::CfgOptions;
 use fetch_crates::CrateInfo;
-use hir::Change;
+use hir::ChangeWithProcMacros;
 use ide_db::{
     base_db::{
         salsa::{self, ParallelDatabase},
         CrateOrigin, Env, FileLoader, FileSet, SourceDatabase, VfsPath,
     },
-    symbol_index, FxHashMap, FxIndexSet, LineIndexDatabase,
+    prime_caches, symbol_index, FxHashMap, FxIndexSet, LineIndexDatabase,
 };
 use syntax::SourceFile;
 use triomphe::Arc;
@@ -95,7 +88,7 @@ pub use crate::{
     inlay_hints::{
         AdjustmentHints, AdjustmentHintsMode, ClosureReturnTypeHints, DiscriminantHints,
         InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart, InlayHintPosition,
-        InlayHintsConfig, InlayKind, InlayTooltip, LifetimeElisionHints, RangeLimit,
+        InlayHintsConfig, InlayKind, InlayTooltip, LifetimeElisionHints,
     },
     join_lines::JoinLinesConfig,
     markup::Markup,
@@ -105,7 +98,6 @@ pub use crate::{
     },
     move_item::Direction,
     navigation_target::{NavigationTarget, TryToNav, UpmappingResult},
-    prime_caches::ParallelPrimeCachesProgress,
     references::ReferenceSearchResult,
     rename::RenameError,
     runnables::{Runnable, RunnableKind, TestId},
@@ -115,6 +107,7 @@ pub use crate::{
         tags::{Highlight, HlMod, HlMods, HlOperator, HlPunct, HlTag},
         HighlightConfig, HlRange,
     },
+    test_explorer::{TestItem, TestItemKind},
 };
 pub use hir::Semantics;
 pub use ide_assists::{
@@ -126,12 +119,13 @@ pub use ide_completion::{
 };
 pub use ide_db::{
     base_db::{
-        Cancelled, CrateGraph, CrateId, Edition, FileChange, FileId, FilePosition, FileRange,
-        SourceRoot, SourceRootId,
+        Cancelled, CrateGraph, CrateId, FileChange, FileId, FilePosition, FileRange, SourceRoot,
+        SourceRootId,
     },
     documentation::Documentation,
     label::Label,
     line_index::{LineCol, LineIndex},
+    prime_caches::ParallelPrimeCachesProgress,
     search::{ReferenceCategory, SearchScope},
     source_change::{FileSystemEdit, SnippetEdit, SourceChange},
     symbol_index::Query,
@@ -141,6 +135,7 @@ pub use ide_diagnostics::{
     Diagnostic, DiagnosticCode, DiagnosticsConfig, ExprFillDefaultMode, Severity,
 };
 pub use ide_ssr::SsrError;
+pub use span::Edition;
 pub use syntax::{TextRange, TextSize};
 pub use text_edit::{Indel, TextEdit};
 
@@ -170,6 +165,10 @@ impl AnalysisHost {
         AnalysisHost { db: RootDatabase::new(lru_capacity) }
     }
 
+    pub fn with_database(db: RootDatabase) -> AnalysisHost {
+        AnalysisHost { db }
+    }
+
     pub fn update_lru_capacity(&mut self, lru_capacity: Option<usize>) {
         self.db.update_base_query_lru_capacities(lru_capacity);
     }
@@ -186,7 +185,7 @@ impl AnalysisHost {
 
     /// Applies changes to the current state of the world. If there are
     /// outstanding snapshots, they will be canceled.
-    pub fn apply_change(&mut self, change: Change) {
+    pub fn apply_change(&mut self, change: ChangeWithProcMacros) {
         self.db.apply_change(change);
     }
 
@@ -238,10 +237,10 @@ impl Analysis {
         let mut host = AnalysisHost::default();
         let file_id = FileId::from_raw(0);
         let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new_virtual_path("/main.rs".to_string()));
+        file_set.insert(file_id, VfsPath::new_virtual_path("/main.rs".to_owned()));
         let source_root = SourceRoot::new_local(file_set);
 
-        let mut change = Change::new();
+        let mut change = ChangeWithProcMacros::new();
         change.set_roots(vec![source_root]);
         let mut crate_graph = CrateGraph::default();
         // FIXME: cfg options
@@ -258,11 +257,11 @@ impl Analysis {
             Env::default(),
             false,
             CrateOrigin::Local { repo: None, name: None },
-            Err("Analysis::from_single_file has no target layout".into()),
-            None,
         );
-        change.change_file(file_id, Some(Arc::from(text)));
+        change.change_file(file_id, Some(text));
         change.set_crate_graph(crate_graph);
+        change.set_target_data_layouts(vec![Err("fixture has no layout".into())]);
+        change.set_toolchains(vec![None]);
         host.apply_change(change);
         (host.analysis(), file_id)
     }
@@ -342,6 +341,22 @@ impl Analysis {
         self.with_db(|db| view_item_tree::view_item_tree(db, file_id))
     }
 
+    pub fn discover_test_roots(&self) -> Cancellable<Vec<TestItem>> {
+        self.with_db(test_explorer::discover_test_roots)
+    }
+
+    pub fn discover_tests_in_crate_by_test_id(&self, crate_id: &str) -> Cancellable<Vec<TestItem>> {
+        self.with_db(|db| test_explorer::discover_tests_in_crate_by_test_id(db, crate_id))
+    }
+
+    pub fn discover_tests_in_crate(&self, crate_id: CrateId) -> Cancellable<Vec<TestItem>> {
+        self.with_db(|db| test_explorer::discover_tests_in_crate(db, crate_id))
+    }
+
+    pub fn discover_tests_in_file(&self, file_id: FileId) -> Cancellable<Vec<TestItem>> {
+        self.with_db(|db| test_explorer::discover_tests_in_file(db, file_id))
+    }
+
     /// Renders the crate graph to GraphViz "dot" syntax.
     pub fn view_crate_graph(&self, full: bool) -> Cancellable<Result<String, String>> {
         self.with_db(|db| view_crate_graph::view_crate_graph(db, full))
@@ -403,9 +418,18 @@ impl Analysis {
         &self,
         config: &InlayHintsConfig,
         file_id: FileId,
-        range: Option<RangeLimit>,
+        range: Option<TextRange>,
     ) -> Cancellable<Vec<InlayHint>> {
         self.with_db(|db| inlay_hints::inlay_hints(db, file_id, range, config))
+    }
+    pub fn inlay_hints_resolve(
+        &self,
+        config: &InlayHintsConfig,
+        file_id: FileId,
+        position: TextSize,
+        hash: u64,
+    ) -> Cancellable<Option<InlayHint>> {
+        self.with_db(|db| inlay_hints::inlay_hints_resolve(db, file_id, position, hash, config))
     }
 
     /// Returns the set of folding ranges.
@@ -490,8 +514,8 @@ impl Analysis {
     pub fn external_docs(
         &self,
         position: FilePosition,
-        target_dir: Option<&OsStr>,
-        sysroot: Option<&OsStr>,
+        target_dir: Option<&str>,
+        sysroot: Option<&str>,
     ) -> Cancellable<doc_links::DocumentationLinks> {
         self.with_db(|db| {
             doc_links::external_docs(db, position, target_dir, sysroot).unwrap_or_default()
@@ -680,9 +704,8 @@ impl Analysis {
         &self,
         position: FilePosition,
         new_name: &str,
-        rename_external: bool,
     ) -> Cancellable<Result<SourceChange, RenameError>> {
-        self.with_db(|db| rename::rename(db, position, new_name, rename_external))
+        self.with_db(|db| rename::rename(db, position, new_name))
     }
 
     pub fn prepare_rename(

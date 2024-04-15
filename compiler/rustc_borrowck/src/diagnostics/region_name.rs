@@ -5,7 +5,7 @@ use std::fmt::{self, Display};
 use std::iter;
 
 use rustc_data_structures::fx::IndexEntry;
-use rustc_errors::Diagnostic;
+use rustc_errors::Diag;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_middle::ty::print::RegionHighlightMode;
@@ -106,7 +106,7 @@ impl RegionName {
         }
     }
 
-    pub(crate) fn highlight_region_name(&self, diag: &mut Diagnostic) {
+    pub(crate) fn highlight_region_name(&self, diag: &mut Diag<'_>) {
         match &self.source {
             RegionNameSource::NamedLateParamRegion(span)
             | RegionNameSource::NamedEarlyParamRegion(span) => {
@@ -191,9 +191,9 @@ impl Display for RegionName {
     }
 }
 
-impl rustc_errors::IntoDiagnosticArg for RegionName {
-    fn into_diagnostic_arg(self) -> rustc_errors::DiagnosticArgValue {
-        self.to_string().into_diagnostic_arg()
+impl rustc_errors::IntoDiagArg for RegionName {
+    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
+        self.to_string().into_diag_arg()
     }
 }
 
@@ -555,8 +555,8 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
                     search_stack.push((*elem_ty, elem_hir_ty));
                 }
 
-                (ty::RawPtr(mut_ty), hir::TyKind::Ptr(mut_hir_ty)) => {
-                    search_stack.push((mut_ty.ty, &mut_hir_ty.ty));
+                (ty::RawPtr(mut_ty, _), hir::TyKind::Ptr(mut_hir_ty)) => {
+                    search_stack.push((*mut_ty, &mut_hir_ty.ty));
                 }
 
                 _ => {
@@ -626,9 +626,9 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
                     | GenericArgKind::Const(_),
                     _,
                 ) => {
-                    // HIR lowering sometimes doesn't catch this in erroneous
-                    // programs, so we need to use span_delayed_bug here. See #82126.
-                    self.dcx().span_delayed_bug(
+                    // This was previously a `span_delayed_bug` and could be
+                    // reached by the test for #82126, but no longer.
+                    self.dcx().span_bug(
                         hir_arg.span(),
                         format!("unmatched arg and hir arg: found {kind:?} vs {hir_arg:?}"),
                     );

@@ -10,6 +10,7 @@ use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_serialize::Encodable as RustcEncodable;
 use rustc_session::Session;
 use std::fs;
+use std::sync::Arc;
 
 use super::data::*;
 use super::dirty_clean;
@@ -32,7 +33,7 @@ pub fn save_dep_graph(tcx: TyCtxt<'_>) {
             return;
         }
         // This is going to be deleted in finalize_session_directory, so let's not create it.
-        if sess.dcx().has_errors_or_lint_errors_or_delayed_bugs().is_some() {
+        if sess.dcx().has_errors_or_delayed_bugs().is_some() {
             return;
         }
 
@@ -87,7 +88,7 @@ pub fn save_work_product_index(
         return;
     }
     // This is going to be deleted in finalize_session_directory, so let's not create it
-    if sess.dcx().has_errors_or_lint_errors().is_some() {
+    if sess.dcx().has_errors().is_some() {
         return;
     }
 
@@ -147,7 +148,7 @@ fn encode_query_cache(tcx: TyCtxt<'_>, encoder: FileEncoder) -> FileEncodeResult
 /// and moves it to the permanent dep-graph path
 pub(crate) fn build_dep_graph(
     sess: &Session,
-    prev_graph: SerializedDepGraph,
+    prev_graph: Arc<SerializedDepGraph>,
     prev_work_products: WorkProductMap,
 ) -> Option<DepGraph> {
     if sess.opts.incremental.is_none() {

@@ -11,6 +11,7 @@ use crate::ty::{GenericArgKind, GenericArgsRef};
 use rustc_apfloat::Float as _;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher};
+use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
@@ -96,13 +97,8 @@ impl<'tcx> Discr<'tcx> {
     }
 }
 
-pub trait IntTypeExt {
-    fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx>;
-    fn disr_incr<'tcx>(&self, tcx: TyCtxt<'tcx>, val: Option<Discr<'tcx>>) -> Option<Discr<'tcx>>;
-    fn initial_discriminant<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Discr<'tcx>;
-}
-
-impl IntTypeExt for IntegerType {
+#[extension(pub trait IntTypeExt)]
+impl IntegerType {
     fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match self {
             IntegerType::Pointer(true) => tcx.types.isize,
@@ -248,6 +244,11 @@ impl<'tcx> TyCtxt<'tcx> {
                 }
 
                 ty::Tuple(_) => break,
+
+                ty::Pat(inner, _) => {
+                    f();
+                    ty = inner;
+                }
 
                 ty::Alias(..) => {
                     let normalized = normalize(ty);
@@ -541,13 +542,15 @@ impl<'tcx> TyCtxt<'tcx> {
         Ok(())
     }
 
-    /// Returns `true` if `def_id` refers to a closure (e.g., `|x| x * 2`). Note
-    /// that closures have a `DefId`, but the closure *expression* also
-    /// has a `HirId` that is located within the context where the
-    /// closure appears (and, sadly, a corresponding `NodeId`, since
-    /// those are not yet phased out). The parent of the closure's
-    /// `DefId` will also be the context where it appears.
-    pub fn is_closure_or_coroutine(self, def_id: DefId) -> bool {
+    /// Returns `true` if `def_id` refers to a closure, coroutine, or coroutine-closure
+    /// (i.e. an async closure). These are all represented by `hir::Closure`, and all
+    /// have the same `DefKind`.
+    ///
+    /// Note that closures have a `DefId`, but the closure *expression* also has a
+    // `HirId` that is located within the context where the closure appears (and, sadly,
+    // a corresponding `NodeId`, since those are not yet phased out). The parent of
+    // the closure's `DefId` will also be the context where it appears.
+    pub fn is_closure_like(self, def_id: DefId) -> bool {
         matches!(self.def_kind(def_id), DefKind::Closure)
     }
 
@@ -618,12 +621,16 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Returns `true` if the node pointed to by `def_id` is a `static` item.
     #[inline]
     pub fn is_static(self, def_id: DefId) -> bool {
-        matches!(self.def_kind(def_id), DefKind::Static(_))
+        matches!(self.def_kind(def_id), DefKind::Static { .. })
     }
 
     #[inline]
     pub fn static_mutability(self, def_id: DefId) -> Option<hir::Mutability> {
-        if let DefKind::Static(mt) = self.def_kind(def_id) { Some(mt) } else { None }
+        if let DefKind::Static { mutability, .. } = self.def_kind(def_id) {
+            Some(mutability)
+        } else {
+            None
+        }
     }
 
     /// Returns `true` if this is a `static` item with the `#[thread_local]` attribute.
@@ -680,6 +687,9 @@ impl<'tcx> TyCtxt<'tcx> {
 
     /// Return the set of types that should be taken into account when checking
     /// trait bounds on a coroutine's internal state.
+    // FIXME(compiler-errors): We should remove this when the old solver goes away;
+    // and all other usages of this function should go through `bound_coroutine_hidden_types`
+    // instead.
     pub fn coroutine_hidden_types(
         self,
         def_id: DefId,
@@ -690,6 +700,33 @@ impl<'tcx> TyCtxt<'tcx> {
             .map_or_else(|| [].iter(), |l| l.field_tys.iter())
             .filter(|decl| !decl.ignore_for_traits)
             .map(|decl| ty::EarlyBinder::bind(decl.ty))
+    }
+
+    /// Return the set of types that should be taken into account when checking
+    /// trait bounds on a coroutine's internal state. This properly replaces
+    /// `ReErased` with new existential bound lifetimes.
+    pub fn bound_coroutine_hidden_types(
+        self,
+        def_id: DefId,
+    ) -> impl Iterator<Item = ty::EarlyBinder<ty::Binder<'tcx, Ty<'tcx>>>> {
+        let coroutine_layout = self.mir_coroutine_witnesses(def_id);
+        coroutine_layout
+            .as_ref()
+            .map_or_else(|| [].iter(), |l| l.field_tys.iter())
+            .filter(|decl| !decl.ignore_for_traits)
+            .map(move |decl| {
+                let mut vars = vec![];
+                let ty = self.fold_regions(decl.ty, |re, debruijn| {
+                    assert_eq!(re, self.lifetimes.re_erased);
+                    let var = ty::BoundVar::from_usize(vars.len());
+                    vars.push(ty::BoundVariableKind::Region(ty::BrAnon));
+                    ty::Region::new_bound(self, debruijn, ty::BoundRegion { var, kind: ty::BrAnon })
+                });
+                ty::EarlyBinder::bind(ty::Binder::bind_with_vars(
+                    ty,
+                    self.mk_bound_variable_kinds(&vars),
+                ))
+            })
     }
 
     /// Expands the given impl trait type, stopping if the type is recursive.
@@ -870,6 +907,63 @@ impl<'tcx> TyCtxt<'tcx> {
 
         self.mk_args_from_iter(args.into_iter().map(|arg| arg.into()).chain(opt_const_param))
     }
+
+    /// Expand any [weak alias types][weak] contained within the given `value`.
+    ///
+    /// This should be used over other normalization routines in situations where
+    /// it's important not to normalize other alias types and where the predicates
+    /// on the corresponding type alias shouldn't be taken into consideration.
+    ///
+    /// Whenever possible **prefer not to use this function**! Instead, use standard
+    /// normalization routines or if feasible don't normalize at all.
+    ///
+    /// This function comes in handy if you want to mimic the behavior of eager
+    /// type alias expansion in a localized manner.
+    ///
+    /// <div class="warning">
+    /// This delays a bug on overflow! Therefore you need to be certain that the
+    /// contained types get fully normalized at a later stage. Note that even on
+    /// overflow all well-behaved weak alias types get expanded correctly, so the
+    /// result is still useful.
+    /// </div>
+    ///
+    /// [weak]: ty::Weak
+    pub fn expand_weak_alias_tys<T: TypeFoldable<TyCtxt<'tcx>>>(self, value: T) -> T {
+        value.fold_with(&mut WeakAliasTypeExpander { tcx: self, depth: 0 })
+    }
+
+    /// Peel off all [weak alias types] in this type until there are none left.
+    ///
+    /// This only expands weak alias types in “head” / outermost positions. It can
+    /// be used over [expand_weak_alias_tys] as an optimization in situations where
+    /// one only really cares about the *kind* of the final aliased type but not
+    /// the types the other constituent types alias.
+    ///
+    /// <div class="warning">
+    /// This delays a bug on overflow! Therefore you need to be certain that the
+    /// type gets fully normalized at a later stage.
+    /// </div>
+    ///
+    /// [weak]: ty::Weak
+    /// [expand_weak_alias_tys]: Self::expand_weak_alias_tys
+    pub fn peel_off_weak_alias_tys(self, mut ty: Ty<'tcx>) -> Ty<'tcx> {
+        let ty::Alias(ty::Weak, _) = ty.kind() else { return ty };
+
+        let limit = self.recursion_limit();
+        let mut depth = 0;
+
+        while let ty::Alias(ty::Weak, alias) = ty.kind() {
+            if !limit.value_within_limit(depth) {
+                let guar = self.dcx().delayed_bug("overflow expanding weak alias type");
+                return Ty::new_error(self, guar);
+            }
+
+            ty = self.type_of(alias.def_id).instantiate(self, alias.args);
+            depth += 1;
+        }
+
+        ty
+    }
 }
 
 struct OpaqueTypeExpander<'tcx> {
@@ -939,8 +1033,10 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
                 Some(expanded_ty) => *expanded_ty,
                 None => {
                     if matches!(self.inspect_coroutine_fields, InspectCoroutineFields::Yes) {
-                        for bty in self.tcx.coroutine_hidden_types(def_id) {
-                            let hidden_ty = bty.instantiate(self.tcx, args);
+                        for bty in self.tcx.bound_coroutine_hidden_types(def_id) {
+                            let hidden_ty = self.tcx.instantiate_bound_regions_with_erased(
+                                bty.instantiate(self.tcx, args),
+                            );
                             self.fold_ty(hidden_ty);
                         }
                     }
@@ -1002,6 +1098,42 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
         } else {
             p.super_fold_with(self)
         }
+    }
+}
+
+struct WeakAliasTypeExpander<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    depth: usize,
+}
+
+impl<'tcx> TypeFolder<TyCtxt<'tcx>> for WeakAliasTypeExpander<'tcx> {
+    fn interner(&self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+
+    fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
+        if !ty.has_type_flags(ty::TypeFlags::HAS_TY_WEAK) {
+            return ty;
+        }
+        let ty::Alias(ty::Weak, alias) = ty.kind() else {
+            return ty.super_fold_with(self);
+        };
+        if !self.tcx.recursion_limit().value_within_limit(self.depth) {
+            let guar = self.tcx.dcx().delayed_bug("overflow expanding weak alias type");
+            return Ty::new_error(self.tcx, guar);
+        }
+
+        self.depth += 1;
+        ensure_sufficient_stack(|| {
+            self.tcx.type_of(alias.def_id).instantiate(self.tcx, alias.args).fold_with(self)
+        })
+    }
+
+    fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
+        if !ct.ty().has_type_flags(ty::TypeFlags::HAS_TY_WEAK) {
+            return ct;
+        }
+        ct.super_fold_with(self)
     }
 }
 
@@ -1110,12 +1242,12 @@ impl<'tcx> Ty<'tcx> {
             | ty::Str
             | ty::Never
             | ty::Ref(..)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::FnDef(..)
             | ty::Error(_)
             | ty::FnPtr(_) => true,
             ty::Tuple(fields) => fields.iter().all(Self::is_trivially_freeze),
-            ty::Slice(elem_ty) | ty::Array(elem_ty, _) => elem_ty.is_trivially_freeze(),
+            ty::Pat(ty, _) | ty::Slice(ty) | ty::Array(ty, _) => ty.is_trivially_freeze(),
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
@@ -1150,12 +1282,12 @@ impl<'tcx> Ty<'tcx> {
             | ty::Str
             | ty::Never
             | ty::Ref(..)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::FnDef(..)
             | ty::Error(_)
             | ty::FnPtr(_) => true,
             ty::Tuple(fields) => fields.iter().all(Self::is_trivially_unpin),
-            ty::Slice(elem_ty) | ty::Array(elem_ty, _) => elem_ty.is_trivially_unpin(),
+            ty::Pat(ty, _) | ty::Slice(ty) | ty::Array(ty, _) => ty.is_trivially_unpin(),
             ty::Adt(..)
             | ty::Bound(..)
             | ty::Closure(..)
@@ -1271,10 +1403,10 @@ impl<'tcx> Ty<'tcx> {
             //
             // Because this function is "shallow", we return `true` for these composites regardless
             // of the type(s) contained within.
-            ty::Ref(..) | ty::Array(..) | ty::Slice(_) | ty::Tuple(..) => true,
+            ty::Pat(..) | ty::Ref(..) | ty::Array(..) | ty::Slice(_) | ty::Tuple(..) => true,
 
             // Raw pointers use bitwise comparison.
-            ty::RawPtr(_) | ty::FnPtr(_) => true,
+            ty::RawPtr(_, _) | ty::FnPtr(_) => true,
 
             // Floating point numbers are not `Eq`.
             ty::Float(_) => false,
@@ -1318,6 +1450,7 @@ impl<'tcx> Ty<'tcx> {
         ty
     }
 
+    // FIXME(compiler-errors): Think about removing this.
     #[inline]
     pub fn outer_exclusive_binder(self) -> ty::DebruijnIndex {
         self.0.outer_exclusive_binder
@@ -1366,7 +1499,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
         match *self_arg_ty.kind() {
             _ if is_self_ty(self_arg_ty) => ByValue,
             ty::Ref(region, ty, mutbl) if is_self_ty(ty) => ByReference(region, mutbl),
-            ty::RawPtr(ty::TypeAndMut { ty, mutbl }) if is_self_ty(ty) => ByRawPointer(mutbl),
+            ty::RawPtr(ty, mutbl) if is_self_ty(ty) => ByRawPointer(mutbl),
             ty::Adt(def, _) if def.is_box() && is_self_ty(self_arg_ty.boxed_ty()) => ByBox,
             _ => Other,
         }
@@ -1391,7 +1524,7 @@ pub fn needs_drop_components<'tcx>(
         | ty::FnDef(..)
         | ty::FnPtr(_)
         | ty::Char
-        | ty::RawPtr(_)
+        | ty::RawPtr(_, _)
         | ty::Ref(..)
         | ty::Str => Ok(SmallVec::new()),
 
@@ -1400,7 +1533,7 @@ pub fn needs_drop_components<'tcx>(
 
         ty::Dynamic(..) | ty::Error(_) => Err(AlwaysRequiresDrop),
 
-        ty::Slice(ty) => needs_drop_components(tcx, ty),
+        ty::Pat(ty, _) | ty::Slice(ty) => needs_drop_components(tcx, ty),
         ty::Array(elem_ty, size) => {
             match needs_drop_components(tcx, elem_ty) {
                 Ok(v) if v.is_empty() => Ok(v),
@@ -1446,7 +1579,7 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
         | ty::Infer(ty::IntVar(_))
         | ty::Infer(ty::FloatVar(_))
         | ty::Str
-        | ty::RawPtr(_)
+        | ty::RawPtr(_, _)
         | ty::Ref(..)
         | ty::FnDef(..)
         | ty::FnPtr(_)
@@ -1469,7 +1602,7 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
         | ty::CoroutineWitness(..)
         | ty::Adt(..) => false,
 
-        ty::Array(ty, _) | ty::Slice(ty) => is_trivially_const_drop(ty),
+        ty::Array(ty, _) | ty::Slice(ty) | ty::Pat(ty, _) => is_trivially_const_drop(ty),
 
         ty::Tuple(tys) => tys.iter().all(|ty| is_trivially_const_drop(ty)),
     }
@@ -1480,16 +1613,18 @@ pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
 /// let v = self.iter().map(|p| p.fold_with(folder)).collect::<SmallVec<[_; 8]>>();
 /// folder.tcx().intern_*(&v)
 /// ```
-pub fn fold_list<'tcx, F, T>(
-    list: &'tcx ty::List<T>,
+pub fn fold_list<'tcx, F, L, T>(
+    list: L,
     folder: &mut F,
-    intern: impl FnOnce(TyCtxt<'tcx>, &[T]) -> &'tcx ty::List<T>,
-) -> Result<&'tcx ty::List<T>, F::Error>
+    intern: impl FnOnce(TyCtxt<'tcx>, &[T]) -> L,
+) -> Result<L, F::Error>
 where
     F: FallibleTypeFolder<TyCtxt<'tcx>>,
+    L: AsRef<[T]>,
     T: TypeFoldable<TyCtxt<'tcx>> + PartialEq + Copy,
 {
-    let mut iter = list.iter();
+    let slice = list.as_ref();
+    let mut iter = slice.iter().copied();
     // Look for the first element that changed
     match iter.by_ref().enumerate().find_map(|(i, t)| match t.try_fold_with(folder) {
         Ok(new_t) if new_t == t => None,
@@ -1497,8 +1632,8 @@ where
     }) {
         Some((i, Ok(new_t))) => {
             // An element changed, prepare to intern the resulting list
-            let mut new_list = SmallVec::<[_; 8]>::with_capacity(list.len());
-            new_list.extend_from_slice(&list[..i]);
+            let mut new_list = SmallVec::<[_; 8]>::with_capacity(slice.len());
+            new_list.extend_from_slice(&slice[..i]);
             new_list.push(new_t);
             for t in iter {
                 new_list.push(t.try_fold_with(folder)?)
@@ -1519,8 +1654,8 @@ pub struct AlwaysRequiresDrop;
 /// with their underlying types.
 pub fn reveal_opaque_types_in_bounds<'tcx>(
     tcx: TyCtxt<'tcx>,
-    val: &'tcx ty::List<ty::Clause<'tcx>>,
-) -> &'tcx ty::List<ty::Clause<'tcx>> {
+    val: ty::Clauses<'tcx>,
+) -> ty::Clauses<'tcx> {
     let mut visitor = OpaqueTypeExpander {
         seen_opaque_tys: FxHashSet::default(),
         expanded_cache: FxHashMap::default(),
@@ -1549,9 +1684,18 @@ pub fn is_doc_notable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         .any(|items| items.iter().any(|item| item.has_name(sym::notable_trait)))
 }
 
-/// Determines whether an item is an intrinsic by Abi.
-pub fn is_intrinsic(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    matches!(tcx.fn_sig(def_id).skip_binder().abi(), Abi::RustIntrinsic | Abi::PlatformIntrinsic)
+/// Determines whether an item is an intrinsic (which may be via Abi or via the `rustc_intrinsic` attribute)
+pub fn intrinsic_raw(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::IntrinsicDef> {
+    if matches!(tcx.fn_sig(def_id).skip_binder().abi(), Abi::RustIntrinsic)
+        || tcx.has_attr(def_id, sym::rustc_intrinsic)
+    {
+        Some(ty::IntrinsicDef {
+            name: tcx.item_name(def_id.into()),
+            must_be_overridden: tcx.has_attr(def_id, sym::rustc_intrinsic_must_be_overridden),
+        })
+    } else {
+        None
+    }
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -1559,7 +1703,7 @@ pub fn provide(providers: &mut Providers) {
         reveal_opaque_types_in_bounds,
         is_doc_hidden,
         is_doc_notable_trait,
-        is_intrinsic,
+        intrinsic_raw,
         ..*providers
     }
 }

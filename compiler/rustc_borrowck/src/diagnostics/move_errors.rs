@@ -1,7 +1,7 @@
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
 
-use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder};
+use rustc_errors::{Applicability, Diag};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty};
 use rustc_mir_dataflow::move_paths::{LookupResult, MovePathIndex};
@@ -287,11 +287,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         self.buffer_error(err);
     }
 
-    fn report_cannot_move_from_static(
-        &mut self,
-        place: Place<'tcx>,
-        span: Span,
-    ) -> DiagnosticBuilder<'tcx> {
+    fn report_cannot_move_from_static(&mut self, place: Place<'tcx>, span: Span) -> Diag<'tcx> {
         let description = if place.projection.len() == 1 {
             format!("static item {}", self.describe_any_place(place.as_ref()))
         } else {
@@ -313,7 +309,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         deref_target_place: Place<'tcx>,
         span: Span,
         use_spans: Option<UseSpans<'tcx>>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         // Inspect the type of the content behind the
         // borrow to provide feedback about why this
         // was a move rather than a copy.
@@ -437,9 +433,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         err
     }
 
-    fn add_move_hints(&self, error: GroupedMoveError<'tcx>, err: &mut Diagnostic, span: Span) {
+    fn add_move_hints(&self, error: GroupedMoveError<'tcx>, err: &mut Diag<'_>, span: Span) {
         match error {
-            GroupedMoveError::MovesFromPlace { mut binds_to, move_from, .. } => {
+            GroupedMoveError::MovesFromPlace {
+                mut binds_to, move_from, span: other_span, ..
+            } => {
                 self.add_borrow_suggestions(err, span);
                 if binds_to.is_empty() {
                     let place_ty = move_from.ty(self.body, self.infcx.tcx).ty;
@@ -448,12 +446,19 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                         None => "value".to_string(),
                     };
 
-                    err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
-                        is_partial_move: false,
-                        ty: place_ty,
-                        place: &place_desc,
-                        span,
-                    });
+                    if let Some(expr) = self.find_expr(span) {
+                        self.suggest_cloning(err, place_ty, expr, self.find_expr(other_span));
+                    }
+
+                    err.subdiagnostic(
+                        self.dcx(),
+                        crate::session_diagnostics::TypeNoCopy::Label {
+                            is_partial_move: false,
+                            ty: place_ty,
+                            place: &place_desc,
+                            span,
+                        },
+                    );
                 } else {
                     binds_to.sort();
                     binds_to.dedup();
@@ -469,20 +474,28 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
             // No binding. Nothing to suggest.
             GroupedMoveError::OtherIllegalMove { ref original_path, use_spans, .. } => {
-                let span = use_spans.var_or_use();
+                let use_span = use_spans.var_or_use();
                 let place_ty = original_path.ty(self.body, self.infcx.tcx).ty;
                 let place_desc = match self.describe_place(original_path.as_ref()) {
                     Some(desc) => format!("`{desc}`"),
                     None => "value".to_string(),
                 };
-                err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
-                    is_partial_move: false,
-                    ty: place_ty,
-                    place: &place_desc,
-                    span,
-                });
 
-                use_spans.args_subdiag(err, |args_span| {
+                if let Some(expr) = self.find_expr(use_span) {
+                    self.suggest_cloning(err, place_ty, expr, self.find_expr(span));
+                }
+
+                err.subdiagnostic(
+                    self.dcx(),
+                    crate::session_diagnostics::TypeNoCopy::Label {
+                        is_partial_move: false,
+                        ty: place_ty,
+                        place: &place_desc,
+                        span: use_span,
+                    },
+                );
+
+                use_spans.args_subdiag(self.dcx(), err, |args_span| {
                     crate::session_diagnostics::CaptureArgLabel::MoveOutPlace {
                         place: place_desc,
                         args_span,
@@ -494,7 +507,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         }
     }
 
-    fn add_borrow_suggestions(&self, err: &mut Diagnostic, span: Span) {
+    fn add_borrow_suggestions(&self, err: &mut Diag<'_>, span: Span) {
         match self.infcx.tcx.sess.source_map().span_to_snippet(span) {
             Ok(snippet) if snippet.starts_with('*') => {
                 err.span_suggestion_verbose(
@@ -515,7 +528,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         }
     }
 
-    fn add_move_error_suggestions(&self, err: &mut Diagnostic, binds_to: &[Local]) {
+    fn add_move_error_suggestions(&self, err: &mut Diag<'_>, binds_to: &[Local]) {
         let mut suggestions: Vec<(Span, String, String)> = Vec::new();
         for local in binds_to {
             let bind_to = &self.body.local_decls[*local];
@@ -567,7 +580,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         }
     }
 
-    fn add_move_error_details(&self, err: &mut Diagnostic, binds_to: &[Local]) {
+    fn add_move_error_details(&self, err: &mut Diag<'_>, binds_to: &[Local]) {
         for (j, local) in binds_to.iter().enumerate() {
             let bind_to = &self.body.local_decls[*local];
             let binding_span = bind_to.source_info.span;
@@ -580,12 +593,20 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
             if binds_to.len() == 1 {
                 let place_desc = &format!("`{}`", self.local_names[*local].unwrap());
-                err.subdiagnostic(crate::session_diagnostics::TypeNoCopy::Label {
-                    is_partial_move: false,
-                    ty: bind_to.ty,
-                    place: place_desc,
-                    span: binding_span,
-                });
+
+                if let Some(expr) = self.find_expr(binding_span) {
+                    self.suggest_cloning(err, bind_to.ty, expr, None);
+                }
+
+                err.subdiagnostic(
+                    self.dcx(),
+                    crate::session_diagnostics::TypeNoCopy::Label {
+                        is_partial_move: false,
+                        ty: bind_to.ty,
+                        place: place_desc,
+                        span: binding_span,
+                    },
+                );
             }
         }
 
@@ -601,7 +622,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// expansion of a packed struct.
     /// Such errors happen because derive macro expansions shy away from taking
     /// references to the struct's fields since doing so would be undefined behaviour
-    fn add_note_for_packed_struct_derive(&self, err: &mut Diagnostic, local: Local) {
+    fn add_note_for_packed_struct_derive(&self, err: &mut Diag<'_>, local: Local) {
         let local_place: PlaceRef<'tcx> = local.into();
         let local_ty = local_place.ty(self.body.local_decls(), self.infcx.tcx).ty.peel_refs();
 

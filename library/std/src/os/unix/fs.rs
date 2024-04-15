@@ -127,11 +127,7 @@ pub trait FileExt {
                 Err(e) => return Err(e),
             }
         }
-        if !buf.is_empty() {
-            Err(io::const_io_error!(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer",))
-        } else {
-            Ok(())
-        }
+        if !buf.is_empty() { Err(io::Error::READ_EXACT_EOF) } else { Ok(()) }
     }
 
     /// Writes a number of bytes starting from a given offset.
@@ -249,10 +245,7 @@ pub trait FileExt {
         while !buf.is_empty() {
             match self.write_at(buf, offset) {
                 Ok(0) => {
-                    return Err(io::const_io_error!(
-                        io::ErrorKind::WriteZero,
-                        "failed to write whole buffer",
-                    ));
+                    return Err(io::Error::WRITE_ALL_EOF);
                 }
                 Ok(n) => {
                     buf = &buf[n..];
@@ -397,7 +390,6 @@ pub trait OpenOptionsExt {
     ///
     /// ```no_run
     /// # #![feature(rustc_private)]
-    /// use libc;
     /// use std::fs::OpenOptions;
     /// use std::os::unix::fs::OpenOptionsExt;
     ///

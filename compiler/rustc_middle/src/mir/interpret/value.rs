@@ -3,7 +3,7 @@ use std::fmt;
 use either::{Either, Left, Right};
 
 use rustc_apfloat::{
-    ieee::{Double, Single},
+    ieee::{Double, Half, Quad, Single},
     Float,
 };
 use rustc_macros::HashStable;
@@ -37,7 +37,7 @@ pub enum Scalar<Prov = CtfeProvenance> {
     Ptr(Pointer<Prov>, u8),
 }
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
 static_assert_size!(Scalar, 24);
 
 // We want the `Debug` output to be readable as it is used by `derive(Debug)` for
@@ -202,12 +202,22 @@ impl<Prov> Scalar<Prov> {
     }
 
     #[inline]
+    pub fn from_f16(f: Half) -> Self {
+        Scalar::Int(f.into())
+    }
+
+    #[inline]
     pub fn from_f32(f: Single) -> Self {
         Scalar::Int(f.into())
     }
 
     #[inline]
     pub fn from_f64(f: Double) -> Self {
+        Scalar::Int(f.into())
+    }
+
+    #[inline]
+    pub fn from_f128(f: Quad) -> Self {
         Scalar::Int(f.into())
     }
 
@@ -423,12 +433,22 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     }
 
     #[inline]
+    pub fn to_f16(self) -> InterpResult<'tcx, Half> {
+        self.to_float()
+    }
+
+    #[inline]
     pub fn to_f32(self) -> InterpResult<'tcx, Single> {
         self.to_float()
     }
 
     #[inline]
     pub fn to_f64(self) -> InterpResult<'tcx, Double> {
+        self.to_float()
+    }
+
+    #[inline]
+    pub fn to_f128(self) -> InterpResult<'tcx, Quad> {
         self.to_float()
     }
 }

@@ -92,7 +92,7 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryWraps {
 
         // Abort if the method is implementing a trait or of it a trait method.
         let hir_id = cx.tcx.local_def_id_to_hir_id(def_id);
-        if let Some(Node::Item(item)) = cx.tcx.hir().find_parent(hir_id) {
+        if let Node::Item(item) = cx.tcx.parent_hir_node(hir_id) {
             if matches!(
                 item.kind,
                 ItemKind::Impl(Impl { of_trait: Some(_), .. }) | ItemKind::Trait(..)
@@ -156,7 +156,7 @@ impl<'tcx> LateLintPass<'tcx> for UnnecessaryWraps {
                 )
             };
 
-            span_lint_and_then(cx, UNNECESSARY_WRAPS, span, lint_msg.as_str(), |diag| {
+            span_lint_and_then(cx, UNNECESSARY_WRAPS, span, lint_msg, |diag| {
                 diag.span_suggestion(
                     fn_decl.output.span(),
                     return_type_sugg_msg,

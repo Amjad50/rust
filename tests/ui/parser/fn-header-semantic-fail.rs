@@ -1,6 +1,6 @@
 // Ensures that all `fn` forms can have all the function qualifiers syntactically.
 
-// edition:2018
+//@ edition:2018
 
 #![feature(const_extern_fn)]
 
@@ -48,6 +48,9 @@ fn main() {
         const fn fe3(); //~ ERROR functions in `extern` blocks cannot have qualifiers
         extern "C" fn fe4(); //~ ERROR functions in `extern` blocks cannot have qualifiers
         const async unsafe extern "C" fn fe5(); //~ ERROR functions in `extern` blocks
-        //~^ ERROR functions cannot be both `const` and `async`
+        //~| ERROR functions in `extern` blocks
+        //~| ERROR functions in `extern` blocks
+        //~| ERROR functions in `extern` blocks
+        //~| ERROR functions cannot be both `const` and `async`
     }
 }

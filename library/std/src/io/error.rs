@@ -75,11 +75,47 @@ impl fmt::Debug for Error {
     }
 }
 
+/// Common errors constants for use in std
+#[allow(dead_code)]
+impl Error {
+    pub(crate) const INVALID_UTF8: Self =
+        const_io_error!(ErrorKind::InvalidData, "stream did not contain valid UTF-8");
+
+    pub(crate) const READ_EXACT_EOF: Self =
+        const_io_error!(ErrorKind::UnexpectedEof, "failed to fill whole buffer");
+
+    pub(crate) const UNKNOWN_THREAD_COUNT: Self = const_io_error!(
+        ErrorKind::NotFound,
+        "The number of hardware threads is not known for the target platform"
+    );
+
+    pub(crate) const UNSUPPORTED_PLATFORM: Self =
+        const_io_error!(ErrorKind::Unsupported, "operation not supported on this platform");
+
+    pub(crate) const WRITE_ALL_EOF: Self =
+        const_io_error!(ErrorKind::WriteZero, "failed to write whole buffer");
+
+    pub(crate) const ZERO_TIMEOUT: Self =
+        const_io_error!(ErrorKind::InvalidInput, "cannot set a 0 duration timeout");
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<alloc::ffi::NulError> for Error {
     /// Converts a [`alloc::ffi::NulError`] into a [`Error`].
     fn from(_: alloc::ffi::NulError) -> Error {
         const_io_error!(ErrorKind::InvalidInput, "data provided contains a nul byte")
+    }
+}
+
+#[stable(feature = "io_error_from_try_reserve", since = "1.78.0")]
+impl From<alloc::collections::TryReserveError> for Error {
+    /// Converts `TryReserveError` to an error with [`ErrorKind::OutOfMemory`].
+    ///
+    /// `TryReserveError` won't be available as the error `source()`,
+    /// but this may change in the future.
+    fn from(_: alloc::collections::TryReserveError) -> Error {
+        // ErrorData::Custom allocates, which isn't great for handling OOM errors.
+        ErrorKind::OutOfMemory.into()
     }
 }
 

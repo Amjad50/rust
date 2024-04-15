@@ -11,6 +11,7 @@ use crate::{
     ffi::CStr,
     hint, io,
     mem::ManuallyDrop,
+    num::NonZero,
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
     sys::thread_local_dtor::run_dtors,
@@ -97,7 +98,7 @@ impl Thread {
         });
 
         unsafe extern "C" fn trampoline(exinf: isize) {
-            let p_inner: *mut ThreadInner = crate::ptr::from_exposed_addr_mut(exinf as usize);
+            let p_inner: *mut ThreadInner = crate::ptr::with_exposed_provenance_mut(exinf as usize);
             // Safety: `ThreadInner` is alive at this point
             let inner = unsafe { &*p_inner };
 
@@ -180,7 +181,7 @@ impl Thread {
             abi::acre_tsk(&abi::T_CTSK {
                 // Activate this task immediately
                 tskatr: abi::TA_ACT,
-                exinf: p_inner.as_ptr().expose_addr() as abi::EXINF,
+                exinf: p_inner.as_ptr().expose_provenance() as abi::EXINF,
                 // The entry point
                 task: Some(trampoline),
                 // Inherit the calling task's base priority
@@ -307,16 +308,6 @@ impl Drop for Thread {
     }
 }
 
-pub mod guard {
-    pub type Guard = !;
-    pub unsafe fn current() -> Option<Guard> {
-        None
-    }
-    pub unsafe fn init() -> Option<Guard> {
-        None
-    }
-}
-
 /// Terminate and delete the specified task.
 ///
 /// This function will abort if `deleted_task` refers to the calling task.
@@ -363,6 +354,6 @@ unsafe fn terminate_and_delete_current_task() -> ! {
     unsafe { crate::hint::unreachable_unchecked() };
 }
 
-pub fn available_parallelism() -> io::Result<crate::num::NonZeroUsize> {
+pub fn available_parallelism() -> io::Result<NonZero<usize>> {
     super::unsupported()
 }

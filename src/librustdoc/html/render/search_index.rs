@@ -1,9 +1,12 @@
+pub(crate) mod encode;
+
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
+use rustc_span::sym;
 use rustc_span::symbol::Symbol;
 use serde::ser::{Serialize, SerializeSeq, SerializeStruct, Serializer};
 use thin_vec::ThinVec;
@@ -16,12 +19,46 @@ use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
 use crate::html::render::{self, IndexItem, IndexItemFunctionType, RenderType, RenderTypeId};
 
+use encode::{bitmap_to_string, write_vlqhex_to_string};
+
+/// The serialized search description sharded version
+///
+/// The `index` is a JSON-encoded list of names and other information.
+///
+/// The desc has newlined descriptions, split up by size into 128KiB shards.
+/// For example, `(4, "foo\nbar\nbaz\nquux")`.
+///
+/// There is no single, optimal size for these shards, because it depends on
+/// configuration values that we can't predict or control, such as the version
+/// of HTTP used (HTTP/1.1 would work better with larger files, while HTTP/2
+/// and 3 are more agnostic), transport compression (gzip, zstd, etc), whether
+/// the search query is going to produce a large number of results or a small
+/// number, the bandwidth delay product of the network...
+///
+/// Gzipping some standard library descriptions to guess what transport
+/// compression will do, the compressed file sizes can be as small as 4.9KiB
+/// or as large as 18KiB (ignoring the final 1.9KiB shard of leftovers).
+/// A "reasonable" range for files is for them to be bigger than 1KiB,
+/// since that's about the amount of data that can be transferred in a
+/// single TCP packet, and 64KiB, the maximum amount of data that
+/// TCP can transfer in a single round trip without extensions.
+///
+/// [1]: https://en.wikipedia.org/wiki/Maximum_transmission_unit#MTUs_for_common_media
+/// [2]: https://en.wikipedia.org/wiki/Sliding_window_protocol#Basic_concept
+/// [3]: https://learn.microsoft.com/en-us/troubleshoot/windows-server/networking/description-tcp-features
+pub(crate) struct SerializedSearchIndex {
+    pub(crate) index: String,
+    pub(crate) desc: Vec<(usize, String)>,
+}
+
+const DESC_INDEX_SHARD_LEN: usize = 128 * 1024;
+
 /// Builds the search index from the collected metadata
 pub(crate) fn build_index<'tcx>(
     krate: &clean::Crate,
     cache: &mut Cache,
     tcx: TyCtxt<'tcx>,
-) -> String {
+) -> SerializedSearchIndex {
     let mut itemid_to_pathid = FxHashMap::default();
     let mut primitives = FxHashMap::default();
     let mut associated_types = FxHashMap::default();
@@ -64,8 +101,9 @@ pub(crate) fn build_index<'tcx>(
     // Sort search index items. This improves the compressibility of the search index.
     cache.search_index.sort_unstable_by(|k1, k2| {
         // `sort_unstable_by_key` produces lifetime errors
-        let k1 = (&k1.path, k1.name.as_str(), &k1.ty, &k1.parent);
-        let k2 = (&k2.path, k2.name.as_str(), &k2.ty, &k2.parent);
+        // HACK(rustdoc): should not be sorting `CrateNum` or `DefIndex`, this will soon go away, too
+        let k1 = (&k1.path, k1.name.as_str(), &k1.ty, k1.parent.map(|id| (id.index, id.krate)));
+        let k2 = (&k2.path, k2.name.as_str(), &k2.ty, k2.parent.map(|id| (id.index, id.krate)));
         Ord::cmp(&k1, &k2)
     });
 
@@ -317,7 +355,6 @@ pub(crate) fn build_index<'tcx>(
         .collect::<Vec<_>>();
 
     struct CrateData<'a> {
-        doc: String,
         items: Vec<&'a IndexItem>,
         paths: Vec<(ItemType, Vec<Symbol>)>,
         // The String is alias name and the vec is the list of the elements with this alias.
@@ -326,6 +363,11 @@ pub(crate) fn build_index<'tcx>(
         aliases: &'a BTreeMap<String, Vec<usize>>,
         // Used when a type has more than one impl with an associated item with the same name.
         associated_item_disambiguators: &'a Vec<(usize, String)>,
+        // A list of shard lengths encoded as vlqhex. See the comment in write_vlqhex_to_string
+        // for information on the format.
+        desc_index: String,
+        // A list of items with no description. This is eventually turned into a bitmap.
+        empty_desc: Vec<u32>,
     }
 
     struct Paths {
@@ -407,7 +449,6 @@ pub(crate) fn build_index<'tcx>(
             let mut names = Vec::with_capacity(self.items.len());
             let mut types = String::with_capacity(self.items.len());
             let mut full_paths = Vec::with_capacity(self.items.len());
-            let mut descriptions = Vec::with_capacity(self.items.len());
             let mut parents = Vec::with_capacity(self.items.len());
             let mut functions = String::with_capacity(self.items.len());
             let mut deprecated = Vec::with_capacity(self.items.len());
@@ -430,7 +471,6 @@ pub(crate) fn build_index<'tcx>(
                 parents.push(item.parent_idx.map(|x| x + 1).unwrap_or(0));
 
                 names.push(item.name.as_str());
-                descriptions.push(&item.desc);
 
                 if !item.path.is_empty() {
                     full_paths.push((index, &item.path));
@@ -442,7 +482,8 @@ pub(crate) fn build_index<'tcx>(
                 }
 
                 if item.deprecation.is_some() {
-                    deprecated.push(index);
+                    // bitmasks always use 1-indexing for items, with 0 as the crate itself
+                    deprecated.push(u32::try_from(index + 1).unwrap());
                 }
             }
 
@@ -453,17 +494,16 @@ pub(crate) fn build_index<'tcx>(
             let has_aliases = !self.aliases.is_empty();
             let mut crate_data =
                 serializer.serialize_struct("CrateData", if has_aliases { 9 } else { 8 })?;
-            crate_data.serialize_field("doc", &self.doc)?;
             crate_data.serialize_field("t", &types)?;
             crate_data.serialize_field("n", &names)?;
-            // Serialize as an array of item indices and full paths
             crate_data.serialize_field("q", &full_paths)?;
-            crate_data.serialize_field("d", &descriptions)?;
             crate_data.serialize_field("i", &parents)?;
             crate_data.serialize_field("f", &functions)?;
-            crate_data.serialize_field("c", &deprecated)?;
+            crate_data.serialize_field("D", &self.desc_index)?;
             crate_data.serialize_field("p", &paths)?;
             crate_data.serialize_field("b", &self.associated_item_disambiguators)?;
+            crate_data.serialize_field("c", &bitmap_to_string(&deprecated))?;
+            crate_data.serialize_field("e", &bitmap_to_string(&self.empty_desc))?;
             if has_aliases {
                 crate_data.serialize_field("a", &self.aliases)?;
             }
@@ -471,16 +511,58 @@ pub(crate) fn build_index<'tcx>(
         }
     }
 
-    // Collect the index into a string
-    format!(
+    let (empty_desc, desc) = {
+        let mut empty_desc = Vec::new();
+        let mut result = Vec::new();
+        let mut set = String::new();
+        let mut len: usize = 0;
+        let mut item_index: u32 = 0;
+        for desc in std::iter::once(&crate_doc).chain(crate_items.iter().map(|item| &item.desc)) {
+            if desc == "" {
+                empty_desc.push(item_index);
+                item_index += 1;
+                continue;
+            }
+            if set.len() >= DESC_INDEX_SHARD_LEN {
+                result.push((len, std::mem::replace(&mut set, String::new())));
+                len = 0;
+            } else if len != 0 {
+                set.push('\n');
+            }
+            set.push_str(&desc);
+            len += 1;
+            item_index += 1;
+        }
+        result.push((len, std::mem::replace(&mut set, String::new())));
+        (empty_desc, result)
+    };
+
+    let desc_index = {
+        let mut desc_index = String::with_capacity(desc.len() * 4);
+        for &(len, _) in desc.iter() {
+            write_vlqhex_to_string(len.try_into().unwrap(), &mut desc_index);
+        }
+        desc_index
+    };
+
+    assert_eq!(
+        crate_items.len() + 1,
+        desc.iter().map(|(len, _)| *len).sum::<usize>() + empty_desc.len()
+    );
+
+    // The index, which is actually used to search, is JSON
+    // It uses `JSON.parse(..)` to actually load, since JSON
+    // parses faster than the full JavaScript syntax.
+    let index = format!(
         r#"["{}",{}]"#,
         krate.name(tcx),
         serde_json::to_string(&CrateData {
-            doc: crate_doc,
             items: crate_items,
             paths: crate_paths,
             aliases: &aliases,
             associated_item_disambiguators: &associated_item_disambiguators,
+            desc_index,
+            empty_desc,
         })
         .expect("failed serde conversion")
         // All these `replace` calls are because we have to go through JS string for JSON content.
@@ -488,7 +570,8 @@ pub(crate) fn build_index<'tcx>(
         .replace('\'', r"\'")
         // We need to escape double quotes for the JSON.
         .replace("\\\"", "\\\\\"")
-    )
+    );
+    SerializedSearchIndex { index, desc }
 }
 
 pub(crate) fn get_function_type_for_search<'tcx>(
@@ -566,6 +649,7 @@ fn get_index_type_id(
         // The type parameters are converted to generics in `simplify_fn_type`
         clean::Slice(_) => Some(RenderTypeId::Primitive(clean::PrimitiveType::Slice)),
         clean::Array(_, _) => Some(RenderTypeId::Primitive(clean::PrimitiveType::Array)),
+        clean::BareFunction(_) => Some(RenderTypeId::Primitive(clean::PrimitiveType::Fn)),
         clean::Tuple(ref n) if n.is_empty() => {
             Some(RenderTypeId::Primitive(clean::PrimitiveType::Unit))
         }
@@ -584,7 +668,7 @@ fn get_index_type_id(
             }
         }
         // Not supported yet
-        clean::BareFunction(_) | clean::Generic(_) | clean::ImplTrait(_) | clean::Infer => None,
+        clean::Type::Pat(..) | clean::Generic(_) | clean::ImplTrait(_) | clean::Infer => None,
     }
 }
 
@@ -785,6 +869,42 @@ fn simplify_fn_type<'tcx, 'a>(
             );
         }
         res.push(get_index_type(arg, ty_generics, rgen));
+    } else if let Type::BareFunction(ref bf) = *arg {
+        let mut ty_generics = Vec::new();
+        for ty in bf.decl.inputs.values.iter().map(|arg| &arg.type_) {
+            simplify_fn_type(
+                self_,
+                generics,
+                ty,
+                tcx,
+                recurse + 1,
+                &mut ty_generics,
+                rgen,
+                is_return,
+                cache,
+            );
+        }
+        // The search index, for simplicity's sake, represents fn pointers and closures
+        // the same way: as a tuple for the parameters, and an associated type for the
+        // return type.
+        let mut ty_output = Vec::new();
+        simplify_fn_type(
+            self_,
+            generics,
+            &bf.decl.output,
+            tcx,
+            recurse + 1,
+            &mut ty_output,
+            rgen,
+            is_return,
+            cache,
+        );
+        let ty_bindings = vec![(RenderTypeId::AssociatedType(sym::Output), ty_output)];
+        res.push(RenderType {
+            id: get_index_type_id(&arg, rgen),
+            bindings: Some(ty_bindings),
+            generics: Some(ty_generics),
+        });
     } else {
         // This is not a type parameter. So for example if we have `T, U: Option<T>`, and we're
         // looking at `Option`, we enter this "else" condition, otherwise if it's `T`, we don't.

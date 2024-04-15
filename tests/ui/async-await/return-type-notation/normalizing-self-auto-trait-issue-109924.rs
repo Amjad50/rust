@@ -1,7 +1,8 @@
-// check-pass
-// revisions: current next
-//[next] compile-flags: -Znext-solver
-// edition:2021
+//@ check-pass
+//@ revisions: current next
+//@ ignore-compare-mode-next-solver (explicit revisions)
+//@[next] compile-flags: -Znext-solver
+//@ edition:2021
 
 #![feature(return_type_notation)]
 //~^ WARN the feature `return_type_notation` is incomplete

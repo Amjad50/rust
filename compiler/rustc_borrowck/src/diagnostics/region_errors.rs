@@ -1,7 +1,7 @@
 //! Error reporting machinery for lifetime errors.
 
 use rustc_data_structures::fx::FxIndexSet;
-use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, MultiSpan};
+use rustc_errors::{Applicability, Diag, ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::Res::Def;
 use rustc_hir::def_id::DefId;
@@ -26,6 +26,9 @@ use rustc_middle::ty::{self, RegionVid, Ty};
 use rustc_middle::ty::{Region, TyCtxt};
 use rustc_span::symbol::{kw, Ident};
 use rustc_span::Span;
+use rustc_trait_selection::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_trait_selection::infer::InferCtxtExt;
+use rustc_trait_selection::traits::{Obligation, ObligationCtxt};
 
 use crate::borrowck_errors;
 use crate::session_diagnostics::{
@@ -73,7 +76,7 @@ impl<'tcx> ConstraintDescription for ConstraintCategory<'tcx> {
 ///
 /// Usually we expect this to either be empty or contain a small number of items, so we can avoid
 /// allocation most of the time.
-pub(crate) struct RegionErrors<'tcx>(Vec<RegionErrorKind<'tcx>>, TyCtxt<'tcx>);
+pub(crate) struct RegionErrors<'tcx>(Vec<(RegionErrorKind<'tcx>, ErrorGuaranteed)>, TyCtxt<'tcx>);
 
 impl<'tcx> RegionErrors<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
@@ -82,14 +85,17 @@ impl<'tcx> RegionErrors<'tcx> {
     #[track_caller]
     pub fn push(&mut self, val: impl Into<RegionErrorKind<'tcx>>) {
         let val = val.into();
-        self.1.sess.dcx().delayed_bug(format!("{val:?}"));
-        self.0.push(val);
+        let guar = self.1.sess.dcx().delayed_bug(format!("{val:?}"));
+        self.0.push((val, guar));
     }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    pub fn into_iter(self) -> impl Iterator<Item = RegionErrorKind<'tcx>> {
+    pub fn into_iter(self) -> impl Iterator<Item = (RegionErrorKind<'tcx>, ErrorGuaranteed)> {
         self.0.into_iter()
+    }
+    pub fn has_errors(&self) -> Option<ErrorGuaranteed> {
+        self.0.get(0).map(|x| x.1)
     }
 }
 
@@ -198,9 +204,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     // For generic associated types (GATs) which implied 'static requirement
     // from higher-ranked trait bounds (HRTB). Try to locate span of the trait
     // and the span which bounded to the trait for adding 'static lifetime suggestion
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
     fn suggest_static_lifetime_for_gat_from_hrtb(
         &self,
-        diag: &mut DiagnosticBuilder<'_>,
+        diag: &mut Diag<'_>,
         lower_bound: RegionVid,
     ) {
         let mut suggestions = vec![];
@@ -214,8 +222,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 if let Some(id) = placeholder.bound.kind.get_id()
                     && let Some(placeholder_id) = id.as_local()
                     && let gat_hir_id = self.infcx.tcx.local_def_id_to_hir_id(placeholder_id)
-                    && let Some(generics_impl) =
-                        hir.get_parent(hir.parent_id(gat_hir_id)).generics()
+                    && let Some(generics_impl) = self
+                        .infcx
+                        .tcx
+                        .parent_hir_node(self.infcx.tcx.parent_hir_id(gat_hir_id))
+                        .generics()
                 {
                     Some((gat_hir_id, generics_impl))
                 } else {
@@ -274,7 +285,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                             .iter()
                             .rfind(|param| param.def_id.to_def_id() == defid)
                             .is_some() {
-                            suggestions.push((bounded_span.shrink_to_hi(), format!(" + 'static")));
+                            suggestions.push((bounded_span.shrink_to_hi(), " + 'static".to_string()));
                         }
                 });
             });
@@ -298,10 +309,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let mut last_unexpected_hidden_region: Option<(Span, Ty<'_>, ty::OpaqueTypeKey<'tcx>)> =
             None;
 
-        for nll_error in nll_errors.into_iter() {
+        for (nll_error, _) in nll_errors.into_iter() {
             match nll_error {
                 RegionErrorKind::TypeTestError { type_test } => {
-                    // Try to convert the lower-bound region into something named we can print for the user.
+                    // Try to convert the lower-bound region into something named we can print for
+                    // the user.
                     let lower_bound_region = self.to_error_region(type_test.lower_bound);
 
                     let type_test_span = type_test.span;
@@ -418,6 +430,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// ```
     ///
     /// Here we would be invoked with `fr = 'a` and `outlived_fr = 'b`.
+    // FIXME: make this translatable
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)]
     pub(crate) fn report_region_error(
         &mut self,
         fr: RegionVid,
@@ -491,10 +506,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             ty::VarianceDiagInfo::None => {}
             ty::VarianceDiagInfo::Invariant { ty, param_index } => {
                 let (desc, note) = match ty.kind() {
-                    ty::RawPtr(ty_mut) => {
-                        assert_eq!(ty_mut.mutbl, rustc_hir::Mutability::Mut);
+                    ty::RawPtr(ty, mutbl) => {
+                        assert_eq!(*mutbl, rustc_hir::Mutability::Mut);
                         (
-                            format!("a mutable pointer to `{}`", ty_mut.ty),
+                            format!("a mutable pointer to `{}`", ty),
                             "mutable pointers are invariant over their type parameter".to_string(),
                         )
                     }
@@ -567,11 +582,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     ///            executing...
     ///    = note: ...therefore, returned references to captured variables will escape the closure
     /// ```
+    #[allow(rustc::diagnostic_outside_of_impl)] // FIXME
     fn report_fnmut_error(
         &self,
         errci: &ErrorConstraintInfo<'tcx>,
         kind: ReturnConstraint,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> Diag<'tcx> {
         let ErrorConstraintInfo { outlived_fr, span, .. } = errci;
 
         let mut output_ty = self.regioncx.universal_regions().unnormalized_output_ty;
@@ -613,13 +629,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 let upvars_map = self.infcx.tcx.upvars_mentioned(def_id).unwrap();
                 let upvar_def_span = self.infcx.tcx.hir().span(def_hir);
                 let upvar_span = upvars_map.get(&def_hir).unwrap().span;
-                diag.subdiagnostic(VarHereDenote::Defined { span: upvar_def_span });
-                diag.subdiagnostic(VarHereDenote::Captured { span: upvar_span });
+                diag.subdiagnostic(self.dcx(), VarHereDenote::Defined { span: upvar_def_span });
+                diag.subdiagnostic(self.dcx(), VarHereDenote::Captured { span: upvar_span });
             }
         }
 
         if let Some(fr_span) = self.give_region_a_name(*outlived_fr).unwrap().span() {
-            diag.subdiagnostic(VarHereDenote::FnMutInferred { span: fr_span });
+            diag.subdiagnostic(self.dcx(), VarHereDenote::FnMutInferred { span: fr_span });
         }
 
         self.suggest_move_on_borrowing_closure(&mut diag);
@@ -640,10 +656,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     ///    |     ^^^^^^^^^^ `x` escapes the function body here
     /// ```
     #[instrument(level = "debug", skip(self))]
-    fn report_escaping_data_error(
-        &self,
-        errci: &ErrorConstraintInfo<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    fn report_escaping_data_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'tcx> {
         let ErrorConstraintInfo { span, category, .. } = errci;
 
         let fr_name_and_span = self.regioncx.get_var_name_and_span_for_region(
@@ -682,12 +695,18 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             borrowck_errors::borrowed_data_escapes_closure(self.infcx.tcx, *span, escapes_from);
 
         if let Some((Some(outlived_fr_name), outlived_fr_span)) = outlived_fr_name_and_span {
+            // FIXME: make this translatable
+            #[allow(rustc::diagnostic_outside_of_impl)]
+            #[allow(rustc::untranslatable_diagnostic)]
             diag.span_label(
                 outlived_fr_span,
                 format!("`{outlived_fr_name}` declared here, outside of the {escapes_from} body",),
             );
         }
 
+        // FIXME: make this translatable
+        #[allow(rustc::diagnostic_outside_of_impl)]
+        #[allow(rustc::untranslatable_diagnostic)]
         if let Some((Some(fr_name), fr_span)) = fr_name_and_span {
             diag.span_label(
                 fr_span,
@@ -711,6 +730,9 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 let outlived_fr_region_name = self.give_region_a_name(errci.outlived_fr).unwrap();
                 outlived_fr_region_name.highlight_region_name(&mut diag);
 
+                // FIXME: make this translatable
+                #[allow(rustc::diagnostic_outside_of_impl)]
+                #[allow(rustc::untranslatable_diagnostic)]
                 diag.span_label(
                     *span,
                     format!(
@@ -742,7 +764,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     ///    |     ^^^^^^^^^^^^^^ function was supposed to return data with lifetime `'a` but it
     ///    |                    is returning data with lifetime `'b`
     /// ```
-    fn report_general_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> DiagnosticBuilder<'tcx> {
+    #[allow(rustc::diagnostic_outside_of_impl)] // FIXME
+    fn report_general_error(&self, errci: &ErrorConstraintInfo<'tcx>) -> Diag<'tcx> {
         let ErrorConstraintInfo {
             fr,
             fr_is_local,
@@ -785,11 +808,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             },
         };
 
-        diag.subdiagnostic(err_category);
+        diag.subdiagnostic(self.dcx(), err_category);
 
         self.add_static_impl_trait_suggestion(&mut diag, *fr, fr_name, *outlived_fr);
         self.suggest_adding_lifetime_params(&mut diag, *fr, *outlived_fr);
         self.suggest_move_on_borrowing_closure(&mut diag);
+        self.suggest_deref_closure_value(&mut diag);
 
         diag
     }
@@ -803,9 +827,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// LL |     fn iter_values_anon(&self) -> impl Iterator<Item=u32> + 'a {
     ///    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     /// ```
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
     fn add_static_impl_trait_suggestion(
         &self,
-        diag: &mut Diagnostic,
+        diag: &mut Diag<'_>,
         fr: RegionVid,
         // We need to pass `fr_name` - computing it again will label it twice.
         fr_name: RegionName,
@@ -894,7 +920,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     fn maybe_suggest_constrain_dyn_trait_impl(
         &self,
-        diag: &mut Diagnostic,
+        diag: &mut Diag<'_>,
         f: Region<'tcx>,
         o: Region<'tcx>,
         category: &ConstraintCategory<'tcx>,
@@ -953,10 +979,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         self.suggest_constrain_dyn_trait_in_impl(diag, &visitor.0, ident, self_ty);
     }
 
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
     #[instrument(skip(self, err), level = "debug")]
     fn suggest_constrain_dyn_trait_in_impl(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         found_dids: &FxIndexSet<DefId>,
         ident: Ident,
         self_ty: &hir::Ty<'_>,
@@ -976,7 +1004,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     ident.span,
                     "calling this method introduces the `impl`'s `'static` requirement",
                 );
-                err.subdiagnostic(RequireStaticErr::UsedImpl { multi_span });
+                err.subdiagnostic(self.dcx(), RequireStaticErr::UsedImpl { multi_span });
                 err.span_suggestion_verbose(
                     span.shrink_to_hi(),
                     "consider relaxing the implicit `'static` requirement",
@@ -989,12 +1017,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         suggested
     }
 
-    fn suggest_adding_lifetime_params(
-        &self,
-        diag: &mut Diagnostic,
-        sub: RegionVid,
-        sup: RegionVid,
-    ) {
+    fn suggest_adding_lifetime_params(&self, diag: &mut Diag<'_>, sub: RegionVid, sup: RegionVid) {
         let (Some(sub), Some(sup)) = (self.to_error_region(sub), self.to_error_region(sup)) else {
             return;
         };
@@ -1020,7 +1043,150 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         suggest_adding_lifetime_params(self.infcx.tcx, sub, ty_sup, ty_sub, diag);
     }
 
-    fn suggest_move_on_borrowing_closure(&self, diag: &mut Diagnostic) {
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
+    /// When encountering a lifetime error caused by the return type of a closure, check the
+    /// corresponding trait bound and see if dereferencing the closure return value would satisfy
+    /// them. If so, we produce a structured suggestion.
+    fn suggest_deref_closure_value(&self, diag: &mut Diag<'_>) {
+        let tcx = self.infcx.tcx;
+        let map = tcx.hir();
+
+        // Get the closure return value and type.
+        let body_id = map.body_owned_by(self.mir_def_id());
+        let body = &map.body(body_id);
+        let value = &body.value.peel_blocks();
+        let hir::Node::Expr(closure_expr) = tcx.hir_node_by_def_id(self.mir_def_id()) else {
+            return;
+        };
+        let fn_call_id = tcx.parent_hir_id(self.mir_hir_id());
+        let hir::Node::Expr(expr) = tcx.hir_node(fn_call_id) else { return };
+        let def_id = map.enclosing_body_owner(fn_call_id);
+        let tables = tcx.typeck(def_id);
+        let Some(return_value_ty) = tables.node_type_opt(value.hir_id) else { return };
+        let return_value_ty = self.infcx.resolve_vars_if_possible(return_value_ty);
+
+        // We don't use `ty.peel_refs()` to get the number of `*`s needed to get the root type.
+        let mut ty = return_value_ty;
+        let mut count = 0;
+        while let ty::Ref(_, t, _) = ty.kind() {
+            ty = *t;
+            count += 1;
+        }
+        if !self.infcx.type_is_copy_modulo_regions(self.param_env, ty) {
+            return;
+        }
+
+        // Build a new closure where the return type is an owned value, instead of a ref.
+        let Some(ty::Closure(did, args)) =
+            tables.node_type_opt(closure_expr.hir_id).as_ref().map(|ty| ty.kind())
+        else {
+            return;
+        };
+        let sig = args.as_closure().sig();
+        let closure_sig_as_fn_ptr_ty = Ty::new_fn_ptr(
+            tcx,
+            sig.map_bound(|s| {
+                let unsafety = hir::Unsafety::Normal;
+                use rustc_target::spec::abi;
+                tcx.mk_fn_sig(
+                    [s.inputs()[0]],
+                    s.output().peel_refs(),
+                    s.c_variadic,
+                    unsafety,
+                    abi::Abi::Rust,
+                )
+            }),
+        );
+        let parent_args = GenericArgs::identity_for_item(
+            tcx,
+            tcx.typeck_root_def_id(self.mir_def_id().to_def_id()),
+        );
+        let closure_kind = args.as_closure().kind();
+        let closure_kind_ty = Ty::from_closure_kind(tcx, closure_kind);
+        let tupled_upvars_ty = self.infcx.next_ty_var(TypeVariableOrigin {
+            kind: TypeVariableOriginKind::ClosureSynthetic,
+            span: closure_expr.span,
+        });
+        let closure_args = ty::ClosureArgs::new(
+            tcx,
+            ty::ClosureArgsParts {
+                parent_args,
+                closure_kind_ty,
+                closure_sig_as_fn_ptr_ty,
+                tupled_upvars_ty,
+            },
+        );
+        let closure_ty = Ty::new_closure(tcx, *did, closure_args.args);
+        let closure_ty = tcx.erase_regions(closure_ty);
+
+        let hir::ExprKind::MethodCall(_, rcvr, args, _) = expr.kind else { return };
+        let Some(pos) = args
+            .iter()
+            .enumerate()
+            .find(|(_, arg)| arg.hir_id == closure_expr.hir_id)
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        // The found `Self` type of the method call.
+        let Some(possible_rcvr_ty) = tables.node_type_opt(rcvr.hir_id) else { return };
+
+        // The `MethodCall` expression is `Res::Err`, so we search for the method on the `rcvr_ty`.
+        let Some(method) = tcx.lookup_method_for_diagnostic((self.mir_def_id(), expr.hir_id))
+        else {
+            return;
+        };
+
+        // Get the type for the parameter corresponding to the argument the closure with the
+        // lifetime error we had.
+        let Some(input) = tcx
+            .fn_sig(method)
+            .instantiate_identity()
+            .inputs()
+            .skip_binder()
+            // Methods have a `self` arg, so `pos` is actually `+ 1` to match the method call arg.
+            .get(pos + 1)
+        else {
+            return;
+        };
+
+        trace!(?input);
+
+        let ty::Param(closure_param) = input.kind() else { return };
+
+        // Get the arguments for the found method, only specifying that `Self` is the receiver type.
+        let args = GenericArgs::for_item(tcx, method, |param, _| {
+            if param.index == 0 {
+                possible_rcvr_ty.into()
+            } else if param.index == closure_param.index {
+                closure_ty.into()
+            } else {
+                self.infcx.var_for_def(expr.span, param)
+            }
+        });
+
+        let preds = tcx.predicates_of(method).instantiate(tcx, args);
+
+        let ocx = ObligationCtxt::new(&self.infcx);
+        ocx.register_obligations(preds.iter().map(|(pred, span)| {
+            trace!(?pred);
+            Obligation::misc(tcx, span, self.mir_def_id(), self.param_env, pred)
+        }));
+
+        if ocx.select_all_or_error().is_empty() {
+            diag.span_suggestion_verbose(
+                value.span.shrink_to_lo(),
+                "dereference the return value",
+                "*".repeat(count),
+                Applicability::MachineApplicable,
+            );
+        }
+    }
+
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
+    fn suggest_move_on_borrowing_closure(&self, diag: &mut Diag<'_>) {
         let map = self.infcx.tcx.hir();
         let body_id = map.body_owned_by(self.mir_def_id());
         let expr = &map.body(body_id).value.peel_blocks();

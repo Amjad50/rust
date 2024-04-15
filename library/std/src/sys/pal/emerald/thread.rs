@@ -40,13 +40,3 @@ impl Thread {
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     todo!("available_parallelism")
 }
-
-pub mod guard {
-    pub type Guard = !;
-    pub unsafe fn current() -> Option<Guard> {
-        None
-    }
-    pub unsafe fn init() -> Option<Guard> {
-        None
-    }
-}

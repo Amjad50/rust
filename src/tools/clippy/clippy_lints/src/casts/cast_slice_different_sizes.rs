@@ -35,7 +35,7 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, msrv: &Msrv
                     cx,
                     CAST_SLICE_DIFFERENT_SIZES,
                     expr.span,
-                    &format!(
+                    format!(
                         "casting between raw pointers to `[{}]` (element size {from_size}) and `[{}]` (element size {to_size}) does not adjust the count",
                         start_ty.ty, end_ty.ty,
                     ),
@@ -67,32 +67,27 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'tcx>, msrv: &Msrv
 }
 
 fn is_child_of_cast(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let map = cx.tcx.hir();
-    if let Some(parent_id) = map.opt_parent_id(expr.hir_id) {
-        let parent = cx.tcx.hir_node(parent_id);
-        let expr = match parent {
-            Node::Block(block) => {
-                if let Some(parent_expr) = block.expr {
-                    parent_expr
-                } else {
-                    return false;
-                }
-            },
-            Node::Expr(expr) => expr,
-            _ => return false,
-        };
+    let parent = cx.tcx.parent_hir_node(expr.hir_id);
+    let expr = match parent {
+        Node::Block(block) => {
+            if let Some(parent_expr) = block.expr {
+                parent_expr
+            } else {
+                return false;
+            }
+        },
+        Node::Expr(expr) => expr,
+        _ => return false,
+    };
 
-        matches!(expr.kind, ExprKind::Cast(..))
-    } else {
-        false
-    }
+    matches!(expr.kind, ExprKind::Cast(..))
 }
 
 /// Returns the type T of the pointed to *const [T] or *mut [T] and the mutability of the slice if
 /// the type is one of those slices
 fn get_raw_slice_ty_mut(ty: Ty<'_>) -> Option<TypeAndMut<'_>> {
     match ty.kind() {
-        ty::RawPtr(TypeAndMut { ty: slice_ty, mutbl }) => match slice_ty.kind() {
+        ty::RawPtr(slice_ty, mutbl) => match slice_ty.kind() {
             ty::Slice(ty) => Some(TypeAndMut { ty: *ty, mutbl: *mutbl }),
             _ => None,
         },

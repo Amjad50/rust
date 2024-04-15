@@ -44,9 +44,9 @@ use std::{env, fs, iter};
 
 pub fn parse<'a>(sess: &'a Session) -> PResult<'a, ast::Crate> {
     let krate = sess.time("parse_crate", || match &sess.io.input {
-        Input::File(file) => parse_crate_from_file(file, &sess.parse_sess),
+        Input::File(file) => parse_crate_from_file(file, &sess.psess),
         Input::Str { input, name } => {
-            parse_crate_from_source_str(name.clone(), input.clone(), &sess.parse_sess)
+            parse_crate_from_source_str(name.clone(), input.clone(), &sess.psess)
         }
     })?;
 
@@ -170,7 +170,9 @@ fn configure_and_expand(
         let mut old_path = OsString::new();
         if cfg!(windows) {
             old_path = env::var_os("PATH").unwrap_or(old_path);
-            let mut new_path = sess.host_filesearch(PathKind::All).search_path_dirs();
+            let mut new_path = Vec::from_iter(
+                sess.host_filesearch(PathKind::All).search_paths().map(|p| p.dir.clone()),
+            );
             for path in env::split_paths(&old_path) {
                 if !new_path.contains(&path) {
                     new_path.push(path);
@@ -205,7 +207,7 @@ fn configure_and_expand(
 
         // The rest is error reporting
 
-        sess.parse_sess.buffered_lints.with_lock(|buffered_lints: &mut Vec<BufferedEarlyLint>| {
+        sess.psess.buffered_lints.with_lock(|buffered_lints: &mut Vec<BufferedEarlyLint>| {
             buffered_lints.append(&mut ecx.buffered_early_lint);
         });
 
@@ -280,7 +282,7 @@ fn configure_and_expand(
 
 fn early_lint_checks(tcx: TyCtxt<'_>, (): ()) {
     let sess = tcx.sess;
-    let (resolver, krate) = &*tcx.resolver_for_lowering(()).borrow();
+    let (resolver, krate) = &*tcx.resolver_for_lowering().borrow();
     let mut lint_buffer = resolver.lint_buffer.steal();
 
     if sess.opts.unstable_opts.input_stats {
@@ -297,7 +299,7 @@ fn early_lint_checks(tcx: TyCtxt<'_>, (): ()) {
     });
 
     // Add all buffered lints from the `ParseSess` to the `Session`.
-    sess.parse_sess.buffered_lints.with_lock(|buffered_lints| {
+    sess.psess.buffered_lints.with_lock(|buffered_lints| {
         info!("{} parse sess buffered_lints", buffered_lints.len());
         for early_lint in buffered_lints.drain(..) {
             lint_buffer.add_early_lint(early_lint);
@@ -305,12 +307,8 @@ fn early_lint_checks(tcx: TyCtxt<'_>, (): ()) {
     });
 
     // Gate identifiers containing invalid Unicode codepoints that were recovered during lexing.
-    sess.parse_sess.bad_unicode_identifiers.with_lock(|identifiers| {
-        // We will soon sort, so the initial order does not matter.
-        #[allow(rustc::potential_query_instability)]
-        let mut identifiers: Vec<_> = identifiers.drain().collect();
-        identifiers.sort_by_key(|&(key, _)| key);
-        for (ident, mut spans) in identifiers.into_iter() {
+    sess.psess.bad_unicode_identifiers.with_lock(|identifiers| {
+        for (ident, mut spans) in identifiers.drain(..) {
             spans.sort();
             if ident == sym::ferris {
                 let first_span = spans[0];
@@ -426,7 +424,7 @@ fn write_out_deps(tcx: TyCtxt<'_>, outputs: &OutputFilenames, out_filenames: &[P
 
         // Account for explicitly marked-to-track files
         // (e.g. accessed in proc macros).
-        let file_depinfo = sess.parse_sess.file_depinfo.borrow();
+        let file_depinfo = sess.psess.file_depinfo.borrow();
 
         let normalize_path = |path: PathBuf| {
             let file = FileName::from(path);
@@ -489,7 +487,7 @@ fn write_out_deps(tcx: TyCtxt<'_>, outputs: &OutputFilenames, out_filenames: &[P
             }
 
             // Emit special comments with information about accessed environment variables.
-            let env_depinfo = sess.parse_sess.env_depinfo.borrow();
+            let env_depinfo = sess.psess.env_depinfo.borrow();
             if !env_depinfo.is_empty() {
                 // We will soon sort, so the initial order does not matter.
                 #[allow(rustc::potential_query_instability)]
@@ -535,10 +533,10 @@ fn write_out_deps(tcx: TyCtxt<'_>, outputs: &OutputFilenames, out_filenames: &[P
     }
 }
 
-fn resolver_for_lowering<'tcx>(
+fn resolver_for_lowering_raw<'tcx>(
     tcx: TyCtxt<'tcx>,
     (): (),
-) -> &'tcx Steal<(ty::ResolverAstLowering, Lrc<ast::Crate>)> {
+) -> (&'tcx Steal<(ty::ResolverAstLowering, Lrc<ast::Crate>)>, &'tcx ty::ResolverGlobalCtxt) {
     let arenas = Resolver::arenas();
     let _ = tcx.registered_tools(()); // Uses `crate_for_resolver`.
     let (krate, pre_configured_attrs) = tcx.crate_for_resolver(()).steal();
@@ -553,16 +551,15 @@ fn resolver_for_lowering<'tcx>(
         ast_lowering: untracked_resolver_for_lowering,
     } = resolver.into_outputs();
 
-    let feed = tcx.feed_unit_query();
-    feed.resolutions(tcx.arena.alloc(untracked_resolutions));
-    tcx.arena.alloc(Steal::new((untracked_resolver_for_lowering, Lrc::new(krate))))
+    let resolutions = tcx.arena.alloc(untracked_resolutions);
+    (tcx.arena.alloc(Steal::new((untracked_resolver_for_lowering, Lrc::new(krate)))), resolutions)
 }
 
 pub(crate) fn write_dep_info(tcx: TyCtxt<'_>) {
     // Make sure name resolution and macro expansion is run for
     // the side-effect of providing a complete set of all
     // accessed files and env vars.
-    let _ = tcx.resolver_for_lowering(());
+    let _ = tcx.resolver_for_lowering();
 
     let sess = tcx.sess;
     let _timer = sess.timer("write_dep_info");
@@ -611,7 +608,10 @@ pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
     let providers = &mut Providers::default();
     providers.analysis = analysis;
     providers.hir_crate = rustc_ast_lowering::lower_to_hir;
-    providers.resolver_for_lowering = resolver_for_lowering;
+    providers.resolver_for_lowering_raw = resolver_for_lowering_raw;
+    providers.stripped_cfg_items =
+        |tcx, _| tcx.arena.alloc_from_iter(tcx.resolutions(()).stripped_cfg_items.steal());
+    providers.resolutions = |tcx, ()| tcx.resolver_for_lowering_raw(()).1;
     providers.early_lint_checks = early_lint_checks;
     proc_macro_decls::provide(providers);
     rustc_const_eval::provide(providers);
@@ -682,18 +682,21 @@ pub fn create_global_ctxt<'tcx>(
                     incremental,
                 ),
                 providers.hooks,
+                compiler.current_gcx.clone(),
             )
         })
     })
 }
 
-/// Runs the type-checking, region checking and other miscellaneous analysis
-/// passes on the crate.
-fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
+/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
+/// This function never fails.
+fn run_required_analyses(tcx: TyCtxt<'_>) {
+    if tcx.sess.opts.unstable_opts.hir_stats {
+        rustc_passes::hir_stats::print_hir_stats(tcx);
+    }
+    #[cfg(debug_assertions)]
     rustc_passes::hir_id_validator::check_crate(tcx);
-
     let sess = tcx.sess;
-
     sess.time("misc_checking_1", || {
         parallel!(
             {
@@ -729,10 +732,7 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             }
         );
     });
-
-    // passes are timed inside typeck
-    rustc_hir_analysis::check_crate(tcx)?;
-
+    rustc_hir_analysis::check_crate(tcx);
     sess.time("MIR_borrow_checking", || {
         tcx.hir().par_body_owners(|def_id| {
             // Run unsafety check because it's responsible for stealing and
@@ -741,12 +741,8 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             tcx.ensure().mir_borrowck(def_id)
         });
     });
-
     sess.time("MIR_effect_checking", || {
         for def_id in tcx.hir().body_owners() {
-            if !tcx.sess.opts.unstable_opts.thir_unsafeck {
-                rustc_mir_transform::check_unsafety::check_unsafety(tcx, def_id);
-            }
             tcx.ensure().has_ffi_unwind_calls(def_id);
 
             // If we need to codegen, ensure that we emit all errors from
@@ -760,28 +756,33 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             }
         }
     });
-
     tcx.hir().par_body_owners(|def_id| {
         if tcx.is_coroutine(def_id.to_def_id()) {
             tcx.ensure().mir_coroutine_witnesses(def_id);
             tcx.ensure().check_coroutine_obligations(def_id);
         }
     });
-
     sess.time("layout_testing", || layout_test::test_layout(tcx));
     sess.time("abi_testing", || abi_test::test_abi(tcx));
+}
+
+/// Runs the type-checking, region checking and other miscellaneous analysis
+/// passes on the crate.
+fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
+    run_required_analyses(tcx);
+
+    let sess = tcx.sess;
 
     // Avoid overwhelming user with errors if borrow checking failed.
     // I'm not sure how helpful this is, to be honest, but it avoids a
     // lot of annoying errors in the ui tests (basically,
     // lint warnings and so on -- kindck used to do this abort, but
     // kindck is gone now). -nmatsakis
-    if let Some(reported) = sess.dcx().has_errors() {
-        return Err(reported);
-    } else if sess.dcx().stashed_err_count() > 0 {
-        // Without this case we sometimes get delayed bug ICEs and I don't
-        // understand why. -nnethercote
-        return Err(sess.dcx().delayed_bug("some stashed error is waiting for use"));
+    //
+    // But we exclude lint errors from this, because lint errors are typically
+    // less serious and we're more likely to want to continue (#87337).
+    if let Some(guar) = sess.dcx().has_errors_excluding_lint_errors() {
+        return Err(guar);
     }
 
     sess.time("misc_checking_3", || {
@@ -941,9 +942,7 @@ pub fn start_codegen<'tcx>(
 
     if tcx.sess.opts.output_types.contains_key(&OutputType::Mir) {
         if let Err(error) = rustc_mir_transform::dump_mir::emit_mir(tcx) {
-            let dcx = tcx.dcx();
-            dcx.emit_err(errors::CantEmitMIR { error });
-            dcx.abort_if_errors();
+            tcx.dcx().emit_fatal(errors::CantEmitMIR { error });
         }
     }
 
@@ -963,7 +962,7 @@ fn get_recursion_limit(krate_attrs: &[ast::Attribute], sess: &Session) -> Limit 
         // `check_builtin_attribute`), but by the time that runs the macro
         // is expanded, and it doesn't give an error.
         validate_attr::emit_fatal_malformed_builtin_attribute(
-            &sess.parse_sess,
+            &sess.psess,
             attr,
             sym::recursion_limit,
         );

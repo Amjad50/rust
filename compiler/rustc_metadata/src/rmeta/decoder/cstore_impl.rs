@@ -21,7 +21,7 @@ use rustc_middle::ty::{self, TyCtxt};
 use rustc_middle::util::Providers;
 use rustc_session::cstore::{CrateStore, ExternCrate};
 use rustc_session::{Session, StableCrateId};
-use rustc_span::hygiene::{ExpnHash, ExpnId};
+use rustc_span::hygiene::ExpnId;
 use rustc_span::symbol::{kw, Symbol};
 use rustc_span::Span;
 
@@ -206,16 +206,18 @@ impl IntoArgs for (CrateNum, SimplifiedType) {
 
 provide! { tcx, def_id, other, cdata,
     explicit_item_bounds => { cdata.get_explicit_item_bounds(def_id.index, tcx) }
+    explicit_item_super_predicates => { cdata.get_explicit_item_super_predicates(def_id.index, tcx) }
     explicit_predicates_of => { table }
     generics_of => { table }
     inferred_outlives_of => { table_defaulted_array }
     super_predicates_of => { table }
+    implied_predicates_of => { table }
     type_of => { table }
     type_alias_is_lazy => { cdata.root.tables.type_alias_is_lazy.get(cdata, def_id.index) }
     variances_of => { table }
     fn_sig => { table }
     codegen_fn_attrs => { table }
-    impl_trait_ref => { table }
+    impl_trait_header => { table }
     const_param_default => { table }
     object_lifetime_default => { table }
     thir_abstract_const => { table }
@@ -234,7 +236,6 @@ provide! { tcx, def_id, other, cdata,
     unused_generic_params => { cdata.root.tables.unused_generic_params.get(cdata, def_id.index) }
     def_kind => { cdata.def_kind(def_id.index) }
     impl_parent => { table }
-    impl_polarity => { table_direct }
     defaultness => { table_direct }
     constness => { table_direct }
     coerce_unsized_info => {
@@ -250,6 +251,16 @@ provide! { tcx, def_id, other, cdata,
     asyncness => { table_direct }
     fn_arg_names => { table }
     coroutine_kind => { table_direct }
+    coroutine_for_closure => { table }
+    eval_static_initializer => {
+        Ok(cdata
+            .root
+            .tables
+            .eval_static_initializer
+            .get(cdata, def_id.index)
+            .map(|lazy| lazy.decode((cdata, tcx)))
+            .unwrap_or_else(|| panic!("{def_id:?} does not have eval_static_initializer")))
+    }
     trait_def => { table }
     deduced_param_attrs => { table }
     is_type_alias_impl_trait => {
@@ -265,18 +276,6 @@ provide! { tcx, def_id, other, cdata,
             .get(cdata, def_id.index)
             .map(|lazy| lazy.decode((cdata, tcx)))
             .process_decoded(tcx, || panic!("{def_id:?} does not have trait_impl_trait_tys")))
-    }
-    implied_predicates_of => {
-        cdata
-            .root
-            .tables
-            .implied_predicates_of
-            .get(cdata, def_id.index)
-            .map(|lazy| lazy.decode((cdata, tcx)))
-            .unwrap_or_else(|| {
-                debug_assert_eq!(tcx.def_kind(def_id), DefKind::Trait);
-                tcx.super_predicates_of(def_id)
-            })
     }
 
     associated_types_for_impl_traits_in_associated_fn => { table_defaulted_array }
@@ -347,7 +346,7 @@ provide! { tcx, def_id, other, cdata,
         cdata.get_stability_implications(tcx).iter().copied().collect()
     }
     stripped_cfg_items => { cdata.get_stripped_cfg_items(cdata.cnum, tcx) }
-    is_intrinsic => { cdata.get_is_intrinsic(def_id.index) }
+    intrinsic_raw => { cdata.get_intrinsic(def_id.index) }
     defined_lang_items => { cdata.get_lang_items(tcx) }
     diagnostic_items => { cdata.get_diagnostic_items() }
     missing_lang_items => { cdata.get_missing_lang_items(tcx) }
@@ -379,6 +378,7 @@ provide! { tcx, def_id, other, cdata,
 }
 
 pub(in crate::rmeta) fn provide(providers: &mut Providers) {
+    provide_cstore_hooks(providers);
     // FIXME(#44234) - almost all of these queries have no sub-queries and
     // therefore no actual inputs, they're just reading tables calculated in
     // resolve! Does this work? Unsure! That's what the issue is about
@@ -510,6 +510,16 @@ pub(in crate::rmeta) fn provide(providers: &mut Providers) {
             tcx.untracked().cstore.freeze();
             tcx.arena.alloc_from_iter(CStore::from_tcx(tcx).iter_crate_data().map(|(cnum, _)| cnum))
         },
+        used_crates: |tcx, ()| {
+            // The list of loaded crates is now frozen in query cache,
+            // so make sure cstore is not mutably accessed from here on.
+            tcx.untracked().cstore.freeze();
+            tcx.arena.alloc_from_iter(
+                CStore::from_tcx(tcx)
+                    .iter_crate_data()
+                    .filter_map(|(cnum, data)| data.used().then_some(cnum)),
+            )
+        },
         ..providers.queries
     };
     provide_extern(&mut providers.extern_queries);
@@ -640,26 +650,27 @@ impl CrateStore for CStore {
     fn def_path_hash(&self, def: DefId) -> DefPathHash {
         self.get_crate_data(def.krate).def_path_hash(def.index)
     }
+}
 
-    fn def_path_hash_to_def_id(&self, cnum: CrateNum, hash: DefPathHash) -> DefId {
-        let def_index = self.get_crate_data(cnum).def_path_hash_to_def_index(hash);
+fn provide_cstore_hooks(providers: &mut Providers) {
+    providers.hooks.def_path_hash_to_def_id_extern = |tcx, hash, stable_crate_id| {
+        // If this is a DefPathHash from an upstream crate, let the CrateStore map
+        // it to a DefId.
+        let cstore = CStore::from_tcx(tcx.tcx);
+        let cnum = cstore.stable_crate_id_to_crate_num(stable_crate_id);
+        let def_index = cstore.get_crate_data(cnum).def_path_hash_to_def_index(hash);
         DefId { krate: cnum, index: def_index }
-    }
+    };
 
-    fn expn_hash_to_expn_id(
-        &self,
-        sess: &Session,
-        cnum: CrateNum,
-        index_guess: u32,
-        hash: ExpnHash,
-    ) -> ExpnId {
-        self.get_crate_data(cnum).expn_hash_to_expn_id(sess, index_guess, hash)
-    }
-
-    fn import_source_files(&self, sess: &Session, cnum: CrateNum) {
-        let cdata = self.get_crate_data(cnum);
+    providers.hooks.expn_hash_to_expn_id = |tcx, cnum, index_guess, hash| {
+        let cstore = CStore::from_tcx(tcx.tcx);
+        cstore.get_crate_data(cnum).expn_hash_to_expn_id(tcx.sess, index_guess, hash)
+    };
+    providers.hooks.import_source_files = |tcx, cnum| {
+        let cstore = CStore::from_tcx(tcx.tcx);
+        let cdata = cstore.get_crate_data(cnum);
         for file_index in 0..cdata.root.source_map.size() {
-            cdata.imported_source_file(file_index as u32, sess);
+            cdata.imported_source_file(file_index as u32, tcx.sess);
         }
-    }
+    };
 }

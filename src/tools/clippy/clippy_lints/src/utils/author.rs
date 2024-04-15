@@ -279,7 +279,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
         match lit.value.node {
             LitKind::Bool(val) => kind!("Bool({val:?})"),
             LitKind::Char(c) => kind!("Char({c:?})"),
-            LitKind::Err => kind!("Err"),
+            LitKind::Err(_) => kind!("Err"),
             LitKind::Byte(b) => kind!("Byte({b})"),
             LitKind::Int(i, suffix) => {
                 let int_ty = match suffix {
@@ -649,6 +649,8 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                     BindingAnnotation::REF => "REF",
                     BindingAnnotation::MUT => "MUT",
                     BindingAnnotation::REF_MUT => "REF_MUT",
+                    BindingAnnotation::MUT_REF => "MUT_REF",
+                    BindingAnnotation::MUT_REF_MUT => "MUT_REF_MUT",
                 };
                 kind!("Binding(BindingAnnotation::{ann}, _, {name}, {sub})");
                 self.ident(name);
@@ -689,6 +691,11 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 kind!("Box({pat})");
                 self.pat(pat);
             },
+            PatKind::Deref(pat) => {
+                bind!(self, pat);
+                kind!("Deref({pat})");
+                self.pat(pat);
+            },
             PatKind::Ref(pat, muta) => {
                 bind!(self, pat);
                 kind!("Ref({pat}, Mutability::{muta:?})");
@@ -724,7 +731,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
         }
 
         match stmt.value.kind {
-            StmtKind::Local(local) => {
+            StmtKind::Let(local) => {
                 bind!(self, local);
                 kind!("Local({local})");
                 self.option(field!(local.init), "init", |init| {
@@ -747,7 +754,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
     }
 }
 
-fn has_attr(cx: &LateContext<'_>, hir_id: hir::HirId) -> bool {
+fn has_attr(cx: &LateContext<'_>, hir_id: HirId) -> bool {
     let attrs = cx.tcx.hir().attrs(hir_id);
     get_attr(cx.sess(), attrs, "author").count() > 0
 }
@@ -764,7 +771,7 @@ fn path_to_string(path: &QPath<'_>) -> Result<String, ()> {
                 }
             },
             QPath::TypeRelative(ty, segment) => match &ty.kind {
-                hir::TyKind::Path(inner_path) => {
+                TyKind::Path(inner_path) => {
                     inner(s, inner_path)?;
                     *s += ", ";
                     write!(s, "{:?}", segment.ident.as_str()).unwrap();

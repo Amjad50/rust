@@ -88,7 +88,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
 }
 
 pub fn chdir(p: &path::Path) -> io::Result<()> {
-    run_path_with_cstr(p, |p| unsafe {
+    run_path_with_cstr(p, &|p| unsafe {
         emerald_std::io::syscall_chdir(p).map_err(syscall_to_io_error)
     })
 }

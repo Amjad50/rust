@@ -72,7 +72,7 @@ impl EarlyLintPass for DisallowedScriptIdents {
             return;
         }
 
-        let symbols = cx.sess().parse_sess.symbol_gallery.symbols.lock();
+        let symbols = cx.sess().psess.symbol_gallery.symbols.lock();
         // Sort by `Span` so that error messages make sense with respect to the
         // order of identifier locations in the code.
         let mut symbols: Vec<_> = symbols.iter().collect();
@@ -98,7 +98,7 @@ impl EarlyLintPass for DisallowedScriptIdents {
                         cx,
                         DISALLOWED_SCRIPT_IDENTS,
                         span,
-                        &format!(
+                        format!(
                             "identifier `{symbol_str}` has a Unicode script that is not allowed by configuration: {}",
                             script.full_name()
                         ),

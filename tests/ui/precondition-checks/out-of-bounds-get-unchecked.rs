@@ -1,8 +1,7 @@
-// run-fail
-// compile-flags: -Copt-level=3 -Cdebug-assertions=yes
-// error-pattern: unsafe precondition(s) violated: hint::assert_unchecked
-// ignore-debug
-// ignore-wasm32-bare no panic messages
+//@ run-fail
+//@ compile-flags: -Copt-level=3 -Cdebug-assertions=no -Zub-checks=yes
+//@ error-pattern: slice::get_unchecked requires
+//@ ignore-debug
 
 fn main() {
     unsafe {

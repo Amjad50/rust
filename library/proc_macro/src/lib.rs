@@ -26,15 +26,18 @@
 #![feature(staged_api)]
 #![feature(allow_internal_unstable)]
 #![feature(decl_macro)]
+#![feature(generic_nonzero)]
 #![feature(maybe_uninit_write_slice)]
 #![feature(negative_impls)]
 #![feature(new_uninit)]
+#![feature(panic_can_unwind)]
 #![feature(restricted_std)]
 #![feature(rustc_attrs)]
 #![feature(min_specialization)]
 #![feature(strict_provenance)]
 #![recursion_limit = "256"]
 #![allow(internal_features)]
+#![deny(ffi_unwind_calls)]
 
 #[unstable(feature = "proc_macro_internals", issue = "27812")]
 #[doc(hidden)]
@@ -71,7 +74,7 @@ pub fn is_available() -> bool {
 
 /// The main type provided by this crate, representing an abstract stream of
 /// tokens, or, more specifically, a sequence of token trees.
-/// The type provide interfaces for iterating over those token trees and, conversely,
+/// The type provides interfaces for iterating over those token trees and, conversely,
 /// collecting a number of token trees into one stream.
 ///
 /// This is both the input and output of `#[proc_macro]`, `#[proc_macro_attribute]`
@@ -201,6 +204,7 @@ impl ToString for TokenStream {
 /// `TokenTree::Punct`, or `TokenTree::Literal`.
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
 impl fmt::Display for TokenStream {
+    #[allow(clippy::recursive_format_impl)] // clippy doesn't see the specialization
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_string())
     }
@@ -776,6 +780,7 @@ impl ToString for TokenTree {
 /// `TokenTree::Punct`, or `TokenTree::Literal`.
 #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for TokenTree {
+    #[allow(clippy::recursive_format_impl)] // clippy doesn't see the specialization
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_string())
     }
@@ -906,6 +911,7 @@ impl ToString for Group {
 /// with `Delimiter::None` delimiters.
 #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for Group {
+    #[allow(clippy::recursive_format_impl)] // clippy doesn't see the specialization
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_string())
     }
@@ -1355,7 +1361,7 @@ impl Literal {
     }
 
     /// Byte character literal.
-    #[unstable(feature = "proc_macro_byte_character", issue = "115268")]
+    #[stable(feature = "proc_macro_byte_character", since = "CURRENT_RUSTC_VERSION")]
     pub fn byte_character(byte: u8) -> Literal {
         let string = [byte].escape_ascii().to_string();
         Literal::new(bridge::LitKind::Byte, &string, None)
@@ -1369,7 +1375,7 @@ impl Literal {
     }
 
     /// C string literal.
-    #[unstable(feature = "proc_macro_c_str_literals", issue = "119750")]
+    #[stable(feature = "proc_macro_c_str_literals", since = "CURRENT_RUSTC_VERSION")]
     pub fn c_string(string: &CStr) -> Literal {
         let string = string.to_bytes().escape_ascii().to_string();
         Literal::new(bridge::LitKind::CStr, &string, None)
@@ -1448,7 +1454,7 @@ impl Literal {
                 f(&["cr", hashes, "\"", symbol, "\"", hashes, suffix])
             }
 
-            bridge::LitKind::Integer | bridge::LitKind::Float | bridge::LitKind::Err => {
+            bridge::LitKind::Integer | bridge::LitKind::Float | bridge::LitKind::ErrWithGuar => {
                 f(&[symbol, suffix])
             }
         })
