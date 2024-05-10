@@ -121,7 +121,7 @@ impl<'tcx> MirPass<'tcx> for GVN {
 
 fn propagate_ssa<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
-    let ssa = SsaLocals::new(body);
+    let ssa = SsaLocals::new(tcx, body, param_env);
     // Clone dominators as we need them while mutating the body.
     let dominators = body.basic_blocks.dominators().clone();
 
@@ -724,6 +724,14 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         // Invariant: `value` holds the value up-to the `index`th projection excluded.
         let mut value = self.locals[place.local]?;
         for (index, proj) in place.projection.iter().enumerate() {
+            if let Value::Projection(pointer, ProjectionElem::Deref) = *self.get(value)
+                && let Value::Address { place: mut pointee, kind, .. } = *self.get(pointer)
+                && let AddressKind::Ref(BorrowKind::Shared) = kind
+                && let Some(v) = self.simplify_place_value(&mut pointee, location)
+            {
+                value = v;
+                place_ref = pointee.project_deeper(&place.projection[index..], self.tcx).as_ref();
+            }
             if let Some(local) = self.try_as_local(value, location) {
                 // Both `local` and `Place { local: place.local, projection: projection[..index] }`
                 // hold the same value. Therefore, following place holds the value in the original
@@ -735,6 +743,14 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             value = self.project(base, value, proj)?;
         }
 
+        if let Value::Projection(pointer, ProjectionElem::Deref) = *self.get(value)
+            && let Value::Address { place: mut pointee, kind, .. } = *self.get(pointer)
+            && let AddressKind::Ref(BorrowKind::Shared) = kind
+            && let Some(v) = self.simplify_place_value(&mut pointee, location)
+        {
+            value = v;
+            place_ref = pointee.project_deeper(&[], self.tcx).as_ref();
+        }
         if let Some(new_local) = self.try_as_local(value, location) {
             place_ref = PlaceRef { local: new_local, projection: &[] };
         }
@@ -885,6 +901,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 AggregateKind::Adt(did, ..) => tcx.def_kind(did) != DefKind::Enum,
                 // Coroutines are never ZST, as they at least contain the implicit states.
                 AggregateKind::Coroutine(..) => false,
+                AggregateKind::RawPtr(..) => bug!("MIR for RawPtr aggregate must have 2 fields"),
             };
 
             if is_zst {
@@ -910,6 +927,8 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
             // Do not track unions.
             AggregateKind::Adt(_, _, _, _, Some(_)) => return None,
+            // FIXME: Do the extra work to GVN `from_raw_parts`
+            AggregateKind::RawPtr(..) => return None,
         };
 
         let fields: Option<Vec<_>> = fields
@@ -1202,7 +1221,7 @@ impl<'tcx> VnState<'_, 'tcx> {
             // not give the same value as the former mention.
             && value.is_deterministic()
         {
-            return Some(ConstOperand { span: rustc_span::DUMMY_SP, user_ty: None, const_: value });
+            return Some(ConstOperand { span: DUMMY_SP, user_ty: None, const_: value });
         }
 
         let op = self.evaluated[index].as_ref()?;
@@ -1219,7 +1238,7 @@ impl<'tcx> VnState<'_, 'tcx> {
         assert!(!value.may_have_provenance(self.tcx, op.layout.size));
 
         let const_ = Const::Val(value, op.layout.ty);
-        Some(ConstOperand { span: rustc_span::DUMMY_SP, user_ty: None, const_ })
+        Some(ConstOperand { span: DUMMY_SP, user_ty: None, const_ })
     }
 
     /// If there is a local which is assigned `index`, and its assignment strictly dominates `loc`,

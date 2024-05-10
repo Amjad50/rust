@@ -55,6 +55,7 @@ pub enum DryRun {
 pub enum DebuginfoLevel {
     #[default]
     None,
+    LineDirectivesOnly,
     LineTablesOnly,
     Limited,
     Full,
@@ -70,16 +71,22 @@ impl<'de> Deserialize<'de> for DebuginfoLevel {
         use serde::de::Error;
 
         Ok(match Deserialize::deserialize(deserializer)? {
-            StringOrInt::String("none") | StringOrInt::Int(0) => DebuginfoLevel::None,
-            StringOrInt::String("line-tables-only") => DebuginfoLevel::LineTablesOnly,
-            StringOrInt::String("limited") | StringOrInt::Int(1) => DebuginfoLevel::Limited,
-            StringOrInt::String("full") | StringOrInt::Int(2) => DebuginfoLevel::Full,
+            StringOrInt::String(s) if s == "none" => DebuginfoLevel::None,
+            StringOrInt::Int(0) => DebuginfoLevel::None,
+            StringOrInt::String(s) if s == "line-directives-only" => {
+                DebuginfoLevel::LineDirectivesOnly
+            }
+            StringOrInt::String(s) if s == "line-tables-only" => DebuginfoLevel::LineTablesOnly,
+            StringOrInt::String(s) if s == "limited" => DebuginfoLevel::Limited,
+            StringOrInt::Int(1) => DebuginfoLevel::Limited,
+            StringOrInt::String(s) if s == "full" => DebuginfoLevel::Full,
+            StringOrInt::Int(2) => DebuginfoLevel::Full,
             StringOrInt::Int(n) => {
                 let other = serde::de::Unexpected::Signed(n);
                 return Err(D::Error::invalid_value(other, &"expected 0, 1, or 2"));
             }
             StringOrInt::String(s) => {
-                let other = serde::de::Unexpected::Str(s);
+                let other = serde::de::Unexpected::Str(&s);
                 return Err(D::Error::invalid_value(
                     other,
                     &"expected none, line-tables-only, limited, or full",
@@ -95,6 +102,7 @@ impl Display for DebuginfoLevel {
         use DebuginfoLevel::*;
         f.write_str(match self {
             None => "0",
+            LineDirectivesOnly => "line-directives-only",
             LineTablesOnly => "line-tables-only",
             Limited => "1",
             Full => "2",
@@ -145,7 +153,6 @@ impl LldMode {
 /// `config.example.toml`.
 #[derive(Default, Clone)]
 pub struct Config {
-    pub changelog_seen: Option<usize>, // FIXME: Deprecated field. Remove it at 2024.
     pub change_id: Option<usize>,
     pub bypass_bootstrap_lock: bool,
     pub ccache: Option<String>,
@@ -322,6 +329,7 @@ pub struct Config {
     pub nodejs: Option<PathBuf>,
     pub npm: Option<PathBuf>,
     pub gdb: Option<PathBuf>,
+    pub lldb: Option<PathBuf>,
     pub python: Option<PathBuf>,
     pub reuse: Option<PathBuf>,
     pub cargo_native_static: bool,
@@ -338,6 +346,8 @@ pub struct Config {
     #[cfg(test)]
     pub initial_rustfmt: RefCell<RustfmtState>,
 
+    /// The paths to work with. For example: with `./x check foo bar` we get
+    /// `paths=["foo", "bar"]`.
     pub paths: Vec<PathBuf>,
 }
 
@@ -605,7 +615,6 @@ impl Target {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct TomlConfig {
-    changelog_seen: Option<usize>, // FIXME: Deprecated field. Remove it at 2024.
     #[serde(flatten)]
     change_id: ChangeIdWrapper,
     build: Option<Build>,
@@ -645,17 +654,7 @@ trait Merge {
 impl Merge for TomlConfig {
     fn merge(
         &mut self,
-        TomlConfig {
-            build,
-            install,
-            llvm,
-            rust,
-            dist,
-            target,
-            profile: _,
-            changelog_seen,
-            change_id,
-        }: Self,
+        TomlConfig { build, install, llvm, rust, dist, target, profile: _, change_id }: Self,
         replace: ReplaceOpt,
     ) {
         fn do_merge<T: Merge>(x: &mut Option<T>, y: Option<T>, replace: ReplaceOpt) {
@@ -667,7 +666,6 @@ impl Merge for TomlConfig {
                 }
             }
         }
-        self.changelog_seen.merge(changelog_seen, replace);
         self.change_id.inner.merge(change_id.inner, replace);
         do_merge(&mut self.build, build, replace);
         do_merge(&mut self.install, install, replace);
@@ -837,6 +835,7 @@ define_config! {
         docs_minification: Option<bool> = "docs-minification",
         submodules: Option<bool> = "submodules",
         gdb: Option<String> = "gdb",
+        lldb: Option<String> = "lldb",
         nodejs: Option<String> = "nodejs",
         npm: Option<String> = "npm",
         python: Option<String> = "python",
@@ -1034,8 +1033,8 @@ impl RustOptimize {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum StringOrInt<'a> {
-    String(&'a str),
+enum StringOrInt {
+    String(String),
     Int(i64),
 }
 
@@ -1222,10 +1221,7 @@ impl Config {
                 .and_then(|table: toml::Value| TomlConfig::deserialize(table))
                 .unwrap_or_else(|err| {
                     if let Ok(Some(changes)) = toml::from_str(&contents)
-                        .and_then(|table: toml::Value| ChangeIdWrapper::deserialize(table))
-                        .and_then(|change_id| {
-                            Ok(change_id.inner.map(|id| crate::find_recent_config_change_ids(id)))
-                        })
+                        .and_then(|table: toml::Value| ChangeIdWrapper::deserialize(table)).map(|change_id| change_id.inner.map(crate::find_recent_config_change_ids))
                     {
                         if !changes.is_empty() {
                             println!(
@@ -1400,7 +1396,6 @@ impl Config {
         }
         toml.merge(override_toml, ReplaceOpt::Override);
 
-        config.changelog_seen = toml.changelog_seen;
         config.change_id = toml.change_id.inner;
 
         let Build {
@@ -1417,6 +1412,7 @@ impl Config {
             docs_minification,
             submodules,
             gdb,
+            lldb,
             nodejs,
             npm,
             python,
@@ -1509,6 +1505,7 @@ impl Config {
         config.nodejs = nodejs.map(PathBuf::from);
         config.npm = npm.map(PathBuf::from);
         config.gdb = gdb.map(PathBuf::from);
+        config.lldb = lldb.map(PathBuf::from);
         config.python = python.map(PathBuf::from);
         config.reuse = reuse.map(PathBuf::from);
         config.submodules = submodules;
@@ -1805,17 +1802,17 @@ impl Config {
             if let Some(v) = link_shared {
                 config.llvm_link_shared.set(Some(v));
             }
-            config.llvm_targets = targets.clone();
-            config.llvm_experimental_targets = experimental_targets.clone();
+            config.llvm_targets.clone_from(&targets);
+            config.llvm_experimental_targets.clone_from(&experimental_targets);
             config.llvm_link_jobs = link_jobs;
-            config.llvm_version_suffix = version_suffix.clone();
-            config.llvm_clang_cl = clang_cl.clone();
+            config.llvm_version_suffix.clone_from(&version_suffix);
+            config.llvm_clang_cl.clone_from(&clang_cl);
 
-            config.llvm_cflags = cflags.clone();
-            config.llvm_cxxflags = cxxflags.clone();
-            config.llvm_ldflags = ldflags.clone();
+            config.llvm_cflags.clone_from(&cflags);
+            config.llvm_cxxflags.clone_from(&cxxflags);
+            config.llvm_ldflags.clone_from(&ldflags);
             set(&mut config.llvm_use_libcxx, use_libcxx);
-            config.llvm_use_linker = use_linker.clone();
+            config.llvm_use_linker.clone_from(&use_linker);
             config.llvm_allow_old_toolchain = allow_old_toolchain.unwrap_or(false);
             config.llvm_polly = polly.unwrap_or(false);
             config.llvm_clang = clang.unwrap_or(false);
@@ -2036,7 +2033,8 @@ impl Config {
             | Subcommand::Run { .. }
             | Subcommand::Setup { .. }
             | Subcommand::Format { .. }
-            | Subcommand::Suggest { .. } => flags.stage.unwrap_or(0),
+            | Subcommand::Suggest { .. }
+            | Subcommand::Vendor { .. } => flags.stage.unwrap_or(0),
         };
 
         // CI should always run stage 2 builds, unless it specifically states otherwise
@@ -2063,7 +2061,8 @@ impl Config {
                 | Subcommand::Run { .. }
                 | Subcommand::Setup { .. }
                 | Subcommand::Format { .. }
-                | Subcommand::Suggest { .. } => {}
+                | Subcommand::Suggest { .. }
+                | Subcommand::Vendor { .. } => {}
             }
         }
 
@@ -2496,11 +2495,6 @@ impl Config {
                 }
 
                 b
-            }
-            // FIXME: "if-available" is deprecated. Remove this block later (around mid 2024)
-            // to not break builds between the recent-to-old checkouts.
-            Some(StringOrBool::String(s)) if s == "if-available" => {
-                llvm::is_ci_llvm_available(self, asserts)
             }
             Some(StringOrBool::String(s)) if s == "if-unchanged" => if_unchanged(),
             Some(StringOrBool::String(other)) => {

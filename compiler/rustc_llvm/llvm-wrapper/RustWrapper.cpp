@@ -312,6 +312,16 @@ static Attribute::AttrKind fromRust(LLVMRustAttribute Kind) {
     return Attribute::SafeStack;
   case FnRetThunkExtern:
     return Attribute::FnRetThunkExtern;
+#if LLVM_VERSION_GE(18, 0)
+  case Writable:
+    return Attribute::Writable;
+  case DeadOnUnwind:
+    return Attribute::DeadOnUnwind;
+#else
+  case Writable:
+  case DeadOnUnwind:
+    report_fatal_error("Not supported on this LLVM version");
+#endif
   }
   report_fatal_error("bad AttributeKind");
 }
@@ -1522,20 +1532,56 @@ extern "C" void LLVMRustFreeOperandBundleDef(OperandBundleDef *Bundle) {
   delete Bundle;
 }
 
+// OpBundlesIndirect is an array of pointers (*not* a pointer to an array).
 extern "C" LLVMValueRef LLVMRustBuildCall(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
                                           LLVMValueRef *Args, unsigned NumArgs,
-                                          OperandBundleDef **OpBundles,
+                                          OperandBundleDef **OpBundlesIndirect,
                                           unsigned NumOpBundles) {
   Value *Callee = unwrap(Fn);
   FunctionType *FTy = unwrap<FunctionType>(Ty);
+
+  // FIXME: Is there a way around this?
+  SmallVector<OperandBundleDef> OpBundles;
+  OpBundles.reserve(NumOpBundles);
+  for (unsigned i = 0; i < NumOpBundles; ++i) {
+    OpBundles.push_back(*OpBundlesIndirect[i]);
+  }
+
   return wrap(unwrap(B)->CreateCall(
       FTy, Callee, ArrayRef<Value*>(unwrap(Args), NumArgs),
-      ArrayRef<OperandBundleDef>(*OpBundles, NumOpBundles)));
+      ArrayRef<OperandBundleDef>(OpBundles)));
 }
 
 extern "C" LLVMValueRef LLVMRustGetInstrProfIncrementIntrinsic(LLVMModuleRef M) {
   return wrap(llvm::Intrinsic::getDeclaration(
       unwrap(M), llvm::Intrinsic::instrprof_increment));
+}
+
+extern "C" LLVMValueRef LLVMRustGetInstrProfMCDCParametersIntrinsic(LLVMModuleRef M) {
+#if LLVM_VERSION_GE(18, 0)
+  return wrap(llvm::Intrinsic::getDeclaration(
+      unwrap(M), llvm::Intrinsic::instrprof_mcdc_parameters));
+#else
+  report_fatal_error("LLVM 18.0 is required for mcdc intrinsic functions");
+#endif
+}
+
+extern "C" LLVMValueRef LLVMRustGetInstrProfMCDCTVBitmapUpdateIntrinsic(LLVMModuleRef M) {
+#if LLVM_VERSION_GE(18, 0)
+  return wrap(llvm::Intrinsic::getDeclaration(
+      unwrap(M), llvm::Intrinsic::instrprof_mcdc_tvbitmap_update));
+#else
+  report_fatal_error("LLVM 18.0 is required for mcdc intrinsic functions");
+#endif
+}
+
+extern "C" LLVMValueRef LLVMRustGetInstrProfMCDCCondBitmapIntrinsic(LLVMModuleRef M) {
+#if LLVM_VERSION_GE(18, 0)
+  return wrap(llvm::Intrinsic::getDeclaration(
+      unwrap(M), llvm::Intrinsic::instrprof_mcdc_condbitmap_update));
+#else
+  report_fatal_error("LLVM 18.0 is required for mcdc intrinsic functions");
+#endif
 }
 
 extern "C" LLVMValueRef LLVMRustBuildMemCpy(LLVMBuilderRef B,
@@ -1566,26 +1612,36 @@ extern "C" LLVMValueRef LLVMRustBuildMemSet(LLVMBuilderRef B,
       unwrap(Dst), unwrap(Val), unwrap(Size), MaybeAlign(DstAlign), IsVolatile));
 }
 
+// OpBundlesIndirect is an array of pointers (*not* a pointer to an array).
 extern "C" LLVMValueRef
 LLVMRustBuildInvoke(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
                     LLVMValueRef *Args, unsigned NumArgs,
                     LLVMBasicBlockRef Then, LLVMBasicBlockRef Catch,
-                    OperandBundleDef **OpBundles, unsigned NumOpBundles,
+                    OperandBundleDef **OpBundlesIndirect, unsigned NumOpBundles,
                     const char *Name) {
   Value *Callee = unwrap(Fn);
   FunctionType *FTy = unwrap<FunctionType>(Ty);
+
+  // FIXME: Is there a way around this?
+  SmallVector<OperandBundleDef> OpBundles;
+  OpBundles.reserve(NumOpBundles);
+  for (unsigned i = 0; i < NumOpBundles; ++i) {
+    OpBundles.push_back(*OpBundlesIndirect[i]);
+  }
+
   return wrap(unwrap(B)->CreateInvoke(FTy, Callee, unwrap(Then), unwrap(Catch),
                                       ArrayRef<Value*>(unwrap(Args), NumArgs),
-                                      ArrayRef<OperandBundleDef>(*OpBundles, NumOpBundles),
+                                      ArrayRef<OperandBundleDef>(OpBundles),
                                       Name));
 }
 
+// OpBundlesIndirect is an array of pointers (*not* a pointer to an array).
 extern "C" LLVMValueRef
 LLVMRustBuildCallBr(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
                     LLVMBasicBlockRef DefaultDest,
                     LLVMBasicBlockRef *IndirectDests, unsigned NumIndirectDests,
                     LLVMValueRef *Args, unsigned NumArgs,
-                    OperandBundleDef **OpBundles, unsigned NumOpBundles,
+                    OperandBundleDef **OpBundlesIndirect, unsigned NumOpBundles,
                     const char *Name) {
   Value *Callee = unwrap(Fn);
   FunctionType *FTy = unwrap<FunctionType>(Ty);
@@ -1597,11 +1653,18 @@ LLVMRustBuildCallBr(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
     IndirectDestsUnwrapped.push_back(unwrap(IndirectDests[i]));
   }
 
+  // FIXME: Is there a way around this?
+  SmallVector<OperandBundleDef> OpBundles;
+  OpBundles.reserve(NumOpBundles);
+  for (unsigned i = 0; i < NumOpBundles; ++i) {
+    OpBundles.push_back(*OpBundlesIndirect[i]);
+  }
+
   return wrap(unwrap(B)->CreateCallBr(
       FTy, Callee, unwrap(DefaultDest),
       ArrayRef<BasicBlock*>(IndirectDestsUnwrapped),
       ArrayRef<Value*>(unwrap(Args), NumArgs),
-      ArrayRef<OperandBundleDef>(*OpBundles, NumOpBundles),
+      ArrayRef<OperandBundleDef>(OpBundles),
       Name));
 }
 

@@ -170,4 +170,14 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
         severity: ChangeSeverity::Warning,
         summary: "`rust.split-debuginfo` has been moved to `target.<triple>.split-debuginfo` and its default value is determined for each target individually.",
     },
+    ChangeInfo {
+        change_id: 123711,
+        severity: ChangeSeverity::Warning,
+        summary: "The deprecated field `changelog-seen` has been removed. Using that field in `config.toml` from now on will result in breakage.",
+    },
+    ChangeInfo {
+        change_id: 124501,
+        severity: ChangeSeverity::Info,
+        summary: "New option `build.lldb` that will override the default lldb binary path used in debuginfo tests",
+    },
 ];

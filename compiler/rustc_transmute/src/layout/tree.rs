@@ -266,7 +266,7 @@ pub(crate) mod rustc {
 
                 ty::Ref(lifetime, ty, mutability) => {
                     let ty_and_layout = cx.layout_of(*ty)?;
-                    let align = ty_and_layout.align.abi.bytes() as usize;
+                    let align = ty_and_layout.align.abi.bytes_usize();
                     let size = ty_and_layout.size.bytes_usize();
                     Ok(Tree::Ref(Ref {
                         lifetime: *lifetime,
@@ -420,7 +420,7 @@ pub(crate) mod rustc {
         fn from_tag(tag: ScalarInt, tcx: TyCtxt<'tcx>) -> Self {
             use rustc_target::abi::Endian;
             let size = tag.size();
-            let bits = tag.to_bits(size).unwrap();
+            let bits = tag.assert_bits(size);
             let bytes: [u8; 16];
             let bytes = match tcx.data_layout.endian {
                 Endian::Little => {

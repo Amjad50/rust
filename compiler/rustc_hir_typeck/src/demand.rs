@@ -57,7 +57,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             || self.suggest_into(err, expr, expr_ty, expected)
             || self.suggest_floating_point_literal(err, expr, expected)
             || self.suggest_null_ptr_for_literal_zero_given_to_ptr_arg(err, expr, expected)
-            || self.suggest_coercing_result_via_try_operator(err, expr, expected, expr_ty);
+            || self.suggest_coercing_result_via_try_operator(err, expr, expected, expr_ty)
+            || self.suggest_returning_value_after_loop(err, expr, expected);
 
         if !suggested {
             self.note_source_of_type_mismatch_constraint(
@@ -337,10 +338,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ty_op: |ty| {
                 if let ty::Infer(infer) = ty.kind() {
                     match infer {
-                        ty::TyVar(_) => self.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::MiscVariable,
-                            span: DUMMY_SP,
-                        }),
+                        ty::TyVar(_) => self
+                            .next_ty_var(TypeVariableOrigin { param_def_id: None, span: DUMMY_SP }),
                         ty::IntVar(_) => self.next_int_var(),
                         ty::FloatVar(_) => self.next_float_var(),
                         ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_) => {
@@ -356,10 +355,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if let ty::ConstKind::Infer(_) = ct.kind() {
                     self.next_const_var(
                         ct.ty(),
-                        ConstVariableOrigin {
-                            kind: ConstVariableOriginKind::MiscVariable,
-                            span: DUMMY_SP,
-                        },
+                        ConstVariableOrigin { param_def_id: None, span: DUMMY_SP },
                     )
                 } else {
                     ct
@@ -894,7 +890,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             [candidate] => format!(
                 "the method of the same name on {} `{}`",
                 match candidate.kind {
-                    probe::CandidateKind::InherentImplCandidate(..) => "the inherent impl for",
+                    probe::CandidateKind::InherentImplCandidate(_) => "the inherent impl for",
                     _ => "trait",
                 },
                 self.tcx.def_path_str(candidate.item.container_id(self.tcx))

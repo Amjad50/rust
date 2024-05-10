@@ -17,13 +17,14 @@ use rustc_errors::{DiagArgValue, ErrorGuaranteed, IntoDiagArg, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
-use rustc_macros::HashStable;
+use rustc_macros::{HashStable, Lift, TyDecodable, TyEncodable, TypeFoldable};
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
 use rustc_target::spec::abi::{self, Abi};
 use std::assert_matches::debug_assert_matches;
 use std::borrow::Cow;
+use std::iter;
 use std::ops::{ControlFlow, Deref, Range};
 use ty::util::IntTypeExt;
 
@@ -1379,7 +1380,7 @@ impl<'tcx> ParamTy {
         Ty::new_param(tcx, self.index, self.name)
     }
 
-    pub fn span_from_generics(&self, tcx: TyCtxt<'tcx>, item_with_generics: DefId) -> Span {
+    pub fn span_from_generics(self, tcx: TyCtxt<'tcx>, item_with_generics: DefId) -> Span {
         let generics = tcx.generics_of(item_with_generics);
         let type_param = generics.type_param(self, tcx);
         tcx.def_span(type_param.def_id)
@@ -1748,11 +1749,6 @@ impl<'tcx> Ty<'tcx> {
     }
 
     // misc
-
-    #[inline]
-    pub fn new_unit(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        tcx.types.unit
-    }
 
     #[inline]
     pub fn new_static_str(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
@@ -2316,6 +2312,133 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
+    /// Returns the type of the async destructor of this type.
+    pub fn async_destructor_ty(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> Ty<'tcx> {
+        if self.is_async_destructor_noop(tcx, param_env) || matches!(self.kind(), ty::Error(_)) {
+            return Ty::async_destructor_combinator(tcx, LangItem::AsyncDropNoop)
+                .instantiate_identity();
+        }
+        match *self.kind() {
+            ty::Param(_) | ty::Alias(..) | ty::Infer(ty::TyVar(_)) => {
+                let assoc_items = tcx
+                    .associated_item_def_ids(tcx.require_lang_item(LangItem::AsyncDestruct, None));
+                Ty::new_projection(tcx, assoc_items[0], [self])
+            }
+
+            ty::Array(elem_ty, _) | ty::Slice(elem_ty) => {
+                let dtor = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropSlice)
+                    .instantiate(tcx, &[elem_ty.into()]);
+                Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+                    .instantiate(tcx, &[dtor.into()])
+            }
+
+            ty::Adt(adt_def, args) if adt_def.is_enum() || adt_def.is_struct() => self
+                .adt_async_destructor_ty(
+                    tcx,
+                    adt_def.variants().iter().map(|v| v.fields.iter().map(|f| f.ty(tcx, args))),
+                    param_env,
+                ),
+            ty::Tuple(tys) => self.adt_async_destructor_ty(tcx, iter::once(tys), param_env),
+            ty::Closure(_, args) => self.adt_async_destructor_ty(
+                tcx,
+                iter::once(args.as_closure().upvar_tys()),
+                param_env,
+            ),
+            ty::CoroutineClosure(_, args) => self.adt_async_destructor_ty(
+                tcx,
+                iter::once(args.as_coroutine_closure().upvar_tys()),
+                param_env,
+            ),
+
+            ty::Adt(adt_def, _) => {
+                assert!(adt_def.is_union());
+
+                let surface_drop = self.surface_async_dropper_ty(tcx, param_env).unwrap();
+
+                Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+                    .instantiate(tcx, &[surface_drop.into()])
+            }
+
+            ty::Bound(..)
+            | ty::Foreign(_)
+            | ty::Placeholder(_)
+            | ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
+                bug!("`async_destructor_ty` applied to unexpected type: {self:?}")
+            }
+
+            _ => bug!("`async_destructor_ty` is not yet implemented for type: {self:?}"),
+        }
+    }
+
+    fn adt_async_destructor_ty<I>(
+        self,
+        tcx: TyCtxt<'tcx>,
+        variants: I,
+        param_env: ParamEnv<'tcx>,
+    ) -> Ty<'tcx>
+    where
+        I: Iterator + ExactSizeIterator,
+        I::Item: IntoIterator<Item = Ty<'tcx>>,
+    {
+        debug_assert!(!self.is_async_destructor_noop(tcx, param_env));
+
+        let defer = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropDefer);
+        let chain = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropChain);
+
+        let noop =
+            Ty::async_destructor_combinator(tcx, LangItem::AsyncDropNoop).instantiate_identity();
+        let either = Ty::async_destructor_combinator(tcx, LangItem::AsyncDropEither);
+
+        let variants_dtor = variants
+            .into_iter()
+            .map(|variant| {
+                variant
+                    .into_iter()
+                    .map(|ty| defer.instantiate(tcx, &[ty.into()]))
+                    .reduce(|acc, next| chain.instantiate(tcx, &[acc.into(), next.into()]))
+                    .unwrap_or(noop)
+            })
+            .reduce(|other, matched| {
+                either.instantiate(tcx, &[other.into(), matched.into(), self.into()])
+            })
+            .unwrap();
+
+        let dtor = if let Some(dropper_ty) = self.surface_async_dropper_ty(tcx, param_env) {
+            Ty::async_destructor_combinator(tcx, LangItem::AsyncDropChain)
+                .instantiate(tcx, &[dropper_ty.into(), variants_dtor.into()])
+        } else {
+            variants_dtor
+        };
+
+        Ty::async_destructor_combinator(tcx, LangItem::AsyncDropFuse)
+            .instantiate(tcx, &[dtor.into()])
+    }
+
+    fn surface_async_dropper_ty(
+        self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ParamEnv<'tcx>,
+    ) -> Option<Ty<'tcx>> {
+        if self.has_surface_async_drop(tcx, param_env) {
+            Some(LangItem::SurfaceAsyncDropInPlace)
+        } else if self.has_surface_drop(tcx, param_env) {
+            Some(LangItem::AsyncDropSurfaceDropInPlace)
+        } else {
+            None
+        }
+        .map(|dropper| {
+            Ty::async_destructor_combinator(tcx, dropper).instantiate(tcx, &[self.into()])
+        })
+    }
+
+    fn async_destructor_combinator(
+        tcx: TyCtxt<'tcx>,
+        lang_item: LangItem,
+    ) -> ty::EarlyBinder<Ty<'tcx>> {
+        tcx.fn_sig(tcx.require_lang_item(lang_item, None))
+            .map_bound(|fn_sig| fn_sig.output().no_bound_vars().unwrap())
+    }
+
     /// Returns the type of metadata for (potentially fat) pointers to this type,
     /// or the struct tail if the metadata type cannot be determined.
     pub fn ptr_metadata_ty_or_tail(
@@ -2697,7 +2820,7 @@ impl<'tcx> VarianceDiagInfo<'tcx> {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

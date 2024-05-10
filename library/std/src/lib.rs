@@ -224,7 +224,7 @@
             `#![no_std]` or overriding this warning by enabling this feature."
     )
 )]
-#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
+#![rustc_preserve_ub_checks]
 #![doc(
     html_playground_url = "https://play.rust-lang.org/",
     issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
@@ -277,6 +277,7 @@
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
+#![feature(asm_experimental_arch)]
 #![feature(c_unwind)]
 #![feature(cfg_sanitizer_cfi)]
 #![feature(cfg_target_thread_local)]
@@ -313,7 +314,6 @@
 #![feature(thread_local)]
 #![feature(try_blocks)]
 #![feature(type_alias_impl_trait)]
-#![feature(utf8_chunks)]
 // tidy-alphabetical-end
 //
 // Library features (core):
@@ -334,7 +334,6 @@
 #![feature(float_minimum_maximum)]
 #![feature(float_next_up_down)]
 #![feature(fmt_internals)]
-#![feature(generic_nonzero)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
 #![feature(hint_assert_unchecked)]
@@ -357,6 +356,7 @@
 #![feature(str_internals)]
 #![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
+#![feature(ub_checks)]
 // tidy-alphabetical-end
 //
 // Library features (alloc):
@@ -407,7 +407,6 @@
 // tidy-alphabetical-start
 #![feature(const_collections_with_hasher)]
 #![feature(const_hash)]
-#![feature(const_io_structs)]
 #![feature(const_ip)]
 #![feature(const_ipv4)]
 #![feature(const_ipv6)]
@@ -593,7 +592,6 @@ pub mod net;
 pub mod num;
 pub mod os;
 pub mod panic;
-#[cfg(not(bootstrap))]
 #[unstable(feature = "core_pattern_types", issue = "none")]
 pub mod pat;
 pub mod path;

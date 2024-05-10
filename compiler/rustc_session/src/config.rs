@@ -15,6 +15,7 @@ use rustc_data_structures::stable_hasher::{StableOrd, ToStableHashKey};
 use rustc_errors::emitter::HumanReadableErrorType;
 use rustc_errors::{ColorConfig, DiagArgValue, DiagCtxtFlags, IntoDiagArg};
 use rustc_feature::UnstableFeatures;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_span::edition::{Edition, DEFAULT_EDITION, EDITION_NAME_LIST, LATEST_STABLE_EDITION};
 use rustc_span::source_map::FilePathMapping;
 use rustc_span::{FileName, FileNameDisplayPreference, RealFileName, SourceFileHashAlgorithm};
@@ -32,6 +33,7 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::str::{self, FromStr};
 use std::sync::LazyLock;
+use tracing::debug;
 
 mod cfg;
 pub mod sigpipe;
@@ -146,8 +148,26 @@ pub enum InstrumentCoverage {
 /// Individual flag values controlled by `-Z coverage-options`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct CoverageOptions {
-    /// Add branch coverage instrumentation.
-    pub branch: bool,
+    pub level: CoverageLevel,
+    // Other boolean or enum-valued options might be added here.
+}
+
+/// Controls whether branch coverage or MC/DC coverage is enabled.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum CoverageLevel {
+    /// Instrument for coverage at the MIR block level.
+    Block,
+    /// Also instrument branch points (includes block coverage).
+    Branch,
+    /// Instrument for MC/DC. Mostly a superset of branch coverage, but might
+    /// differ in some corner cases.
+    Mcdc,
+}
+
+impl Default for CoverageLevel {
+    fn default() -> Self {
+        Self::Block
+    }
 }
 
 /// Settings for `-Z instrument-xray` flag.
@@ -1125,7 +1145,7 @@ impl Options {
             || self.unstable_opts.query_dep_graph
     }
 
-    pub(crate) fn file_path_mapping(&self) -> FilePathMapping {
+    pub fn file_path_mapping(&self) -> FilePathMapping {
         file_path_mapping(self.remap_path_prefix.clone(), &self.unstable_opts)
     }
 
@@ -1161,6 +1181,16 @@ impl UnstableOptions {
             deduplicate_diagnostics: self.deduplicate_diagnostics,
             track_diagnostics: self.track_diagnostics,
         }
+    }
+
+    pub fn src_hash_algorithm(&self, target: &Target) -> SourceFileHashAlgorithm {
+        self.src_hash_algorithm.unwrap_or_else(|| {
+            if target.is_like_msvc {
+                SourceFileHashAlgorithm::Sha256
+            } else {
+                SourceFileHashAlgorithm::Md5
+            }
+        })
     }
 }
 
@@ -1373,7 +1403,7 @@ pub fn rustc_short_optgroups() -> Vec<RustcOptGroup> {
         opt::flag_s("h", "help", "Display this message"),
         opt::multi_s("", "cfg", "Configure the compilation environment.
                              SPEC supports the syntax `NAME[=\"VALUE\"]`.", "SPEC"),
-        opt::multi("", "check-cfg", "Provide list of valid cfg options for checking", "SPEC"),
+        opt::multi_s("", "check-cfg", "Provide list of expected cfgs for checking", "SPEC"),
         opt::multi_s(
             "L",
             "",
@@ -1876,9 +1906,12 @@ fn collect_print_requests(
                 let prints =
                     PRINT_KINDS.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>();
                 let prints = prints.join(", ");
-                early_dcx.early_fatal(format!(
-                    "unknown print request `{req}`. Valid print requests are: {prints}"
-                ));
+
+                let mut diag =
+                    early_dcx.early_struct_fatal(format!("unknown print request: `{req}`"));
+                #[allow(rustc::diagnostic_outside_of_impl)]
+                diag.help(format!("valid print requests are: {prints}"));
+                diag.emit()
             }
         };
 
@@ -2317,13 +2350,6 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
 
     check_error_format_stability(early_dcx, &unstable_opts, error_format);
 
-    if !unstable_opts.unstable_options && json_unused_externs.is_enabled() {
-        early_dcx.early_fatal(
-            "the `-Z unstable-options` flag must also be passed to enable \
-            the flag `--json=unused-externs`",
-        );
-    }
-
     let output_types = parse_output_types(early_dcx, &unstable_opts, matches);
 
     let mut cg = CodegenOptions::build(early_dcx, matches);
@@ -2543,7 +2569,13 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
 
     let mut search_paths = vec![];
     for s in &matches.opt_strs("L") {
-        search_paths.push(SearchPath::from_cli_opt(&sysroot, &target_triple, early_dcx, s));
+        search_paths.push(SearchPath::from_cli_opt(
+            &sysroot,
+            &target_triple,
+            early_dcx,
+            s,
+            unstable_opts.unstable_options,
+        ));
     }
 
     let working_dir = std::env::current_dir().unwrap_or_else(|e| {
@@ -2877,7 +2909,9 @@ pub(crate) mod dep_tracking {
     use rustc_feature::UnstableFeatures;
     use rustc_span::edition::Edition;
     use rustc_span::RealFileName;
-    use rustc_target::spec::{CodeModel, MergeFunctions, PanicStrategy, RelocModel};
+    use rustc_target::spec::{
+        CodeModel, MergeFunctions, OnBrokenPipe, PanicStrategy, RelocModel, WasmCAbi,
+    };
     use rustc_target::spec::{
         RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TargetTriple, TlsModel,
     };
@@ -2941,6 +2975,7 @@ pub(crate) mod dep_tracking {
         InstrumentXRay,
         CrateType,
         MergeFunctions,
+        OnBrokenPipe,
         PanicStrategy,
         RelroLevel,
         OptLevel,
@@ -2975,6 +3010,7 @@ pub(crate) mod dep_tracking {
         Polonius,
         InliningThreshold,
         FunctionReturn,
+        WasmCAbi,
     );
 
     impl<T1, T2> DepTrackingHash for (T1, T2)

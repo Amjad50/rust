@@ -4,6 +4,9 @@
 //! as `object` or `wasmparser`, they can be re-exported and be made available through this library.
 
 pub mod cc;
+pub mod clang;
+pub mod diff;
+pub mod llvm_readobj;
 pub mod run;
 pub mod rustc;
 pub mod rustdoc;
@@ -12,10 +15,15 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+pub use gimli;
 pub use object;
+pub use regex;
 pub use wasmparser;
 
 pub use cc::{cc, extra_c_flags, extra_cxx_flags, Cc};
+pub use clang::{clang, Clang};
+pub use diff::{diff, Diff};
+pub use llvm_readobj::{llvm_readobj, LlvmReadobj};
 pub use run::{run, run_fail};
 pub use rustc::{aux_build, rustc, Rustc};
 pub use rustdoc::{bare_rustdoc, rustdoc, Rustdoc};
@@ -136,7 +144,7 @@ pub fn set_host_rpath(cmd: &mut Command) {
 }
 
 /// Implement common helpers for command wrappers. This assumes that the command wrapper is a struct
-/// containing a `cmd: Command` field. The provided helpers are:
+/// containing a `cmd: Command` field and a `output` function. The provided helpers are:
 ///
 /// 1. Generic argument acceptors: `arg` and `args` (delegated to [`Command`]). These are intended
 ///    to be *fallback* argument acceptors, when specific helpers don't make sense. Prefer to add
@@ -152,7 +160,12 @@ pub fn set_host_rpath(cmd: &mut Command) {
 /// Example usage:
 ///
 /// ```ignore (illustrative)
-/// struct CommandWrapper { cmd: Command }
+/// struct CommandWrapper { cmd: Command } // <- required `cmd` field
+///
+/// impl CommandWrapper {
+///     /// Get the [`Output`][::std::process::Output] of the finished process.
+///     pub fn command_output(&mut self) -> Output { /* ... */ } // <- required `command_output()` method
+/// }
 ///
 /// crate::impl_common_helpers!(CommandWrapper);
 ///
@@ -223,18 +236,13 @@ macro_rules! impl_common_helpers {
                 self
             }
 
-            /// Get the [`Output`][::std::process::Output] of the finished process.
-            pub fn output(&mut self) -> ::std::process::Output {
-                self.cmd.output().expect("failed to get output of finished process")
-            }
-
             /// Run the constructed command and assert that it is successfully run.
             #[track_caller]
             pub fn run(&mut self) -> ::std::process::Output {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.cmd.output().unwrap();
+                let output = self.command_output();
                 if !output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }
@@ -247,11 +255,17 @@ macro_rules! impl_common_helpers {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.cmd.output().unwrap();
+                let output = self.command_output();
                 if output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }
                 output
+            }
+
+            /// Set the path where the command will be run.
+            pub fn current_dir<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+                self.cmd.current_dir(path);
+                self
             }
         }
     };

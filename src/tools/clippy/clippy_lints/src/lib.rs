@@ -535,6 +535,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
         allow_print_in_tests,
         allow_private_module_inception,
         allow_unwrap_in_tests,
+        allow_useless_vec_in_tests,
         ref allowed_dotfiles,
         ref allowed_idents_below_min_chars,
         ref allowed_scripts,
@@ -594,6 +595,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
         pub_underscore_fields_behavior,
         ref allowed_duplicate_crates,
         allow_comparison_to_zero,
+        ref allowed_prefixes,
 
         blacklisted_names: _,
         cyclomatic_complexity_threshold: _,
@@ -753,6 +755,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
             too_large_for_stack,
             msrv: msrv(),
             span_to_lint_map: BTreeMap::new(),
+            allow_in_test: allow_useless_vec_in_tests,
         })
     });
     store.register_late_pass(|_| Box::new(panic_unimplemented::PanicUnimplemented));
@@ -864,6 +867,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
             struct_field_name_threshold,
             avoid_breaking_exported_api,
             allow_private_module_inception,
+            allowed_prefixes,
         ))
     });
     store.register_early_pass(|| Box::new(tabs_in_doc_comments::TabsInDocComments));

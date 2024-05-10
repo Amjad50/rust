@@ -23,7 +23,7 @@ use rustc_span::Span;
 /// include the self type (e.g., `trait_bounds`) but in others we do not
 #[derive(Default, PartialEq, Eq, Clone, Debug)]
 pub struct Bounds<'tcx> {
-    pub clauses: Vec<(ty::Clause<'tcx>, Span)>,
+    clauses: Vec<(ty::Clause<'tcx>, Span)>,
 }
 
 impl<'tcx> Bounds<'tcx> {
@@ -38,16 +38,6 @@ impl<'tcx> Bounds<'tcx> {
     }
 
     pub fn push_trait_bound(
-        &mut self,
-        tcx: TyCtxt<'tcx>,
-        trait_ref: ty::PolyTraitRef<'tcx>,
-        span: Span,
-        polarity: ty::PredicatePolarity,
-    ) {
-        self.push_trait_bound_inner(tcx, trait_ref, span, polarity);
-    }
-
-    fn push_trait_bound_inner(
         &mut self,
         tcx: TyCtxt<'tcx>,
         trait_ref: ty::PolyTraitRef<'tcx>,

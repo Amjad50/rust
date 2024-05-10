@@ -1,12 +1,13 @@
 use rustc_data_structures::stable_hasher::{Hash64, HashStable, StableHasher};
 use rustc_hir::def_id::CrateNum;
 use rustc_hir::definitions::{DefPathData, DisambiguatedDefPathData};
+use rustc_middle::bug;
 use rustc_middle::ty::print::{PrettyPrinter, Print, PrintError, Printer};
 use rustc_middle::ty::{self, Instance, ReifyReason, Ty, TyCtxt, TypeVisitableExt};
 use rustc_middle::ty::{GenericArg, GenericArgKind};
-
 use std::fmt::{self, Write};
 use std::mem::{self, discriminant};
+use tracing::debug;
 
 pub(super) fn mangle<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -55,7 +56,9 @@ pub(super) fn mangle<'tcx>(
     printer
         .print_def_path(
             def_id,
-            if let ty::InstanceDef::DropGlue(_, _) = instance.def {
+            if let ty::InstanceDef::DropGlue(_, _) | ty::InstanceDef::AsyncDropGlueCtorShim(_, _) =
+                instance.def
+            {
                 // Add the name of the dropped type to the symbol name
                 &*instance.args
             } else {

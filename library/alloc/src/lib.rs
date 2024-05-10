@@ -126,10 +126,8 @@
 #![feature(extend_one)]
 #![feature(fmt_internals)]
 #![feature(fn_traits)]
-#![feature(generic_nonzero)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hint_assert_unchecked)]
-#![feature(inline_const)]
 #![feature(inplace_iteration)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
@@ -139,7 +137,6 @@
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_uninit_array_transpose)]
-#![feature(non_null_convenience)]
 #![feature(panic_internals)]
 #![feature(pattern)]
 #![feature(ptr_internals)]
@@ -163,14 +160,12 @@
 #![feature(tuple_trait)]
 #![feature(unicode_internals)]
 #![feature(unsize)]
-#![feature(utf8_chunks)]
 #![feature(vec_pop_if)]
 // tidy-alphabetical-end
 //
 // Language features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
-#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
+#![cfg_attr(bootstrap, feature(exclusive_range_pattern))]
 #![cfg_attr(not(test), feature(coroutine_trait))]
 #![cfg_attr(test, feature(panic_update_hook))]
 #![cfg_attr(test, feature(test))]
@@ -185,7 +180,6 @@
 #![feature(const_try)]
 #![feature(decl_macro)]
 #![feature(dropck_eyepatch)]
-#![feature(exclusive_range_pattern)]
 #![feature(fundamental)]
 #![feature(hashmap_internals)]
 #![feature(lang_items)]
@@ -201,6 +195,7 @@
 #![feature(unboxed_closures)]
 #![feature(unsized_fn_params)]
 #![feature(with_negative_coherence)]
+#![rustc_preserve_ub_checks]
 // tidy-alphabetical-end
 //
 // Rustdoc features:

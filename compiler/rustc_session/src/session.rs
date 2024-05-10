@@ -1,8 +1,8 @@
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
-    self, CrateType, FunctionReturn, InstrumentCoverage, OptLevel, OutFileName, OutputType,
-    RemapPathScopeComponents, SwitchWithOptPath,
+    self, CoverageLevel, CrateType, FunctionReturn, InstrumentCoverage, OptLevel, OutFileName,
+    OutputType, RemapPathScopeComponents, SwitchWithOptPath,
 };
 use crate::config::{ErrorOutputType, Input};
 use crate::errors;
@@ -28,9 +28,9 @@ use rustc_errors::{
 use rustc_macros::HashStable_Generic;
 pub use rustc_span::def_id::StableCrateId;
 use rustc_span::edition::Edition;
-use rustc_span::source_map::{FileLoader, FilePathMapping, RealFileLoader, SourceMap};
+use rustc_span::source_map::{FilePathMapping, SourceMap};
 use rustc_span::{FileNameDisplayPreference, RealFileName};
-use rustc_span::{SourceFileHashAlgorithm, Span, Symbol};
+use rustc_span::{Span, Symbol};
 use rustc_target::asm::InlineAsmArch;
 use rustc_target::spec::{CodeModel, PanicStrategy, RelocModel, RelroLevel};
 use rustc_target::spec::{
@@ -349,7 +349,13 @@ impl Session {
     }
 
     pub fn instrument_coverage_branch(&self) -> bool {
-        self.instrument_coverage() && self.opts.unstable_opts.coverage_options.branch
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Branch
+    }
+
+    pub fn instrument_coverage_mcdc(&self) -> bool {
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Mcdc
     }
 
     pub fn is_sanitizer_cfi_enabled(&self) -> bool {
@@ -573,7 +579,7 @@ impl Session {
 
         let dbg_opts = &self.opts.unstable_opts;
 
-        let relro_level = dbg_opts.relro_level.unwrap_or(self.target.relro_level);
+        let relro_level = self.opts.cg.relro_level.unwrap_or(self.target.relro_level);
 
         // Only enable this optimization by default if full relro is also enabled.
         // In this case, lazy binding was already unavailable, so nothing is lost.
@@ -988,7 +994,6 @@ pub fn build_session(
     registry: rustc_errors::registry::Registry,
     fluent_resources: Vec<&'static str>,
     driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
-    file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
     target: Target,
     sysroot: PathBuf,
     cfg_version: &'static str,
@@ -1015,24 +1020,11 @@ pub fn build_session(
         early_dcx.early_warn(warning)
     }
 
-    let loader = file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
-    let hash_kind = sopts.unstable_opts.src_hash_algorithm.unwrap_or_else(|| {
-        if target.is_like_msvc {
-            SourceFileHashAlgorithm::Sha256
-        } else {
-            SourceFileHashAlgorithm::Md5
-        }
-    });
-    let source_map = Lrc::new(SourceMap::with_file_loader_and_hash_kind(
-        loader,
-        sopts.file_path_mapping(),
-        hash_kind,
-    ));
-
     let fallback_bundle = fallback_fluent_bundle(
         fluent_resources,
         sopts.unstable_opts.translate_directionality_markers,
     );
+    let source_map = rustc_span::source_map::get_source_map().unwrap();
     let emitter = default_emitter(&sopts, registry, source_map.clone(), bundle, fallback_bundle);
 
     let mut dcx =
@@ -1411,16 +1403,10 @@ impl EarlyDiagCtxt {
         self.dcx.warn(msg)
     }
 
-    pub fn initialize_checked_jobserver(&self) {
-        // initialize jobserver before getting `jobserver::client` and `build_session`.
-        jobserver::initialize_checked(|err| {
-            #[allow(rustc::untranslatable_diagnostic)]
-            #[allow(rustc::diagnostic_outside_of_impl)]
-            self.dcx
-                .struct_warn(err)
-                .with_note("the build environment is likely misconfigured")
-                .emit()
-        });
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_struct_warn(&self, msg: impl Into<DiagMessage>) -> Diag<'_, ()> {
+        self.dcx.struct_warn(msg)
     }
 }
 

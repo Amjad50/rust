@@ -56,17 +56,17 @@ use rustc_data_structures::unord::UnordSet;
 use rustc_errors::{codes::*, struct_span_code_err, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::intravisit::{Map, Visitor};
-use rustc_hir::{HirIdMap, Node};
+use rustc_hir::intravisit::Visitor;
+use rustc_hir::{HirId, HirIdMap, Node};
 use rustc_hir_analysis::check::check_abi;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
 use rustc_middle::query::Providers;
 use rustc_middle::traits;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::config;
-use rustc_span::def_id::{DefId, LocalDefId};
+use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
@@ -82,21 +82,6 @@ macro_rules! type_error_struct {
 
         err
     })
-}
-
-fn has_typeck_results(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    // Closures' typeck results come from their outermost function,
-    // as they are part of the same "inference environment".
-    let typeck_root_def_id = tcx.typeck_root_def_id(def_id);
-    if typeck_root_def_id != def_id {
-        return tcx.has_typeck_results(typeck_root_def_id);
-    }
-
-    if let Some(def_id) = def_id.as_local() {
-        tcx.hir_node_by_def_id(def_id).body_id().is_some()
-    } else {
-        false
-    }
 }
 
 fn used_trait_imports(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &UnordSet<LocalDefId> {
@@ -261,10 +246,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
                 tcx.impl_trait_ref(item.container_id(tcx)).unwrap().instantiate_identity().args;
             Some(tcx.type_of(trait_item).instantiate(tcx, args))
         } else {
-            Some(fcx.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::TypeInference,
-                span,
-            }))
+            Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
         }
     } else if let Node::AnonConst(_) = node {
         let id = tcx.local_def_id_to_hir_id(def_id);
@@ -272,10 +254,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
             Node::Ty(&hir::Ty { kind: hir::TyKind::Typeof(ref anon_const), span, .. })
                 if anon_const.hir_id == id =>
             {
-                Some(fcx.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::TypeInference,
-                    span,
-                }))
+                Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
             }
             Node::Expr(&hir::Expr { kind: hir::ExprKind::InlineAsm(asm), span, .. })
             | Node::Item(&hir::Item { kind: hir::ItemKind::GlobalAsm(asm), span, .. }) => {
@@ -285,10 +264,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
                         Some(fcx.next_int_var())
                     }
                     hir::InlineAsmOperand::SymFn { anon_const } if anon_const.hir_id == id => {
-                        Some(fcx.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::MiscVariable,
-                            span,
-                        }))
+                        Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
                     }
                     _ => None,
                 })
@@ -348,13 +324,13 @@ pub struct EnclosingBreakables<'tcx> {
 }
 
 impl<'tcx> EnclosingBreakables<'tcx> {
-    fn find_breakable(&mut self, target_id: hir::HirId) -> &mut BreakableCtxt<'tcx> {
+    fn find_breakable(&mut self, target_id: HirId) -> &mut BreakableCtxt<'tcx> {
         self.opt_find_breakable(target_id).unwrap_or_else(|| {
             bug!("could not find enclosing breakable with id {}", target_id);
         })
     }
 
-    fn opt_find_breakable(&mut self, target_id: hir::HirId) -> Option<&mut BreakableCtxt<'tcx>> {
+    fn opt_find_breakable(&mut self, target_id: HirId) -> Option<&mut BreakableCtxt<'tcx>> {
         match self.by_id.get(&target_id) {
             Some(ix) => Some(&mut self.stack[*ix]),
             None => None,
@@ -374,7 +350,7 @@ fn report_unexpected_variant_res(
         Res::Def(DefKind::Variant, _) => "struct variant",
         _ => res.descr(),
     };
-    let path_str = rustc_hir_pretty::qpath_to_string(qpath);
+    let path_str = rustc_hir_pretty::qpath_to_string(&tcx, qpath);
     let err = tcx
         .dcx()
         .struct_span_err(span, format!("expected {expected}, found {res_descr} `{path_str}`"))
@@ -436,36 +412,7 @@ fn fatally_break_rust(tcx: TyCtxt<'_>, span: Span) -> ! {
     diag.emit()
 }
 
-pub fn lookup_method_for_diagnostic<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    (def_id, hir_id): (LocalDefId, hir::HirId),
-) -> Option<DefId> {
-    let root_ctxt = TypeckRootCtxt::new(tcx, def_id);
-    let param_env = tcx.param_env(def_id);
-    let fn_ctxt = FnCtxt::new(&root_ctxt, param_env, def_id);
-    let hir::Node::Expr(expr) = tcx.hir().hir_node(hir_id) else {
-        return None;
-    };
-    let hir::ExprKind::MethodCall(segment, rcvr, _, _) = expr.kind else {
-        return None;
-    };
-    let tables = tcx.typeck(def_id);
-    // The found `Self` type of the method call.
-    let possible_rcvr_ty = tables.node_type_opt(rcvr.hir_id)?;
-    fn_ctxt
-        .lookup_method_for_diagnostic(possible_rcvr_ty, segment, expr.span, expr, rcvr)
-        .ok()
-        .map(|method| method.def_id)
-}
-
 pub fn provide(providers: &mut Providers) {
     method::provide(providers);
-    *providers = Providers {
-        typeck,
-        diagnostic_only_typeck,
-        has_typeck_results,
-        used_trait_imports,
-        lookup_method_for_diagnostic: lookup_method_for_diagnostic,
-        ..*providers
-    };
+    *providers = Providers { typeck, diagnostic_only_typeck, used_trait_imports, ..*providers };
 }

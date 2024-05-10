@@ -72,6 +72,7 @@ use rustc_hir::def_id::{
 use rustc_hir::lang_items::{LangItem, LanguageItems};
 use rustc_hir::{Crate, ItemLocalId, ItemLocalMap, TraitCandidate};
 use rustc_index::IndexVec;
+use rustc_macros::rustc_queries;
 use rustc_query_system::ich::StableHashingContext;
 use rustc_query_system::query::{try_get_cached, QueryCache, QueryMode, QueryState};
 use rustc_session::config::{EntryFnType, OptLevel, OutputFilenames, SymbolManglingVersion};
@@ -474,20 +475,6 @@ rustc_queries! {
         desc { |tcx| "building THIR for `{}`", tcx.def_path_str(key) }
     }
 
-    /// Create a THIR tree for debugging.
-    query thir_tree(key: LocalDefId) -> &'tcx String {
-        no_hash
-        arena_cache
-        desc { |tcx| "constructing THIR tree for `{}`", tcx.def_path_str(key) }
-    }
-
-    /// Create a list-like THIR representation for debugging.
-    query thir_flat(key: LocalDefId) -> &'tcx String {
-        no_hash
-        arena_cache
-        desc { |tcx| "constructing flat THIR representation for `{}`", tcx.def_path_str(key) }
-    }
-
     /// Set of all the `DefId`s in this crate that have MIR associated with
     /// them. This includes all the body owners, but also things like struct
     /// constructors.
@@ -860,8 +847,10 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    query issue33140_self_ty(key: DefId) -> Option<ty::EarlyBinder<ty::Ty<'tcx>>> {
-        desc { |tcx| "computing Self type wrt issue #33140 `{}`", tcx.def_path_str(key) }
+    query self_ty_of_trait_impl_enabling_order_dep_trait_object_hack(
+        key: DefId
+    ) -> Option<ty::EarlyBinder<ty::Ty<'tcx>>> {
+        desc { |tcx| "computing self type wrt issue #33140 `{}`", tcx.def_path_str(key) }
     }
 
     /// Maps a `DefId` of a type to a list of its inherent impls.
@@ -983,17 +972,10 @@ rustc_queries! {
     query diagnostic_only_typeck(key: LocalDefId) -> &'tcx ty::TypeckResults<'tcx> {
         desc { |tcx| "type-checking `{}`", tcx.def_path_str(key) }
     }
-    query lookup_method_for_diagnostic((def_id, hir_id): (LocalDefId, hir::HirId)) -> Option<DefId> {
-        desc { |tcx| "lookup_method_for_diagnostics `{}`", tcx.def_path_str(def_id) }
-    }
 
     query used_trait_imports(key: LocalDefId) -> &'tcx UnordSet<LocalDefId> {
         desc { |tcx| "finding used_trait_imports `{}`", tcx.def_path_str(key) }
         cache_on_disk_if { true }
-    }
-
-    query has_typeck_results(def_id: DefId) -> bool {
-        desc { |tcx| "checking whether `{}` has a body", tcx.def_path_str(def_id) }
     }
 
     query coherent_trait(def_id: DefId) -> Result<(), ErrorGuaranteed> {
@@ -1360,6 +1342,14 @@ rustc_queries! {
     /// Query backing `Ty::is_unpin`.
     query is_unpin_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
         desc { "computing whether `{}` is `Unpin`", env.value }
+    }
+    /// Query backing `Ty::has_surface_async_drop`.
+    query has_surface_async_drop_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+        desc { "computing whether `{}` has `AsyncDrop` implementation", env.value }
+    }
+    /// Query backing `Ty::has_surface_drop`.
+    query has_surface_drop_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {
+        desc { "computing whether `{}` has `Drop` implementation", env.value }
     }
     /// Query backing `Ty::needs_drop`.
     query needs_drop_raw(env: ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool {

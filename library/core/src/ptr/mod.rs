@@ -812,7 +812,7 @@ pub const fn from_mut<T: ?Sized>(r: &mut T) -> *mut T {
 #[rustc_allow_const_fn_unstable(ptr_metadata)]
 #[rustc_diagnostic_item = "ptr_slice_from_raw_parts"]
 pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
-    from_raw_parts(data.cast(), len)
+    intrinsics::aggregate_raw_ptr(data, len)
 }
 
 /// Forms a raw mutable slice from a pointer and a length.
@@ -858,7 +858,7 @@ pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
 #[rustc_const_unstable(feature = "const_slice_from_raw_parts_mut", issue = "67456")]
 #[rustc_diagnostic_item = "ptr_slice_from_raw_parts_mut"]
 pub const fn slice_from_raw_parts_mut<T>(data: *mut T, len: usize) -> *mut [T] {
-    from_raw_parts_mut(data.cast(), len)
+    intrinsics::aggregate_raw_ptr(data, len)
 }
 
 /// Swaps the values at two mutable locations of the same type, without
@@ -1784,15 +1784,6 @@ pub(crate) const unsafe fn align_offset<T: Sized>(p: *const T, a: usize) -> usiz
         assume, cttz_nonzero, exact_div, mul_with_overflow, unchecked_rem, unchecked_sub,
         wrapping_add, wrapping_mul, wrapping_sub,
     };
-    #[cfg(bootstrap)]
-    const unsafe fn unchecked_shl(value: usize, shift: usize) -> usize {
-        value << shift
-    }
-    #[cfg(bootstrap)]
-    const unsafe fn unchecked_shr(value: usize, shift: usize) -> usize {
-        value >> shift
-    }
-    #[cfg(not(bootstrap))]
     use intrinsics::{unchecked_shl, unchecked_shr};
 
     /// Calculate multiplicative modular inverse of `x` modulo `m`.

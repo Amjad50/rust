@@ -20,6 +20,7 @@ use rustc_span::{DesugaringKind, Span, Symbol};
 use rustc_target::spec::abi;
 use smallvec::{smallvec, SmallVec};
 use thin_vec::ThinVec;
+use tracing::instrument;
 
 pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
@@ -134,8 +135,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
     fn lower_item_id_use_tree(&mut self, tree: &UseTree, vec: &mut SmallVec<[hir::ItemId; 1]>) {
         match &tree.kind {
-            UseTreeKind::Nested(nested_vec) => {
-                for &(ref nested, id) in nested_vec {
+            UseTreeKind::Nested { items, .. } => {
+                for &(ref nested, id) in items {
                     vec.push(hir::ItemId {
                         owner_id: hir::OwnerId { def_id: self.local_def_id(id) },
                     });
@@ -203,7 +204,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 body,
                 ..
             }) => {
-                self.with_new_scopes(ident.span, |this| {
+                self.with_new_scopes(*fn_sig_span, |this| {
                     // Note: we don't need to change the return type from `T` to
                     // `impl Future<Output = T>` here because lower_body
                     // only cares about the input argument patterns in the function
@@ -517,7 +518,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 let path = self.lower_use_path(res, &path, ParamMode::Explicit);
                 hir::ItemKind::Use(path, hir::UseKind::Glob)
             }
-            UseTreeKind::Nested(ref trees) => {
+            UseTreeKind::Nested { items: ref trees, .. } => {
                 // Nested imports are desugared into simple imports.
                 // So, if we start with
                 //
@@ -662,10 +663,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
                     hir::ForeignItemKind::Fn(fn_dec, fn_args, generics)
                 }
-                ForeignItemKind::Static(t, m, _) => {
-                    let ty =
-                        self.lower_ty(t, ImplTraitContext::Disallowed(ImplTraitPosition::StaticTy));
-                    hir::ForeignItemKind::Static(ty, *m)
+                ForeignItemKind::Static(box StaticForeignItem { ty, mutability, expr: _ }) => {
+                    let ty = self
+                        .lower_ty(ty, ImplTraitContext::Disallowed(ImplTraitPosition::StaticTy));
+                    hir::ForeignItemKind::Static(ty, *mutability)
                 }
                 ForeignItemKind::TyAlias(..) => hir::ForeignItemKind::Type,
                 ForeignItemKind::MacCall(_) => panic!("macro shouldn't exist here"),
@@ -1179,9 +1180,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             // Check if this is a binding pattern, if so, we can optimize and avoid adding a
             // `let <pat> = __argN;` statement. In this case, we do not rename the parameter.
             let (ident, is_simple_parameter) = match parameter.pat.kind {
-                hir::PatKind::Binding(hir::BindingAnnotation(ByRef::No, _), _, ident, _) => {
-                    (ident, true)
-                }
+                hir::PatKind::Binding(hir::BindingMode(ByRef::No, _), _, ident, _) => (ident, true),
                 // For `ref mut` or wildcard arguments, we can't reuse the binding, but
                 // we can keep the same name for the parameter.
                 // This lets rustdoc render it correctly in documentation.
@@ -1244,7 +1243,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // because the user may have specified a `ref mut` binding in the next
                 // statement.
                 let (move_pat, move_id) =
-                    self.pat_ident_binding_mode(desugared_span, ident, hir::BindingAnnotation::MUT);
+                    self.pat_ident_binding_mode(desugared_span, ident, hir::BindingMode::MUT);
                 let move_expr = self.expr_ident(desugared_span, ident, new_parameter_id);
                 let move_stmt = self.stmt_let_pat(
                     None,
@@ -1346,7 +1345,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         (generics, hir::FnSig { header, decl, span: self.lower_span(sig.span) })
     }
 
-    fn lower_fn_header(&mut self, h: FnHeader) -> hir::FnHeader {
+    pub(super) fn lower_fn_header(&mut self, h: FnHeader) -> hir::FnHeader {
         let asyncness = if let Some(CoroutineKind::Async { span, .. }) = h.coroutine_kind {
             hir::IsAsync::Async(span)
         } else {
@@ -1590,11 +1589,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
                             }),
                         )),
                     )),
-                    default: Some(hir::AnonConst {
+                    default: Some(self.arena.alloc(hir::AnonConst {
                         def_id: anon_const,
                         hir_id: const_id,
                         body: const_body,
-                    }),
+                        span,
+                    })),
                     is_host_effect: true,
                 },
                 colon_span: None,

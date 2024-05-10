@@ -17,15 +17,17 @@ use crate::shims::unix::*;
 use crate::*;
 use shims::time::system_time_to_duration;
 
+use self::fd::FileDescriptor;
+
 #[derive(Debug)]
 struct FileHandle {
     file: File,
     writable: bool,
 }
 
-impl FileDescriptor for FileHandle {
+impl FileDescription for FileHandle {
     fn name(&self) -> &'static str {
-        "FILE"
+        "file"
     }
 
     fn read<'tcx>(
@@ -39,13 +41,13 @@ impl FileDescriptor for FileHandle {
     }
 
     fn write<'tcx>(
-        &self,
+        &mut self,
         communicate_allowed: bool,
         bytes: &[u8],
         _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
         assert!(communicate_allowed, "isolation should have prevented even opening a file");
-        Ok((&mut &self.file).write(bytes))
+        Ok(self.file.write(bytes))
     }
 
     fn seek<'tcx>(
@@ -60,16 +62,14 @@ impl FileDescriptor for FileHandle {
     fn close<'tcx>(
         self: Box<Self>,
         communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
+    ) -> InterpResult<'tcx, io::Result<()>> {
         assert!(communicate_allowed, "isolation should have prevented even opening a file");
         // We sync the file if it was opened in a mode different than read-only.
         if self.writable {
             // `File::sync_all` does the checks that are done when closing a file. We do this to
             // to handle possible errors correctly.
-            let result = self.file.sync_all().map(|_| 0i32);
-            // Now we actually close the file.
-            drop(self);
-            // And return the result.
+            let result = self.file.sync_all();
+            // Now we actually close the file and return the result.
             Ok(result)
         } else {
             // We drop the file, this closes it but ignores any errors
@@ -78,14 +78,8 @@ impl FileDescriptor for FileHandle {
             // `/dev/urandom` which are read-only. Check
             // https://github.com/rust-lang/miri/issues/999#issuecomment-568920439
             // for a deeper discussion.
-            drop(self);
-            Ok(Ok(0))
+            Ok(Ok(()))
         }
-    }
-
-    fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        let duplicated = self.file.try_clone()?;
-        Ok(Box::new(FileHandle { file: duplicated, writable: self.writable }))
     }
 
     fn is_tty(&self, communicate_allowed: bool) -> bool {
@@ -196,13 +190,12 @@ struct OpenDir {
     read_dir: ReadDir,
     /// The most recent entry returned by readdir().
     /// Will be freed by the next call.
-    entry: Pointer<Option<Provenance>>,
+    entry: Option<Pointer<Option<Provenance>>>,
 }
 
 impl OpenDir {
     fn new(read_dir: ReadDir) -> Self {
-        // We rely on `free` being a NOP on null pointers.
-        Self { read_dir, entry: Pointer::null() }
+        Self { read_dir, entry: None }
     }
 }
 
@@ -400,7 +393,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let fd = options.open(path).map(|file| {
             let fh = &mut this.machine.fds;
-            fh.insert_fd(Box::new(FileHandle { file, writable }))
+            fh.insert_fd(FileDescriptor::new(FileHandle { file, writable }))
         });
 
         this.try_unwrap_io_result(fd)
@@ -429,14 +422,17 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         };
 
         let communicate = this.machine.communicate();
-        Ok(Scalar::from_i64(if let Some(file_descriptor) = this.machine.fds.get_mut(fd) {
-            let result = file_descriptor
-                .seek(communicate, seek_from)?
-                .map(|offset| i64::try_from(offset).unwrap());
-            this.try_unwrap_io_result(result)?
-        } else {
-            this.fd_not_found()?
-        }))
+
+        let Some(mut file_descriptor) = this.machine.fds.get_mut(fd) else {
+            return Ok(Scalar::from_i64(this.fd_not_found()?));
+        };
+        let result = file_descriptor
+            .seek(communicate, seek_from)?
+            .map(|offset| i64::try_from(offset).unwrap());
+        drop(file_descriptor);
+
+        let result = this.try_unwrap_io_result(result)?;
+        Ok(Scalar::from_i64(result))
     }
 
     fn unlink(&mut self, path_op: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx, i32> {
@@ -924,8 +920,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let d_name_offset = dirent64_layout.fields.offset(4 /* d_name */).bytes();
                 let size = d_name_offset.checked_add(name_len).unwrap();
 
-                let entry =
-                    this.malloc(size, /*zero_init:*/ false, MiriMemoryKind::Runtime)?;
+                let entry = this.allocate_ptr(
+                    Size::from_bytes(size),
+                    dirent64_layout.align.abi,
+                    MiriMemoryKind::Runtime.into(),
+                )?;
+                let entry: Pointer<Option<Provenance>> = entry.into();
 
                 // If the host is a Unix system, fill in the inode number with its real value.
                 // If not, use 0 as a fallback value.
@@ -949,23 +949,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let name_ptr = entry.offset(Size::from_bytes(d_name_offset), this)?;
                 this.write_bytes_ptr(name_ptr, name_bytes.iter().copied())?;
 
-                entry
+                Some(entry)
             }
             None => {
                 // end of stream: return NULL
-                Pointer::null()
+                None
             }
             Some(Err(e)) => {
                 this.set_last_error_from_io_error(e.kind())?;
-                Pointer::null()
+                None
             }
         };
 
         let open_dir = this.machine.dirs.streams.get_mut(&dirp).unwrap();
         let old_entry = std::mem::replace(&mut open_dir.entry, entry);
-        this.free(old_entry, MiriMemoryKind::Runtime)?;
+        if let Some(old_entry) = old_entry {
+            this.deallocate_ptr(old_entry, None, MiriMemoryKind::Runtime.into())?;
+        }
 
-        Ok(Scalar::from_maybe_pointer(entry, this))
+        Ok(Scalar::from_maybe_pointer(entry.unwrap_or_else(Pointer::null), this))
     }
 
     fn macos_fbsd_readdir_r(
@@ -1106,7 +1108,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
 
         if let Some(open_dir) = this.machine.dirs.streams.remove(&dirp) {
-            this.free(open_dir.entry, MiriMemoryKind::Runtime)?;
+            if let Some(entry) = open_dir.entry {
+                this.deallocate_ptr(entry, None, MiriMemoryKind::Runtime.into())?;
+            }
             drop(open_dir);
             Ok(0)
         } else {
@@ -1124,32 +1128,35 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             return Ok(Scalar::from_i32(this.fd_not_found()?));
         }
 
-        Ok(Scalar::from_i32(if let Some(file_descriptor) = this.machine.fds.get_mut(fd) {
-            // FIXME: Support ftruncate64 for all FDs
-            let FileHandle { file, writable } =
-                file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
-                    err_unsup_format!(
-                        "`ftruncate64` is only supported on file-backed file descriptors"
-                    )
-                })?;
-            if *writable {
-                if let Ok(length) = length.try_into() {
-                    let result = file.set_len(length);
-                    this.try_unwrap_io_result(result.map(|_| 0i32))?
-                } else {
-                    let einval = this.eval_libc("EINVAL");
-                    this.set_last_error(einval)?;
-                    -1
-                }
+        let Some(file_descriptor) = this.machine.fds.get(fd) else {
+            return Ok(Scalar::from_i32(this.fd_not_found()?));
+        };
+
+        // FIXME: Support ftruncate64 for all FDs
+        let FileHandle { file, writable } =
+            file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                err_unsup_format!("`ftruncate64` is only supported on file-backed file descriptors")
+            })?;
+
+        if *writable {
+            if let Ok(length) = length.try_into() {
+                let result = file.set_len(length);
+                drop(file_descriptor);
+                let result = this.try_unwrap_io_result(result.map(|_| 0i32))?;
+                Ok(Scalar::from_i32(result))
             } else {
-                // The file is not writable
+                drop(file_descriptor);
                 let einval = this.eval_libc("EINVAL");
                 this.set_last_error(einval)?;
-                -1
+                Ok(Scalar::from_i32(-1))
             }
         } else {
-            this.fd_not_found()?
-        }))
+            drop(file_descriptor);
+            // The file is not writable
+            let einval = this.eval_libc("EINVAL");
+            this.set_last_error(einval)?;
+            Ok(Scalar::from_i32(-1))
+        }
     }
 
     fn fsync(&mut self, fd_op: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx, i32> {
@@ -1183,6 +1190,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 err_unsup_format!("`fsync` is only supported on file-backed file descriptors")
             })?;
         let io_result = maybe_sync_file(file, *writable, File::sync_all);
+        drop(file_descriptor);
         this.try_unwrap_io_result(io_result)
     }
 
@@ -1207,6 +1215,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 err_unsup_format!("`fdatasync` is only supported on file-backed file descriptors")
             })?;
         let io_result = maybe_sync_file(file, *writable, File::sync_data);
+        drop(file_descriptor);
         this.try_unwrap_io_result(io_result)
     }
 
@@ -1256,6 +1265,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 )
             })?;
         let io_result = maybe_sync_file(file, *writable, File::sync_data);
+        drop(file_descriptor);
         Ok(Scalar::from_i32(this.try_unwrap_io_result(io_result)?))
     }
 
@@ -1491,7 +1501,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             match file {
                 Ok(f) => {
                     let fh = &mut this.machine.fds;
-                    let fd = fh.insert_fd(Box::new(FileHandle { file: f, writable: true }));
+                    let fd =
+                        fh.insert_fd(FileDescriptor::new(FileHandle { file: f, writable: true }));
                     return Ok(fd);
                 }
                 Err(e) =>
@@ -1556,21 +1567,21 @@ impl FileMetadata {
         ecx: &mut MiriInterpCx<'_, 'tcx>,
         fd: i32,
     ) -> InterpResult<'tcx, Option<FileMetadata>> {
-        let option = ecx.machine.fds.get(fd);
-        let file = match option {
-            Some(file_descriptor) =>
-                &file_descriptor
-                    .downcast_ref::<FileHandle>()
-                    .ok_or_else(|| {
-                        err_unsup_format!(
-                            "obtaining metadata is only supported on file-backed file descriptors"
-                        )
-                    })?
-                    .file,
-            None => return ecx.fd_not_found().map(|_: i32| None),
+        let Some(file_descriptor) = ecx.machine.fds.get(fd) else {
+            return ecx.fd_not_found().map(|_: i32| None);
         };
-        let metadata = file.metadata();
 
+        let file = &file_descriptor
+            .downcast_ref::<FileHandle>()
+            .ok_or_else(|| {
+                err_unsup_format!(
+                    "obtaining metadata is only supported on file-backed file descriptors"
+                )
+            })?
+            .file;
+
+        let metadata = file.metadata();
+        drop(file_descriptor);
         FileMetadata::from_meta(ecx, metadata)
     }
 

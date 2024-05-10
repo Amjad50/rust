@@ -3,6 +3,8 @@ use rustc_ast_ir::try_visit;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 #[cfg(feature = "nightly")]
 use rustc_data_structures::unify::{EqUnifyValue, UnifyKey};
+#[cfg(feature = "nightly")]
+use rustc_macros::{Decodable, Encodable, HashStable_NoContext, TyDecodable, TyEncodable};
 use std::fmt;
 
 use crate::fold::{FallibleTypeFolder, TypeFoldable};
@@ -183,7 +185,7 @@ pub enum TyKind<I: Interner> {
     ///
     /// ```
     /// #![feature(coroutines)]
-    /// static |a| {
+    /// #[coroutine] static |a| {
     ///     let x = &vec![3];
     ///     yield a;
     ///     yield x[0];
@@ -227,7 +229,7 @@ pub enum TyKind<I: Interner> {
     /// A placeholder type, used during higher ranked subtyping to instantiate
     /// bound variables.
     ///
-    /// It is conventional to render anonymous placeholer types like `!N` or `!U_N`,
+    /// It is conventional to render anonymous placeholder types like `!N` or `!U_N`,
     /// where `N` is the placeholder variable's anonymous index (which corresponds
     /// to the bound variable's index from the binder from which it was instantiated),
     /// and `U` is the universe index in which it is instantiated, or totally omitted

@@ -168,7 +168,7 @@ impl<'ck, 'mir, 'tcx> TypeVisitor<TyCtxt<'tcx>> for LocalReturnTyVisitor<'ck, 'm
         match t.kind() {
             ty::FnPtr(_) => {}
             ty::Ref(_, _, hir::Mutability::Mut) => {
-                self.checker.check_op(ops::ty::MutRef(self.kind));
+                self.checker.check_op(ops::mut_ref::MutRef(self.kind));
                 t.super_visit_with(self)
             }
             _ => t.super_visit_with(self),
@@ -331,6 +331,11 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
         if self.tcx.is_thread_local_static(def_id) {
             self.tcx.dcx().span_bug(span, "tls access is checked in `Rvalue::ThreadLocalRef`");
         }
+        if let Some(def_id) = def_id.as_local()
+            && let Err(guar) = self.tcx.at(span).check_well_formed(hir::OwnerId { def_id })
+        {
+            self.error_emitted = Some(guar);
+        }
         self.check_op_spanned(ops::StaticAccess, span)
     }
 
@@ -409,7 +414,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                         BorrowKind::Shared => {
                             PlaceContext::NonMutatingUse(NonMutatingUseContext::SharedBorrow)
                         }
-                        BorrowKind::Fake => {
+                        BorrowKind::Fake(_) => {
                             PlaceContext::NonMutatingUse(NonMutatingUseContext::FakeBorrow)
                         }
                         BorrowKind::Mut { .. } => {
@@ -482,7 +487,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                 }
             }
 
-            Rvalue::Ref(_, BorrowKind::Shared | BorrowKind::Fake, place)
+            Rvalue::Ref(_, BorrowKind::Shared | BorrowKind::Fake(_), place)
             | Rvalue::AddressOf(Mutability::Not, place) => {
                 let borrowed_place_has_mut_interior = qualifs::in_place::<HasMutInterior, _>(
                     self.ccx,

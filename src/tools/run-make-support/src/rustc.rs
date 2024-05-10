@@ -1,7 +1,8 @@
 use std::env;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use crate::{handle_failed_output, set_host_rpath, tmp_dir};
 
@@ -19,6 +20,7 @@ pub fn aux_build() -> Rustc {
 #[derive(Debug)]
 pub struct Rustc {
     cmd: Command,
+    stdin: Option<Box<[u8]>>,
 }
 
 crate::impl_common_helpers!(Rustc);
@@ -37,14 +39,14 @@ impl Rustc {
     /// Construct a new `rustc` invocation.
     pub fn new() -> Self {
         let cmd = setup_common();
-        Self { cmd }
+        Self { cmd, stdin: None }
     }
 
     /// Construct a new `rustc` invocation with `aux_build` preset (setting `--crate-type=lib`).
     pub fn new_aux_build() -> Self {
         let mut cmd = setup_common();
         cmd.arg("--crate-type=lib");
-        Self { cmd }
+        Self { cmd, stdin: None }
     }
 
     // Argument provider methods
@@ -89,6 +91,13 @@ impl Rustc {
         self
     }
 
+    /// Specify path to the output file.
+    pub fn output<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("-o");
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
     /// This flag defers LTO optimizations to the linker.
     pub fn linker_plugin_lto(&mut self, option: &str) -> &mut Self {
         self.cmd.arg(format!("-Clinker-plugin-lto={option}"));
@@ -128,9 +137,8 @@ impl Rustc {
         self
     }
 
-    /// Specify target triple.
+    /// Specify the target triple, or a path to a custom target json spec file.
     pub fn target(&mut self, target: &str) -> &mut Self {
-        assert!(!target.contains(char::is_whitespace), "target triple cannot contain spaces");
         self.cmd.arg(format!("--target={target}"));
         self
     }
@@ -149,12 +157,53 @@ impl Rustc {
         self
     }
 
+    /// Specify the print request.
+    pub fn print(&mut self, request: &str) -> &mut Self {
+        self.cmd.arg("--print");
+        self.cmd.arg(request);
+        self
+    }
+
+    /// Add an extra argument to the linker invocation, via `-Clink-arg`.
+    pub fn link_arg(&mut self, link_arg: &str) -> &mut Self {
+        self.cmd.arg(format!("-Clink-arg={link_arg}"));
+        self
+    }
+
+    /// Specify a stdin input
+    pub fn stdin<I: AsRef<[u8]>>(&mut self, input: I) -> &mut Self {
+        self.stdin = Some(input.as_ref().to_vec().into_boxed_slice());
+        self
+    }
+
+    /// Get the [`Output`][::std::process::Output] of the finished process.
+    #[track_caller]
+    pub fn command_output(&mut self) -> ::std::process::Output {
+        // let's make sure we piped all the input and outputs
+        self.cmd.stdin(Stdio::piped());
+        self.cmd.stdout(Stdio::piped());
+        self.cmd.stderr(Stdio::piped());
+
+        if let Some(input) = &self.stdin {
+            let mut child = self.cmd.spawn().unwrap();
+
+            {
+                let mut stdin = child.stdin.take().unwrap();
+                stdin.write_all(input.as_ref()).unwrap();
+            }
+
+            child.wait_with_output().expect("failed to get output of finished process")
+        } else {
+            self.cmd.output().expect("failed to get output of finished process")
+        }
+    }
+
     #[track_caller]
     pub fn run_fail_assert_exit_code(&mut self, code: i32) -> Output {
         let caller_location = std::panic::Location::caller();
         let caller_line_number = caller_location.line();
 
-        let output = self.cmd.output().unwrap();
+        let output = self.command_output();
         if output.status.code().unwrap() != code {
             handle_failed_output(&self.cmd, output, caller_line_number);
         }

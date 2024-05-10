@@ -5,6 +5,7 @@ use crate::size_of_val;
 use crate::traits::*;
 use crate::MemFlags;
 
+use rustc_middle::bug;
 use rustc_middle::mir::interpret::{alloc_range, Pointer, Scalar};
 use rustc_middle::mir::{self, ConstValue};
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
@@ -327,7 +328,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
                 let llfield_ty = bx.cx().backend_type(field);
 
                 // Can't bitcast an aggregate, so round trip through memory.
-                let llptr = bx.alloca(llfield_ty, field.align.abi);
+                let llptr = bx.alloca(field.size, field.align.abi);
                 bx.store(*llval, llptr, field.align.abi);
                 *llval = bx.load(llfield_ty, llptr, field.align.abi);
             }
@@ -470,7 +471,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
         let align_minus_1 = bx.sub(align, one);
         let size_extra = bx.add(size, align_minus_1);
         let min_align = Align::ONE;
-        let alloca = bx.byte_array_alloca(size_extra, min_align);
+        let alloca = bx.dynamic_alloca(size_extra, min_align);
         let address = bx.ptrtoint(alloca, bx.type_isize());
         let neg_address = bx.neg(address);
         let offset = bx.and(neg_address, align_minus_1);

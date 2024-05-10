@@ -17,12 +17,12 @@ use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
 use rustc_index::bit_set::GrowableBitSet;
-use rustc_macros::HashStable;
+use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable};
 use rustc_session::Limit;
 use rustc_span::sym;
 use rustc_target::abi::{Integer, IntegerType, Primitive, Size};
 use rustc_target::spec::abi::Abi;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::{fmt, iter};
 
 #[derive(Copy, Clone, Debug)]
@@ -432,19 +432,19 @@ impl<'tcx> TyCtxt<'tcx> {
             .filter(|&(_, k)| {
                 match k.unpack() {
                     GenericArgKind::Lifetime(region) => match region.kind() {
-                        ty::ReEarlyParam(ref ebr) => {
+                        ty::ReEarlyParam(ebr) => {
                             !impl_generics.region_param(ebr, self).pure_wrt_drop
                         }
                         // Error: not a region param
                         _ => false,
                     },
-                    GenericArgKind::Type(ty) => match ty.kind() {
-                        ty::Param(ref pt) => !impl_generics.type_param(pt, self).pure_wrt_drop,
+                    GenericArgKind::Type(ty) => match *ty.kind() {
+                        ty::Param(pt) => !impl_generics.type_param(pt, self).pure_wrt_drop,
                         // Error: not a type param
                         _ => false,
                     },
                     GenericArgKind::Const(ct) => match ct.kind() {
-                        ty::ConstKind::Param(ref pc) => {
+                        ty::ConstKind::Param(pc) => {
                             !impl_generics.const_param(pc, self).pure_wrt_drop
                         }
                         // Error: not a const param
@@ -1303,6 +1303,98 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
+    /// Checks whether values of this type `T` implements the `AsyncDrop`
+    /// trait.
+    pub fn has_surface_async_drop(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.could_have_surface_async_drop() && tcx.has_surface_async_drop_raw(param_env.and(self))
+    }
+
+    /// Fast path helper for testing if a type has `AsyncDrop`
+    /// implementation.
+    ///
+    /// Returning `false` means the type is known to not have `AsyncDrop`
+    /// implementation. Returning `true` means nothing -- could be
+    /// `AsyncDrop`, might not be.
+    fn could_have_surface_async_drop(self) -> bool {
+        !self.is_async_destructor_trivially_noop()
+            && !matches!(
+                self.kind(),
+                ty::Tuple(_)
+                    | ty::Slice(_)
+                    | ty::Array(_, _)
+                    | ty::Closure(..)
+                    | ty::CoroutineClosure(..)
+                    | ty::Coroutine(..)
+            )
+    }
+
+    /// Checks whether values of this type `T` implements the `Drop`
+    /// trait.
+    pub fn has_surface_drop(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.could_have_surface_drop() && tcx.has_surface_drop_raw(param_env.and(self))
+    }
+
+    /// Fast path helper for testing if a type has `Drop` implementation.
+    ///
+    /// Returning `false` means the type is known to not have `Drop`
+    /// implementation. Returning `true` means nothing -- could be
+    /// `Drop`, might not be.
+    fn could_have_surface_drop(self) -> bool {
+        !self.is_async_destructor_trivially_noop()
+            && !matches!(
+                self.kind(),
+                ty::Tuple(_)
+                    | ty::Slice(_)
+                    | ty::Array(_, _)
+                    | ty::Closure(..)
+                    | ty::CoroutineClosure(..)
+                    | ty::Coroutine(..)
+            )
+    }
+
+    /// Checks whether values of this type `T` implement has noop async destructor.
+    //
+    // FIXME: implement optimization to make ADTs, which do not need drop,
+    // to skip fields or to have noop async destructor.
+    pub fn is_async_destructor_noop(
+        self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+    ) -> bool {
+        self.is_async_destructor_trivially_noop()
+            || if let ty::Adt(adt_def, _) = self.kind() {
+                (adt_def.is_union() || adt_def.is_payloadfree())
+                    && !self.has_surface_async_drop(tcx, param_env)
+                    && !self.has_surface_drop(tcx, param_env)
+            } else {
+                false
+            }
+    }
+
+    /// Fast path helper for testing if a type has noop async destructor.
+    ///
+    /// Returning `true` means the type is known to have noop async destructor
+    /// implementation. Returning `true` means nothing -- could be
+    /// `Drop`, might not be.
+    fn is_async_destructor_trivially_noop(self) -> bool {
+        match self.kind() {
+            ty::Int(_)
+            | ty::Uint(_)
+            | ty::Float(_)
+            | ty::Bool
+            | ty::Char
+            | ty::Str
+            | ty::Never
+            | ty::Ref(..)
+            | ty::RawPtr(..)
+            | ty::FnDef(..)
+            | ty::FnPtr(_) => true,
+            ty::Tuple(tys) => tys.is_empty(),
+            ty::Adt(adt_def, _) => adt_def.is_manually_drop(),
+            _ => false,
+        }
+    }
+
     /// If `ty.needs_drop(...)` returns `true`, then `ty` is definitely
     /// non-copy and *might* have a destructor attached; if it returns
     /// `false`, then `ty` definitely has no destructor (i.e., no drop glue).
@@ -1684,10 +1776,15 @@ pub fn is_doc_notable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         .any(|items| items.iter().any(|item| item.has_name(sym::notable_trait)))
 }
 
-/// Determines whether an item is an intrinsic (which may be via Abi or via the `rustc_intrinsic` attribute)
+/// Determines whether an item is an intrinsic (which may be via Abi or via the `rustc_intrinsic` attribute).
+///
+/// We double check the feature gate here because whether a function may be defined as an intrinsic causes
+/// the compiler to make some assumptions about its shape; if the user doesn't use a feature gate, they may
+/// cause an ICE that we otherwise may want to prevent.
 pub fn intrinsic_raw(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::IntrinsicDef> {
-    if matches!(tcx.fn_sig(def_id).skip_binder().abi(), Abi::RustIntrinsic)
-        || tcx.has_attr(def_id, sym::rustc_intrinsic)
+    if (matches!(tcx.fn_sig(def_id).skip_binder().abi(), Abi::RustIntrinsic)
+        && tcx.features().intrinsics)
+        || (tcx.has_attr(def_id, sym::rustc_intrinsic) && tcx.features().rustc_attrs)
     {
         Some(ty::IntrinsicDef {
             name: tcx.item_name(def_id.into()),

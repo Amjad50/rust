@@ -239,7 +239,7 @@ use crate::cmp::Ordering;
 use crate::fmt::{self, Debug, Display};
 use crate::marker::{PhantomData, Unsize};
 use crate::mem::{self, size_of};
-use crate::ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn};
+use crate::ops::{CoerceUnsized, Deref, DerefMut, DerefPure, DispatchFromDyn};
 use crate::ptr::{self, NonNull};
 
 mod lazy;
@@ -1277,11 +1277,11 @@ impl<T: Clone> Clone for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if `other` is currently mutably borrowed.
+    /// Panics if `source` is currently mutably borrowed.
     #[inline]
     #[track_caller]
-    fn clone_from(&mut self, other: &Self) {
-        self.get_mut().clone_from(&other.borrow())
+    fn clone_from(&mut self, source: &Self) {
+        self.get_mut().clone_from(&source.borrow())
     }
 }
 
@@ -1451,6 +1451,9 @@ impl<T: ?Sized> Deref for Ref<'_, T> {
         unsafe { self.value.as_ref() }
     }
 }
+
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for Ref<'_, T> {}
 
 impl<'b, T: ?Sized> Ref<'b, T> {
     /// Copies a `Ref`.
@@ -1843,6 +1846,9 @@ impl<T: ?Sized> DerefMut for RefMut<'_, T> {
         unsafe { self.value.as_mut() }
     }
 }
+
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for RefMut<'_, T> {}
 
 #[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<RefMut<'b, U>> for RefMut<'b, T> {}

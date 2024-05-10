@@ -25,7 +25,7 @@ use crate::core::build_steps::llvm;
 use crate::core::build_steps::tool::{self, Tool};
 use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
-use crate::utils::channel;
+use crate::utils::channel::{self, Info};
 use crate::utils::helpers::{exe, is_dylib, output, t, target_supports_cranelift_backend, timeit};
 use crate::utils::tarball::{GeneratedTarball, OverlayKind, Tarball};
 use crate::{Compiler, DependencyType, Mode, LLVM_TOOLS};
@@ -107,7 +107,7 @@ impl Step for JsonDocs {
             builder.top_stage,
             host,
             builder,
-            DocumentationFormat::JSON,
+            DocumentationFormat::Json,
         ));
 
         let dest = "share/doc/rust/json";
@@ -830,6 +830,12 @@ fn copy_src_dirs(
             return false;
         }
 
+        // Cargo tests use some files like `.gitignore` that we would otherwise exclude.
+        const CARGO_TESTS: &[&str] = &["tools/cargo/tests", "tools\\cargo\\tests"];
+        if CARGO_TESTS.iter().any(|path| spath.contains(path)) {
+            return true;
+        }
+
         let full_path = Path::new(dir).join(path);
         if exclude_dirs.iter().any(|excl| full_path == Path::new(excl)) {
             return false;
@@ -985,10 +991,17 @@ impl Step for PlainSourceTarball {
 
         // Create the version file
         builder.create(&plain_dst_src.join("version"), &builder.rust_version());
-        if let Some(info) = builder.rust_info().info() {
-            channel::write_commit_hash_file(plain_dst_src, &info.sha);
-            channel::write_commit_info_file(plain_dst_src, info);
-        }
+
+        // Create the files containing git info, to ensure --version outputs the same.
+        let write_git_info = |info: Option<&Info>, path: &Path| {
+            if let Some(info) = info {
+                t!(std::fs::create_dir_all(path));
+                channel::write_commit_hash_file(path, &info.sha);
+                channel::write_commit_info_file(path, info);
+            }
+        };
+        write_git_info(builder.rust_info().info(), plain_dst_src);
+        write_git_info(builder.cargo_info.info(), &plain_dst_src.join("./src/tools/cargo"));
 
         // If we're building from git or tarball sources, we need to vendor
         // a complete distribution.
@@ -1131,7 +1144,7 @@ impl Step for Rls {
         let rls = builder.ensure(tool::Rls { compiler, target, extra_features: Vec::new() });
 
         let mut tarball = Tarball::new(builder, "rls", &target.triple);
-        tarball.set_overlay(OverlayKind::RLS);
+        tarball.set_overlay(OverlayKind::Rls);
         tarball.is_preview(true);
         tarball.add_file(rls, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/rls");
@@ -1548,6 +1561,7 @@ impl Step for Extended {
             compiler: builder.compiler(stage, target),
             backend: "cranelift".to_string(),
         });
+        add_component!("llvm-bitcode-linker" => LlvmBitcodeLinker {compiler, target});
 
         let etc = builder.src.join("src/etc/installer");
 
@@ -2058,7 +2072,7 @@ fn install_llvm_file(
         if install_symlink {
             // For download-ci-llvm, also install the symlink, to match what LLVM does. Using a
             // symlink is fine here, as this is not a rustup component.
-            builder.copy_link(&source, &full_dest);
+            builder.copy_link(source, &full_dest);
         } else {
             // Otherwise, replace the symlink with an equivalent linker script. This is used when
             // projects like miri link against librustc_driver.so. We don't use a symlink, as
@@ -2075,7 +2089,7 @@ fn install_llvm_file(
             }
         }
     } else {
-        builder.install(&source, destination, 0o644);
+        builder.install(source, destination, 0o644);
     }
 }
 
@@ -2120,7 +2134,7 @@ fn maybe_install_llvm(
             builder.install(&llvm_dylib_path, dst_libdir, 0o644);
         }
         !builder.config.dry_run()
-    } else if let Ok(llvm::LlvmResult { llvm_config, .. }) =
+    } else if let llvm::LlvmBuildStatus::AlreadyBuilt(llvm::LlvmResult { llvm_config, .. }) =
         llvm::prebuilt_llvm_config(builder, target)
     {
         let mut cmd = Command::new(llvm_config);
@@ -2201,7 +2215,7 @@ impl Step for LlvmTools {
         builder.ensure(crate::core::build_steps::llvm::Llvm { target });
 
         let mut tarball = Tarball::new(builder, "llvm-tools", &target.triple);
-        tarball.set_overlay(OverlayKind::LLVM);
+        tarball.set_overlay(OverlayKind::Llvm);
         tarball.is_preview(true);
 
         if builder.config.llvm_tools_enabled {
@@ -2224,9 +2238,56 @@ impl Step for LlvmTools {
     }
 }
 
-// Tarball intended for internal consumption to ease rustc/std development.
-//
-// Should not be considered stable by end users.
+#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+pub struct LlvmBitcodeLinker {
+    pub compiler: Compiler,
+    pub target: TargetSelection,
+}
+
+impl Step for LlvmBitcodeLinker {
+    type Output = Option<GeneratedTarball>;
+    const DEFAULT: bool = true;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        let default = should_build_extended_tool(run.builder, "llvm-bitcode-linker");
+        run.alias("llvm-bitcode-linker").default_condition(default)
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(LlvmBitcodeLinker {
+            compiler: run.builder.compiler_for(
+                run.builder.top_stage,
+                run.builder.config.build,
+                run.target,
+            ),
+            target: run.target,
+        });
+    }
+
+    fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
+        let compiler = self.compiler;
+        let target = self.target;
+
+        let llbc_linker =
+            builder.ensure(tool::LlvmBitcodeLinker { compiler, target, extra_features: vec![] });
+
+        let self_contained_bin_dir = format!("lib/rustlib/{}/bin/self-contained", target.triple);
+
+        // Prepare the image directory
+        let mut tarball = Tarball::new(builder, "llvm-bitcode-linker", &target.triple);
+        tarball.set_overlay(OverlayKind::LlvmBitcodeLinker);
+        tarball.is_preview(true);
+
+        tarball.add_file(llbc_linker, self_contained_bin_dir, 0o755);
+
+        Some(tarball.generate())
+    }
+}
+
+/// Tarball intended for internal consumption to ease rustc/std development.
+///
+/// Should not be considered stable by end users.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RustDev {
     pub target: TargetSelection,
@@ -2257,7 +2318,7 @@ impl Step for RustDev {
         }
 
         let mut tarball = Tarball::new(builder, "rust-dev", &target.triple);
-        tarball.set_overlay(OverlayKind::LLVM);
+        tarball.set_overlay(OverlayKind::Llvm);
         // LLVM requires a shared object symlink to exist on some platforms.
         tarball.permit_symlinks(true);
 
@@ -2308,9 +2369,9 @@ impl Step for RustDev {
     }
 }
 
-// Tarball intended for internal consumption to ease rustc/std development.
-//
-// Should not be considered stable by end users.
+/// Tarball intended for internal consumption to ease rustc/std development.
+///
+/// Should not be considered stable by end users.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Bootstrap {
     pub target: TargetSelection,

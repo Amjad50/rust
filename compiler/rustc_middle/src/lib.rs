@@ -35,9 +35,8 @@
 #![feature(const_type_name)]
 #![feature(discriminant_kind)]
 #![feature(coroutines)]
-#![feature(generic_nonzero)]
+#![feature(stmt_expr_attributes)]
 #![feature(if_let_guard)]
-#![feature(inline_const)]
 #![feature(iter_from_coroutine)]
 #![feature(negative_impls)]
 #![feature(never_type)]
@@ -48,7 +47,6 @@
 #![feature(trusted_len)]
 #![feature(type_alias_impl_trait)]
 #![feature(strict_provenance)]
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(rustc_attrs)]
 #![feature(control_flow_enum)]
 #![feature(trait_upcasting)]
@@ -66,15 +64,7 @@
 #![allow(rustc::untranslatable_diagnostic)]
 
 #[macro_use]
-extern crate bitflags;
-#[macro_use]
-extern crate rustc_macros;
-#[macro_use]
-extern crate rustc_data_structures;
-#[macro_use]
 extern crate tracing;
-#[macro_use]
-extern crate smallvec;
 
 #[cfg(test)]
 mod tests;

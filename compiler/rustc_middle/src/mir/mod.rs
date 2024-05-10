@@ -18,9 +18,9 @@ use rustc_errors::{DiagArgName, DiagArgValue, DiagMessage, ErrorGuaranteed, Into
 use rustc_hir::def::{CtorKind, Namespace};
 use rustc_hir::def_id::{DefId, CRATE_DEF_ID};
 use rustc_hir::{
-    self as hir, BindingAnnotation, ByRef, CoroutineDesugaring, CoroutineKind, HirId,
-    ImplicitSelfKind,
+    self as hir, BindingMode, ByRef, CoroutineDesugaring, CoroutineKind, HirId, ImplicitSelfKind,
 };
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_session::Session;
 use rustc_span::source_map::Spanned;
 use rustc_target::abi::{FieldIdx, VariantIdx};
@@ -702,10 +702,7 @@ impl<'tcx> Body<'tcx> {
                 env,
                 crate::ty::EarlyBinder::bind(constant.const_),
             );
-            let Some(bits) = mono_literal.try_eval_bits(tcx, env) else {
-                bug!("Couldn't evaluate constant {:?} in mono {:?}", constant, instance);
-            };
-            bits
+            mono_literal.try_eval_bits(tcx, env)
         };
 
         let TerminatorKind::SwitchInt { discr, targets } = &block.terminator().kind else {
@@ -715,7 +712,7 @@ impl<'tcx> Body<'tcx> {
         // If this is a SwitchInt(const _), then we can just evaluate the constant and return.
         let discr = match discr {
             Operand::Constant(constant) => {
-                let bits = eval_mono_const(constant);
+                let bits = eval_mono_const(constant)?;
                 return Some((bits, targets));
             }
             Operand::Move(place) | Operand::Copy(place) => place,
@@ -749,7 +746,7 @@ impl<'tcx> Body<'tcx> {
         match rvalue {
             Rvalue::NullaryOp(NullOp::UbChecks, _) => Some((tcx.sess.ub_checks() as u128, targets)),
             Rvalue::Use(Operand::Constant(constant)) => {
-                let bits = eval_mono_const(constant);
+                let bits = eval_mono_const(constant)?;
                 Some((bits, targets))
             }
             _ => None,
@@ -930,7 +927,7 @@ pub enum LocalKind {
 #[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable)]
 pub struct VarBindingForm<'tcx> {
     /// Is variable bound via `x`, `mut x`, `ref x`, `ref mut x`, `mut ref x`, or `mut ref mut x`?
-    pub binding_mode: BindingAnnotation,
+    pub binding_mode: BindingMode,
     /// If an explicit type was provided for this variable binding,
     /// this holds the source Span of that type.
     ///
@@ -1155,7 +1152,7 @@ impl<'tcx> LocalDecl<'tcx> {
             self.local_info(),
             LocalInfo::User(
                 BindingForm::Var(VarBindingForm {
-                    binding_mode: BindingAnnotation(ByRef::No, _),
+                    binding_mode: BindingMode(ByRef::No, _),
                     opt_ty_info: _,
                     opt_match_place: _,
                     pat_span: _,
@@ -1172,7 +1169,7 @@ impl<'tcx> LocalDecl<'tcx> {
             self.local_info(),
             LocalInfo::User(
                 BindingForm::Var(VarBindingForm {
-                    binding_mode: BindingAnnotation(ByRef::No, _),
+                    binding_mode: BindingMode(ByRef::No, _),
                     opt_ty_info: _,
                     opt_match_place: _,
                     pat_span: _,
@@ -1545,7 +1542,7 @@ pub struct SourceScopeData<'tcx> {
 #[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable)]
 pub struct SourceScopeLocalData {
     /// An `HirId` with lint levels equivalent to this scope's lint levels.
-    pub lint_root: hir::HirId,
+    pub lint_root: HirId,
 }
 
 /// A collection of projections into user types.
@@ -1814,7 +1811,7 @@ impl DefLocation {
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;
@@ -1823,9 +1820,7 @@ mod size_asserts {
     static_assert_size!(LocalDecl<'_>, 40);
     static_assert_size!(SourceScopeData<'_>, 64);
     static_assert_size!(Statement<'_>, 32);
-    static_assert_size!(StatementKind<'_>, 16);
     static_assert_size!(Terminator<'_>, 112);
-    static_assert_size!(TerminatorKind<'_>, 96);
     static_assert_size!(VarDebugInfo<'_>, 88);
     // tidy-alphabetical-end
 }

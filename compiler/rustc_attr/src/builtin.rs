@@ -6,7 +6,7 @@ use rustc_ast::{Attribute, LitKind, MetaItem, MetaItemKind, MetaItemLit, NestedM
 use rustc_ast_pretty::pprust;
 use rustc_errors::ErrorGuaranteed;
 use rustc_feature::{find_gated_cfg, is_builtin_attr_name, Features, GatedCfg};
-use rustc_macros::HashStable_Generic;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_session::config::ExpectedValues;
 use rustc_session::lint::builtin::UNEXPECTED_CFGS;
 use rustc_session::lint::BuiltinLintDiag;
@@ -986,7 +986,7 @@ pub fn parse_repr_attr(sess: &Session, attr: &Attribute) -> Vec<ReprAttr> {
                     recognised = true;
                     acc.push(h);
                 }
-            } else if let Some((name, value)) = item.name_value_literal() {
+            } else if let Some((name, value)) = item.singleton_lit_list() {
                 let mut literal_error = None;
                 let mut err_span = item.span();
                 if name == sym::align {

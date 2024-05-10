@@ -1,11 +1,11 @@
 use rustc_hir::{def::DefKind, Body, Item, ItemKind, Node, TyKind};
 use rustc_hir::{Path, QPath};
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::infer::InferCtxt;
 use rustc_infer::traits::{Obligation, ObligationCause};
-use rustc_middle::query::Key;
 use rustc_middle::ty::{self, Binder, Ty, TyCtxt, TypeFoldable, TypeFolder};
 use rustc_middle::ty::{EarlyBinder, TraitRef, TypeSuperFoldable};
+use rustc_session::{declare_lint, impl_lint_pass};
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::Span;
 use rustc_span::{sym, symbol::kw, ExpnKind, MacroKind};
@@ -233,6 +233,12 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
             ItemKind::Macro(_macro, MacroKind::Bang)
                 if cx.tcx.has_attr(item.owner_id.def_id, sym::macro_export) =>
             {
+                // determining we if are in a doctest context can't currently be determined
+                // by the code it-self (no specific attrs), but fortunatly rustdoc sets a
+                // perma-unstable env for libtest so we just re-use that env for now
+                let is_at_toplevel_doctest =
+                    self.body_depth == 2 && std::env::var("UNSTABLE_RUSTDOC_TEST_PATH").is_ok();
+
                 cx.emit_span_lint(
                     NON_LOCAL_DEFINITIONS,
                     item.span,
@@ -243,6 +249,9 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
                             .map(|s| s.to_ident_string())
                             .unwrap_or_else(|| "<unnameable>".to_string()),
                         cargo_update: cargo_update(),
+                        help: (!is_at_toplevel_doctest).then_some(()),
+                        doctest_help: is_at_toplevel_doctest.then_some(()),
+                        notes: (),
                     },
                 )
             }
@@ -265,7 +274,19 @@ fn impl_trait_ref_has_enough_non_local_candidates<'tcx>(
     binder: EarlyBinder<TraitRef<'tcx>>,
     mut did_has_local_parent: impl FnMut(DefId) -> bool,
 ) -> bool {
-    let infcx = tcx.infer_ctxt().build();
+    let infcx = tcx
+        .infer_ctxt()
+        // We use the new trait solver since the obligation we are trying to
+        // prove here may overflow and those are fatal in the old trait solver.
+        // Which is unacceptable for a lint.
+        //
+        // Thanksfully the part we use here are very similar to the
+        // new-trait-solver-as-coherence, which is in stabilization.
+        //
+        // https://github.com/rust-lang/rust/issues/123573
+        .with_next_trait_solver(true)
+        .build();
+
     let trait_ref = binder.instantiate(tcx, infcx.fresh_args_for_item(infer_span, trait_def_id));
 
     let trait_ref = trait_ref.fold_with(&mut ReplaceLocalTypesWithInfer {
@@ -313,13 +334,10 @@ impl<'a, 'tcx, F: FnMut(DefId) -> bool> TypeFolder<TyCtxt<'tcx>>
     }
 
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if let Some(ty_did) = t.ty_def_id()
-            && (self.did_has_local_parent)(ty_did)
+        if let Some(def) = t.ty_adt_def()
+            && (self.did_has_local_parent)(def.did())
         {
-            self.infcx.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::TypeInference,
-                span: self.infer_span,
-            })
+            self.infcx.next_ty_var(TypeVariableOrigin { param_def_id: None, span: self.infer_span })
         } else {
             t.super_fold_with(self)
         }
@@ -348,7 +366,7 @@ fn path_has_local_parent(
 }
 
 /// Given a def id and a parent impl def id, this checks if the parent
-/// def id correspond to the def id of the parent impl definition.
+/// def id (modulo modules) correspond to the def id of the parent impl definition.
 #[inline]
 fn did_has_local_parent(
     did: DefId,
@@ -356,8 +374,14 @@ fn did_has_local_parent(
     impl_parent: DefId,
     impl_parent_parent: Option<DefId>,
 ) -> bool {
-    did.is_local() && {
-        let res_parent = tcx.parent(did);
-        res_parent == impl_parent || Some(res_parent) == impl_parent_parent
-    }
+    did.is_local()
+        && if let Some(did_parent) = tcx.opt_parent(did) {
+            did_parent == impl_parent
+                || Some(did_parent) == impl_parent_parent
+                || !did_parent.is_crate_root()
+                    && tcx.def_kind(did_parent) == DefKind::Mod
+                    && did_has_local_parent(did_parent, tcx, impl_parent, impl_parent_parent)
+        } else {
+            false
+        }
 }

@@ -396,10 +396,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
 
     // Entry point:
-    gated!(
-        unix_sigpipe, Normal, template!(NameValueStr: "inherit|sig_ign|sig_dfl"), ErrorFollowing,
-        EncodeCrossCrate::Yes, experimental!(unix_sigpipe)
-    ),
     ungated!(start, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(no_start, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(no_main, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
@@ -449,6 +445,9 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         debugger_visualizer, Normal,
         template!(List: r#"natvis_file = "...", gdb_script_file = "...""#),
         DuplicatesOk, EncodeCrossCrate::No
+    ),
+    ungated!(collapse_debuginfo, Normal, template!(List: "no|external|yes"), ErrorFollowing,
+        EncodeCrossCrate::Yes
     ),
 
     // ==========================================================================
@@ -516,22 +515,22 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         EncodeCrossCrate::Yes, experimental!(deprecated_safe),
     ),
 
-    // `#[collapse_debuginfo]`
-    gated!(
-        collapse_debuginfo, Normal, template!(Word, List: "no|external|yes"), ErrorFollowing,
-        EncodeCrossCrate::No, experimental!(collapse_debuginfo)
-    ),
-
     // RFC 2397
     gated!(
         do_not_recommend, Normal, template!(Word), WarnFollowing,
-        EncodeCrossCrate::No, experimental!(do_not_recommend)
+        EncodeCrossCrate::Yes, experimental!(do_not_recommend)
     ),
 
     // `#[cfi_encoding = ""]`
     gated!(
         cfi_encoding, Normal, template!(NameValueStr: "encoding"), ErrorPreceding,
         EncodeCrossCrate::Yes, experimental!(cfi_encoding)
+    ),
+
+    // `#[coroutine]` attribute to be applied to closures to make them coroutines instead
+    gated!(
+        coroutine, Normal, template!(Word), ErrorFollowing,
+        EncodeCrossCrate::No, coroutines, experimental!(coroutines)
     ),
 
     // ==========================================================================
@@ -798,7 +797,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // ==========================================================================
     gated!(
         lang, Normal, template!(NameValueStr: "name"), DuplicatesOk, EncodeCrossCrate::No, lang_items,
-        "language items are subject to change",
+        "lang items are subject to change",
     ),
     rustc_attr!(
         rustc_pass_by_value, Normal, template!(Word), ErrorFollowing,

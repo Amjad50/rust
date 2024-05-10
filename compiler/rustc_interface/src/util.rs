@@ -7,17 +7,16 @@ use rustc_data_structures::sync;
 use rustc_metadata::{load_symbol_from_dylib, DylibError};
 use rustc_middle::ty::CurrentGcx;
 use rustc_parse::validate_attr;
-use rustc_session as session;
-use rustc_session::config::{Cfg, OutFileName, OutputFilenames, OutputTypes};
+use rustc_session::config::{host_triple, Cfg, OutFileName, OutputFilenames, OutputTypes};
 use rustc_session::filesearch::sysroot_candidates;
 use rustc_session::lint::{self, BuiltinLintDiag, LintBuffer};
-use rustc_session::{filesearch, Session};
+use rustc_session::output::{categorize_crate_type, CRATE_TYPES};
+use rustc_session::{filesearch, EarlyDiagCtxt, Session};
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::edition::Edition;
+use rustc_span::source_map::SourceMapInputs;
 use rustc_span::symbol::sym;
 use rustc_target::spec::Target;
-use session::output::{categorize_crate_type, CRATE_TYPES};
-use session::EarlyDiagCtxt;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,8 +64,9 @@ fn init_stack_size() -> usize {
     })
 }
 
-pub(crate) fn run_in_thread_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
+fn run_in_thread_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
     // The "thread pool" is a single spawned thread in the non-parallel
@@ -84,7 +84,9 @@ pub(crate) fn run_in_thread_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: S
         // name contains null bytes.
         let r = builder
             .spawn_scoped(s, move || {
-                rustc_span::create_session_globals_then(edition, || f(CurrentGcx::new()))
+                rustc_span::create_session_globals_then(edition, Some(sm_inputs), || {
+                    f(CurrentGcx::new())
+                })
             })
             .unwrap()
             .join();
@@ -100,15 +102,17 @@ pub(crate) fn run_in_thread_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: S
 pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
     _threads: usize,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
-    run_in_thread_with_globals(edition, f)
+    run_in_thread_with_globals(edition, sm_inputs, f)
 }
 
 #[cfg(parallel_compiler)]
 pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
     threads: usize,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
     use rustc_data_structures::{defer, jobserver, sync::FromDyn};
@@ -120,7 +124,7 @@ pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send,
     let registry = sync::Registry::new(std::num::NonZero::new(threads).unwrap());
 
     if !sync::is_dyn_thread_safe() {
-        return run_in_thread_with_globals(edition, |current_gcx| {
+        return run_in_thread_with_globals(edition, sm_inputs, |current_gcx| {
             // Register the thread for use with the `WorkerLocal` type.
             registry.register();
 
@@ -169,7 +173,7 @@ pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send,
     // pool. Upon creation, each worker thread created gets a copy of the
     // session globals in TLS. This is possible because `SessionGlobals` impls
     // `Send` in the parallel compiler.
-    rustc_span::create_session_globals_then(edition, || {
+    rustc_span::create_session_globals_then(edition, Some(sm_inputs), || {
         rustc_span::with_session_globals(|session_globals| {
             let session_globals = FromDyn::from(session_globals);
             builder
@@ -280,7 +284,7 @@ fn get_codegen_sysroot(
         "cannot load the default codegen backend twice"
     );
 
-    let target = session::config::host_triple();
+    let target = host_triple();
     let sysroot_candidates = sysroot_candidates();
 
     let sysroot = iter::once(sysroot)

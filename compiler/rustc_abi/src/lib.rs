@@ -4,7 +4,7 @@
 #![cfg_attr(feature = "nightly", feature(rustdoc_internals))]
 
 use std::fmt;
-use std::num::{NonZeroUsize, ParseIntError};
+use std::num::{NonZero, ParseIntError};
 use std::ops::{Add, AddAssign, Mul, RangeInclusive, Sub};
 use std::str::FromStr;
 
@@ -21,6 +21,8 @@ use rustc_macros::{Decodable_Generic, Encodable_Generic};
 use std::iter::Step;
 
 mod layout;
+#[cfg(test)]
+mod tests;
 
 pub use layout::LayoutCalculator;
 
@@ -155,7 +157,7 @@ impl ReprOptions {
     }
 
     /// Returns `true` if this `#[repr()]` should inhibit union ABI optimisations.
-    pub fn inhibit_union_abi_opt(&self) -> bool {
+    pub fn inhibits_union_abi_opt(&self) -> bool {
         self.c()
     }
 }
@@ -743,8 +745,18 @@ impl Align {
     }
 
     #[inline]
+    pub fn bytes_usize(self) -> usize {
+        self.bytes().try_into().unwrap()
+    }
+
+    #[inline]
     pub fn bits(self) -> u64 {
         self.bytes() * 8
+    }
+
+    #[inline]
+    pub fn bits_usize(self) -> usize {
+        self.bits().try_into().unwrap()
     }
 
     /// Computes the best alignment possible for the given offset
@@ -1137,7 +1149,7 @@ pub enum FieldsShape<FieldIdx: Idx> {
     Primitive,
 
     /// All fields start at no offset. The `usize` is the field count.
-    Union(NonZeroUsize),
+    Union(NonZero<usize>),
 
     /// Array/vector-like placement, with all fields of identical types.
     Array { stride: Size, count: u64 },

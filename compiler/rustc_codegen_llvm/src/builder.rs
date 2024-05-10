@@ -468,9 +468,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         val
     }
 
-    fn alloca(&mut self, ty: &'ll Type, align: Align) -> &'ll Value {
+    fn alloca(&mut self, size: Size, align: Align) -> &'ll Value {
         let mut bx = Builder::with_cx(self.cx);
         bx.position_at_start(unsafe { llvm::LLVMGetFirstBasicBlock(self.llfn()) });
+        let ty = self.cx().type_array(self.cx().type_i8(), size.bytes());
         unsafe {
             let alloca = llvm::LLVMBuildAlloca(bx.llbuilder, ty, UNNAMED);
             llvm::LLVMSetAlignment(alloca, align.bytes() as c_uint);
@@ -478,10 +479,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn byte_array_alloca(&mut self, len: &'ll Value, align: Align) -> &'ll Value {
+    fn dynamic_alloca(&mut self, size: &'ll Value, align: Align) -> &'ll Value {
         unsafe {
             let alloca =
-                llvm::LLVMBuildArrayAlloca(self.llbuilder, self.cx().type_i8(), len, UNNAMED);
+                llvm::LLVMBuildArrayAlloca(self.llbuilder, self.cx().type_i8(), size, UNNAMED);
             llvm::LLVMSetAlignment(alloca, align.bytes() as c_uint);
             alloca
         }
@@ -1149,12 +1150,12 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         order: rustc_codegen_ssa::common::AtomicOrdering,
     ) -> &'ll Value {
         // The only RMW operation that LLVM supports on pointers is compare-exchange.
-        if self.val_ty(src) == self.type_ptr()
-            && op != rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicXchg
-        {
+        let requires_cast_to_int = self.val_ty(src) == self.type_ptr()
+            && op != rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicXchg;
+        if requires_cast_to_int {
             src = self.ptrtoint(src, self.type_isize());
         }
-        unsafe {
+        let mut res = unsafe {
             llvm::LLVMBuildAtomicRMW(
                 self.llbuilder,
                 AtomicRmwBinOp::from_generic(op),
@@ -1163,7 +1164,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 AtomicOrdering::from_generic(order),
                 llvm::False, // SingleThreaded
             )
+        };
+        if requires_cast_to_int {
+            res = self.inttoptr(res, self.type_ptr());
         }
+        res
     }
 
     fn atomic_fence(
@@ -1697,5 +1702,126 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             None
         };
         kcfi_bundle
+    }
+
+    /// Emits a call to `llvm.instrprof.mcdc.parameters`.
+    ///
+    /// This doesn't produce any code directly, but is used as input by
+    /// the LLVM pass that handles coverage instrumentation.
+    ///
+    /// (See clang's [`CodeGenPGO::emitMCDCParameters`] for comparison.)
+    ///
+    /// [`CodeGenPGO::emitMCDCParameters`]:
+    ///     https://github.com/rust-lang/llvm-project/blob/5399a24/clang/lib/CodeGen/CodeGenPGO.cpp#L1124
+    pub(crate) fn mcdc_parameters(
+        &mut self,
+        fn_name: &'ll Value,
+        hash: &'ll Value,
+        bitmap_bytes: &'ll Value,
+    ) {
+        debug!("mcdc_parameters() with args ({:?}, {:?}, {:?})", fn_name, hash, bitmap_bytes);
+
+        assert!(llvm_util::get_version() >= (18, 0, 0), "MCDC intrinsics require LLVM 18 or later");
+
+        let llfn = unsafe { llvm::LLVMRustGetInstrProfMCDCParametersIntrinsic(self.cx().llmod) };
+        let llty = self.cx.type_func(
+            &[self.cx.type_ptr(), self.cx.type_i64(), self.cx.type_i32()],
+            self.cx.type_void(),
+        );
+        let args = &[fn_name, hash, bitmap_bytes];
+        let args = self.check_call("call", llty, llfn, args);
+
+        unsafe {
+            let _ = llvm::LLVMRustBuildCall(
+                self.llbuilder,
+                llty,
+                llfn,
+                args.as_ptr() as *const &llvm::Value,
+                args.len() as c_uint,
+                [].as_ptr(),
+                0 as c_uint,
+            );
+        }
+    }
+
+    pub(crate) fn mcdc_tvbitmap_update(
+        &mut self,
+        fn_name: &'ll Value,
+        hash: &'ll Value,
+        bitmap_bytes: &'ll Value,
+        bitmap_index: &'ll Value,
+        mcdc_temp: &'ll Value,
+    ) {
+        debug!(
+            "mcdc_tvbitmap_update() with args ({:?}, {:?}, {:?}, {:?}, {:?})",
+            fn_name, hash, bitmap_bytes, bitmap_index, mcdc_temp
+        );
+        assert!(llvm_util::get_version() >= (18, 0, 0), "MCDC intrinsics require LLVM 18 or later");
+
+        let llfn =
+            unsafe { llvm::LLVMRustGetInstrProfMCDCTVBitmapUpdateIntrinsic(self.cx().llmod) };
+        let llty = self.cx.type_func(
+            &[
+                self.cx.type_ptr(),
+                self.cx.type_i64(),
+                self.cx.type_i32(),
+                self.cx.type_i32(),
+                self.cx.type_ptr(),
+            ],
+            self.cx.type_void(),
+        );
+        let args = &[fn_name, hash, bitmap_bytes, bitmap_index, mcdc_temp];
+        let args = self.check_call("call", llty, llfn, args);
+        unsafe {
+            let _ = llvm::LLVMRustBuildCall(
+                self.llbuilder,
+                llty,
+                llfn,
+                args.as_ptr() as *const &llvm::Value,
+                args.len() as c_uint,
+                [].as_ptr(),
+                0 as c_uint,
+            );
+        }
+        self.store(self.const_i32(0), mcdc_temp, self.tcx.data_layout.i32_align.abi);
+    }
+
+    pub(crate) fn mcdc_condbitmap_update(
+        &mut self,
+        fn_name: &'ll Value,
+        hash: &'ll Value,
+        cond_loc: &'ll Value,
+        mcdc_temp: &'ll Value,
+        bool_value: &'ll Value,
+    ) {
+        debug!(
+            "mcdc_condbitmap_update() with args ({:?}, {:?}, {:?}, {:?}, {:?})",
+            fn_name, hash, cond_loc, mcdc_temp, bool_value
+        );
+        assert!(llvm_util::get_version() >= (18, 0, 0), "MCDC intrinsics require LLVM 18 or later");
+        let llfn = unsafe { llvm::LLVMRustGetInstrProfMCDCCondBitmapIntrinsic(self.cx().llmod) };
+        let llty = self.cx.type_func(
+            &[
+                self.cx.type_ptr(),
+                self.cx.type_i64(),
+                self.cx.type_i32(),
+                self.cx.type_ptr(),
+                self.cx.type_i1(),
+            ],
+            self.cx.type_void(),
+        );
+        let args = &[fn_name, hash, cond_loc, mcdc_temp, bool_value];
+        self.check_call("call", llty, llfn, args);
+        unsafe {
+            let _ = llvm::LLVMRustBuildCall(
+                self.llbuilder,
+                llty,
+                llfn,
+                args.as_ptr() as *const &llvm::Value,
+                args.len() as c_uint,
+                [].as_ptr(),
+                0 as c_uint,
+            );
+        }
     }
 }

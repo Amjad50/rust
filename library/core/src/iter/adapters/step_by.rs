@@ -1,7 +1,7 @@
 use crate::{
     intrinsics,
     iter::{from_fn, TrustedLen, TrustedRandomAccess},
-    num::NonZeroUsize,
+    num::NonZero,
     ops::{Range, Try},
 };
 
@@ -42,10 +42,10 @@ impl<I> StepBy<I> {
     /// The `step` that was originally passed to `Iterator::step_by(step)`,
     /// aka `self.step_minus_one + 1`.
     #[inline]
-    fn original_step(&self) -> NonZeroUsize {
+    fn original_step(&self) -> NonZero<usize> {
         // SAFETY: By type invariant, `step_minus_one` cannot be `MAX`, which
         // means the addition cannot overflow and the result cannot be zero.
-        unsafe { NonZeroUsize::new_unchecked(intrinsics::unchecked_add(self.step_minus_one, 1)) }
+        unsafe { NonZero::new_unchecked(intrinsics::unchecked_add(self.step_minus_one, 1)) }
     }
 }
 
@@ -231,12 +231,12 @@ unsafe impl<I: Iterator> StepByImpl<I> for StepBy<I> {
     #[inline]
     default fn spec_size_hint(&self) -> (usize, Option<usize>) {
         #[inline]
-        fn first_size(step: NonZeroUsize) -> impl Fn(usize) -> usize {
+        fn first_size(step: NonZero<usize>) -> impl Fn(usize) -> usize {
             move |n| if n == 0 { 0 } else { 1 + (n - 1) / step }
         }
 
         #[inline]
-        fn other_size(step: NonZeroUsize) -> impl Fn(usize) -> usize {
+        fn other_size(step: NonZero<usize>) -> impl Fn(usize) -> usize {
             move |n| n / step
         }
 
@@ -515,9 +515,7 @@ macro_rules! spec_int_ranges_r {
         unsafe impl StepByBackImpl<Range<$t>> for StepBy<Range<$t>> {
 
             #[inline]
-            fn spec_next_back(&mut self) -> Option<Self::Item>
-                where Range<$t>: DoubleEndedIterator + ExactSizeIterator,
-            {
+            fn spec_next_back(&mut self) -> Option<Self::Item> {
                 let step = self.original_step().get() as $t;
                 let remaining = self.iter.end;
                 if remaining > 0 {
@@ -533,9 +531,7 @@ macro_rules! spec_int_ranges_r {
             // We have to repeat them here so that the specialization overrides the StepByImplBack defaults
 
             #[inline]
-            fn spec_nth_back(&mut self, n: usize) -> Option<Self::Item>
-                where Self: DoubleEndedIterator,
-            {
+            fn spec_nth_back(&mut self, n: usize) -> Option<Self::Item> {
                 if self.advance_back_by(n).is_err() {
                     return None;
                 }
@@ -544,10 +540,9 @@ macro_rules! spec_int_ranges_r {
 
             #[inline]
             fn spec_try_rfold<Acc, F, R>(&mut self, init: Acc, mut f: F) -> R
-                where
-                    Self: DoubleEndedIterator,
-                    F: FnMut(Acc, Self::Item) -> R,
-                    R: Try<Output = Acc>
+            where
+                F: FnMut(Acc, Self::Item) -> R,
+                R: Try<Output = Acc>
             {
                 let mut accum = init;
                 while let Some(x) = self.next_back() {
@@ -558,9 +553,8 @@ macro_rules! spec_int_ranges_r {
 
             #[inline]
             fn spec_rfold<Acc, F>(mut self, init: Acc, mut f: F) -> Acc
-                where
-                    Self: DoubleEndedIterator,
-                    F: FnMut(Acc, Self::Item) -> Acc
+            where
+                F: FnMut(Acc, Self::Item) -> Acc
             {
                 let mut accum = init;
                 while let Some(x) = self.next_back() {

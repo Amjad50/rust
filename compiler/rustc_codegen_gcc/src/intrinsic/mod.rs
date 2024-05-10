@@ -531,7 +531,7 @@ impl<'gcc, 'tcx> ArgAbiExt<'gcc, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 // We instead thus allocate some scratch space...
                 let scratch_size = cast.size(bx);
                 let scratch_align = cast.align(bx);
-                let llscratch = bx.alloca(cast.gcc_type(bx), scratch_align);
+                let llscratch = bx.alloca(scratch_size, scratch_align);
                 bx.lifetime_start(llscratch, scratch_size);
 
                 // ... where we first store the value...
@@ -1223,7 +1223,7 @@ fn get_rust_try_fn<'a, 'gcc, 'tcx>(
         tcx,
         ty::Binder::dummy(tcx.mk_fn_sig(
             iter::once(i8p),
-            Ty::new_unit(tcx),
+            tcx.types.unit,
             false,
             rustc_hir::Unsafety::Unsafe,
             Abi::Rust,
@@ -1234,7 +1234,7 @@ fn get_rust_try_fn<'a, 'gcc, 'tcx>(
         tcx,
         ty::Binder::dummy(tcx.mk_fn_sig(
             [i8p, i8p].iter().cloned(),
-            Ty::new_unit(tcx),
+            tcx.types.unit,
             false,
             rustc_hir::Unsafety::Unsafe,
             Abi::Rust,

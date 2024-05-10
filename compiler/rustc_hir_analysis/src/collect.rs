@@ -14,6 +14,7 @@
 //! At present, however, we do run collection across all items in the
 //! crate as a kind of pass. This should eventually be factored away.
 
+use rustc_ast::Recovered;
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::UnordMap;
@@ -143,7 +144,7 @@ impl<'v> Visitor<'v> for HirPlaceholderCollector {
             _ => {}
         }
     }
-    fn visit_array_length(&mut self, length: &'v hir::ArrayLen) {
+    fn visit_array_length(&mut self, length: &'v hir::ArrayLen<'v>) {
         if let hir::ArrayLen::Infer(inf) = length {
             self.0.push(inf.span);
         }
@@ -386,6 +387,8 @@ impl<'tcx> HirTyLowerer<'tcx> for ItemCtxt<'tcx> {
 
     fn ct_infer(&self, ty: Ty<'tcx>, _: Option<&ty::GenericParamDef>, span: Span) -> Const<'tcx> {
         let ty = self.tcx.fold_regions(ty, |r, _| match *r {
+            rustc_type_ir::RegionKind::ReStatic => r,
+
             // This is never reached in practice. If it ever is reached,
             // `ReErased` should be changed to `ReStatic`, and any other region
             // left alone.
@@ -992,7 +995,7 @@ fn lower_variant(
         .inspect(|f| {
             has_unnamed_fields |= f.ident.name == kw::Underscore;
             // We only check named ADT here because anonymous ADTs are checked inside
-            // the nammed ADT in which they are defined.
+            // the named ADT in which they are defined.
             if !is_anonymous {
                 field_uniqueness_check_ctx.check_field(f);
             }
@@ -1003,10 +1006,7 @@ fn lower_variant(
             vis: tcx.visibility(f.def_id),
         })
         .collect();
-    let recovered = match def {
-        hir::VariantData::Struct { recovered, .. } => *recovered,
-        _ => false,
-    };
+    let recovered = matches!(def, hir::VariantData::Struct { recovered: Recovered::Yes(_), .. });
     ty::VariantDef::new(
         ident.name,
         variant_did.map(LocalDefId::to_def_id),
@@ -1373,16 +1373,16 @@ fn infer_return_ty_for_fn_sig<'tcx>(
             // Don't leak types into signatures unless they're nameable!
             // For example, if a function returns itself, we don't want that
             // recursive function definition to leak out into the fn sig.
-            let mut should_recover = false;
+            let mut recovered_ret_ty = None;
 
-            if let Some(ret_ty) = ret_ty.make_suggestable(tcx, false, None) {
+            if let Some(suggestable_ret_ty) = ret_ty.make_suggestable(tcx, false, None) {
                 diag.span_suggestion(
                     ty.span,
                     "replace with the correct return type",
-                    ret_ty,
+                    suggestable_ret_ty,
                     Applicability::MachineApplicable,
                 );
-                should_recover = true;
+                recovered_ret_ty = Some(suggestable_ret_ty);
             } else if let Some(sugg) =
                 suggest_impl_trait(&tcx.infer_ctxt().build(), tcx.param_env(def_id), ret_ty)
             {
@@ -1404,18 +1404,13 @@ fn infer_return_ty_for_fn_sig<'tcx>(
             }
 
             let guar = diag.emit();
-
-            if should_recover {
-                ty::Binder::dummy(fn_sig)
-            } else {
-                ty::Binder::dummy(tcx.mk_fn_sig(
-                    fn_sig.inputs().iter().copied(),
-                    Ty::new_error(tcx, guar),
-                    fn_sig.c_variadic,
-                    fn_sig.unsafety,
-                    fn_sig.abi,
-                ))
-            }
+            ty::Binder::dummy(tcx.mk_fn_sig(
+                fn_sig.inputs().iter().copied(),
+                recovered_ret_ty.unwrap_or_else(|| Ty::new_error(tcx, guar)),
+                fn_sig.c_variadic,
+                fn_sig.unsafety,
+                fn_sig.abi,
+            ))
         }
         None => icx.lowerer().lower_fn_ty(
             hir_id,

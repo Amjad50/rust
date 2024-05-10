@@ -99,7 +99,7 @@ use rustc_hir::hir_id::{HirIdMap, HirIdSet};
 use rustc_hir::intravisit::{walk_expr, FnKind, Visitor};
 use rustc_hir::LangItem::{OptionNone, OptionSome, ResultErr, ResultOk};
 use rustc_hir::{
-    self as hir, def, Arm, ArrayLen, BindingAnnotation, Block, BlockCheckMode, Body, ByRef, Closure, Destination, Expr,
+    self as hir, def, Arm, ArrayLen, BindingMode, Block, BlockCheckMode, Body, ByRef, Closure, Destination, Expr,
     ExprField, ExprKind, FnDecl, FnRetTy, GenericArgs, HirId, Impl, ImplItem, ImplItemKind, ImplItemRef, Item,
     ItemKind, LangItem, LetStmt, MatchSource, Mutability, Node, OwnerId, Param, Pat, PatKind, Path, PathSegment,
     PrimTy, QPath, Stmt, StmtKind, TraitItem, TraitItemKind, TraitItemRef, TraitRef, TyKind, UnOp,
@@ -184,7 +184,7 @@ pub fn expr_or_init<'a, 'b, 'tcx: 'b>(cx: &LateContext<'tcx>, mut expr: &'a Expr
 /// canonical binding `HirId`.
 pub fn find_binding_init<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Option<&'tcx Expr<'tcx>> {
     if let Node::Pat(pat) = cx.tcx.hir_node(hir_id)
-        && matches!(pat.kind, PatKind::Binding(BindingAnnotation::NONE, ..))
+        && matches!(pat.kind, PatKind::Binding(BindingMode::NONE, ..))
         && let Node::LetStmt(local) = cx.tcx.parent_hir_node(hir_id)
     {
         return local.init;
@@ -2328,10 +2328,10 @@ pub fn is_slice_of_primitives(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<S
 ///
 /// Given functions `eq` and `hash` such that `eq(a, b) == true`
 /// implies `hash(a) == hash(b)`
-pub fn search_same<T, Hash, Eq>(exprs: &[T], hash: Hash, eq: Eq) -> Vec<(&T, &T)>
+pub fn search_same<T, Hash, Eq>(exprs: &[T], mut hash: Hash, mut eq: Eq) -> Vec<(&T, &T)>
 where
-    Hash: Fn(&T) -> u64,
-    Eq: Fn(&T, &T) -> bool,
+    Hash: FnMut(&T) -> u64,
+    Eq: FnMut(&T, &T) -> bool,
 {
     match exprs {
         [a, b] if eq(a, b) => return vec![(a, b)],
@@ -2505,8 +2505,9 @@ fn with_test_item_names(tcx: TyCtxt<'_>, module: LocalModDefId, f: impl Fn(&[Sym
 /// Note: Add `//@compile-flags: --test` to UI tests with a `#[test]` function
 pub fn is_in_test_function(tcx: TyCtxt<'_>, id: HirId) -> bool {
     with_test_item_names(tcx, tcx.parent_module(id), |names| {
-        tcx.hir()
-            .parent_iter(id)
+        let node = tcx.hir_node(id);
+        once((id, node))
+            .chain(tcx.hir().parent_iter(id))
             // Since you can nest functions we need to collect all until we leave
             // function scope
             .any(|(_id, node)| {
@@ -2545,6 +2546,11 @@ pub fn is_in_cfg_test(tcx: TyCtxt<'_>, id: HirId) -> bool {
     tcx.hir()
         .parent_id_iter(id)
         .any(|parent_id| is_cfg_test(tcx, parent_id))
+}
+
+/// Checks if the node is in a `#[test]` function or has any parent node marked `#[cfg(test)]`
+pub fn is_in_test(tcx: TyCtxt<'_>, hir_id: HirId) -> bool {
+    is_in_test_function(tcx, hir_id) || is_in_cfg_test(tcx, hir_id)
 }
 
 /// Checks if the item of any of its parents has `#[cfg(...)]` attribute applied.
@@ -3285,7 +3291,7 @@ fn maybe_get_relative_path(from: &DefPath, to: &DefPath, max_super: usize) -> St
             Right(r) => Right(r.data),
         });
 
-    // 2. for the remaning segments, construct relative path using only mod names and `super`
+    // 2. for the remaining segments, construct relative path using only mod names and `super`
     let mut go_up_by = 0;
     let mut path = Vec::new();
     for el in unique_parts {

@@ -90,7 +90,7 @@
 ))]
 #![no_core]
 #![rustc_coherence_is_core]
-#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
+#![rustc_preserve_ub_checks]
 //
 // Lints:
 #![deny(rust_2021_incompatible_or_patterns)]
@@ -109,7 +109,6 @@
 //
 // Library features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(array_ptr_get)]
 #![feature(asm_experimental_arch)]
 #![feature(char_indices_offset)]
@@ -180,7 +179,6 @@
 #![feature(isqrt)]
 #![feature(link_cfg)]
 #![feature(maybe_uninit_uninit_array)]
-#![feature(non_null_convenience)]
 #![feature(offset_of_enum)]
 #![feature(offset_of_nested)]
 #![feature(panic_internals)]
@@ -188,11 +186,11 @@
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
 #![feature(slice_ptr_get)]
-#![feature(split_at_checked)]
 #![feature(str_internals)]
 #![feature(str_split_inclusive_remainder)]
 #![feature(str_split_remainder)]
 #![feature(strict_provenance)]
+#![feature(ub_checks)]
 #![feature(unchecked_shifts)]
 #![feature(utf16_extra)]
 #![feature(utf16_extra_const)]
@@ -231,7 +229,6 @@
 #![feature(fundamental)]
 #![feature(generic_arg_infer)]
 #![feature(if_let_guard)]
-#![feature(inline_const)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
@@ -370,7 +367,8 @@ pub mod hint;
 pub mod intrinsics;
 pub mod mem;
 pub mod ptr;
-mod ub_checks;
+#[unstable(feature = "ub_checks", issue = "none")]
+pub mod ub_checks;
 
 /* Core language traits */
 
@@ -401,7 +399,6 @@ pub mod net;
 pub mod option;
 pub mod panic;
 pub mod panicking;
-#[cfg(not(bootstrap))]
 #[unstable(feature = "core_pattern_types", issue = "none")]
 pub mod pat;
 pub mod pin;

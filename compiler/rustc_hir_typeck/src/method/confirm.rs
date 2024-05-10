@@ -173,7 +173,7 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
         let Some((ty, n)) = autoderef.nth(pick.autoderefs) else {
             return Ty::new_error_with_message(
                 self.tcx,
-                rustc_span::DUMMY_SP,
+                DUMMY_SP,
                 format!("failed autoderef {}", pick.autoderefs),
             );
         };
@@ -608,7 +608,7 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
                     let span = predicates
                         .iter()
                         .find_map(|(p, span)| if p == pred { Some(span) } else { None })
-                        .unwrap_or(rustc_span::DUMMY_SP);
+                        .unwrap_or(DUMMY_SP);
                     Some((trait_pred, span))
                 }
                 _ => None,
@@ -628,6 +628,7 @@ impl<'a, 'tcx> ConfirmContext<'a, 'tcx> {
                 Some(self.self_expr.span),
                 self.call_expr.span,
                 trait_def_id,
+                self.body_id.to_def_id(),
             ) {
                 self.set_tainted_by_errors(e);
             }

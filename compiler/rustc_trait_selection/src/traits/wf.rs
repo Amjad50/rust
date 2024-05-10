@@ -44,7 +44,7 @@ pub fn obligations<'tcx>(
         GenericArgKind::Const(ct) => {
             match ct.kind() {
                 ty::ConstKind::Infer(_) => {
-                    let resolved = infcx.shallow_resolve(ct);
+                    let resolved = infcx.shallow_resolve_const(ct);
                     if resolved == ct {
                         // No progress.
                         return None;
@@ -381,7 +381,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
             if let Some(parent_trait_pred) = predicate.to_opt_poly_trait_pred() {
                 cause = cause.derived_cause(
                     parent_trait_pred,
-                    traits::ObligationCauseCode::DerivedObligation,
+                    traits::ObligationCauseCode::WellFormedDerivedObligation,
                 );
             }
             extend_cause_with_original_assoc_item_obligation(tcx, item, &mut cause, predicate);

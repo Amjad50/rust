@@ -40,7 +40,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// compares lifetimes directly, so we need to map the inference variables
     /// back to concrete lifetimes: `'static`, `ReEarlyParam` or `ReLateParam`.
     ///
-    /// First we map the regions in the the generic parameters `_Return<'1>` to
+    /// First we map the regions in the generic parameters `_Return<'1>` to
     /// their `external_name` giving `_Return<'a>`. This step is a bit involved.
     /// See the [rustc-dev-guide chapter] for more info.
     ///
@@ -213,7 +213,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                 let scc = self.constraint_sccs.scc(vid);
 
                 // Special handling of higher-ranked regions.
-                if self.scc_universes[scc] != ty::UniverseIndex::ROOT {
+                if !self.scc_universes[scc].is_root() {
                     match self.scc_values.placeholders_contained_in(scc).enumerate().last() {
                         // If the region contains a single placeholder then they're equal.
                         Some((0, placeholder)) => {

@@ -1,6 +1,7 @@
 use std::ffi::OsString;
-use std::num::NonZeroUsize;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::{env, process::Command};
 
 use colored::*;
@@ -67,15 +68,15 @@ fn miri_config(target: &str, path: &str, mode: Mode, with_dependencies: bool) ->
 
     let mut config = Config {
         target: Some(target.to_owned()),
-        stderr_filters: STDERR.clone(),
-        stdout_filters: STDOUT.clone(),
+        stderr_filters: stderr_filters().into(),
+        stdout_filters: stdout_filters().into(),
         mode,
         program,
         out_dir: PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap()).join("ui"),
         edition: Some("2021".into()), // keep in sync with `./miri run`
         threads: std::env::var("MIRI_TEST_THREADS")
             .ok()
-            .map(|threads| NonZeroUsize::new(threads.parse().unwrap()).unwrap()),
+            .map(|threads| NonZero::new(threads.parse().unwrap()).unwrap()),
         ..Config::rustc(path)
     };
 
@@ -112,6 +113,13 @@ fn run_tests(
     config.program.envs.push(("RUST_BACKTRACE".into(), Some("1".into())));
 
     // Add some flags we always want.
+    config.program.args.push(
+        format!(
+            "--sysroot={}",
+            env::var("MIRI_SYSROOT").expect("MIRI_SYSROOT must be set to run the ui test suite")
+        )
+        .into(),
+    );
     config.program.args.push("-Dwarnings".into());
     config.program.args.push("-Dunused".into());
     config.program.args.push("-Ainternal_features".into());
@@ -167,15 +175,18 @@ fn run_tests(
 }
 
 macro_rules! regexes {
-    ($name:ident: $($regex:expr => $replacement:expr,)*) => {lazy_static::lazy_static! {
-        static ref $name: Vec<(Match, &'static [u8])> = vec![
-            $((Regex::new($regex).unwrap().into(), $replacement.as_bytes()),)*
-        ];
-    }};
+    ($name:ident: $($regex:expr => $replacement:expr,)*) => {
+        fn $name() -> &'static [(Match, &'static [u8])] {
+            static S: OnceLock<Vec<(Match, &'static [u8])>> = OnceLock::new();
+            S.get_or_init(|| vec![
+                $((Regex::new($regex).unwrap().into(), $replacement.as_bytes()),)*
+            ])
+        }
+    };
 }
 
 regexes! {
-    STDOUT:
+    stdout_filters:
     // Windows file paths
     r"\\"                           => "/",
     // erase borrow tags
@@ -184,7 +195,7 @@ regexes! {
 }
 
 regexes! {
-    STDERR:
+    stderr_filters:
     // erase line and column info
     r"\.rs:[0-9]+:[0-9]+(: [0-9]+:[0-9]+)?" => ".rs:LL:CC",
     // erase alloc ids
@@ -296,12 +307,13 @@ fn main() -> Result<()> {
 
 fn run_dep_mode(target: String, mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let path = args.next().expect("./miri run-dep must be followed by a file name");
-    let config = miri_config(
+    let mut config = miri_config(
         &target,
         "",
         Mode::Yolo { rustfix: RustfixMode::Disabled },
         /* with dependencies */ true,
     );
+    config.program.args.clear(); // remove the `--error-format` that ui_test adds by default
     let dep_args = config.build_dependencies()?;
 
     let mut cmd = config.program.build(&config.out_dir);

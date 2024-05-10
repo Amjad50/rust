@@ -8,6 +8,7 @@ use rustc_fs_util::{fix_windows_verbatim_for_gcc, try_canonicalize};
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc_metadata::find_native_static_library;
 use rustc_metadata::fs::{copy_to_stdout, emit_wrapper_file, METADATA_FILENAME};
+use rustc_middle::bug;
 use rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
@@ -2059,7 +2060,7 @@ fn add_library_search_dirs(cmd: &mut dyn Linker, sess: &Session, self_contained:
 /// Add options making relocation sections in the produced ELF files read-only
 /// and suppressing lazy binding.
 fn add_relro_args(cmd: &mut dyn Linker, sess: &Session) {
-    match sess.opts.unstable_opts.relro_level.unwrap_or(sess.target.relro_level) {
+    match sess.opts.cg.relro_level.unwrap_or(sess.target.relro_level) {
         RelroLevel::Full => cmd.full_relro(),
         RelroLevel::Partial => cmd.partial_relro(),
         RelroLevel::Off => cmd.no_relro(),
@@ -3038,9 +3039,10 @@ fn get_apple_sdk_root(sdk_name: &str) -> Result<String, errors::AppleSdkRootErro
                     || sdkroot.contains("MacOSX.platform") => {}
             "watchsimulator"
                 if sdkroot.contains("WatchOS.platform") || sdkroot.contains("MacOSX.platform") => {}
-            "visionos"
-                if sdkroot.contains("XROS.platform") || sdkroot.contains("MacOSX.platform") => {}
-            "visionossimulator"
+            "xros"
+                if sdkroot.contains("XRSimulator.platform")
+                    || sdkroot.contains("MacOSX.platform") => {}
+            "xrsimulator"
                 if sdkroot.contains("XROS.platform") || sdkroot.contains("MacOSX.platform") => {}
             // Ignore `SDKROOT` if it's not a valid path.
             _ if !p.is_absolute() || p == Path::new("/") || !p.exists() => {}
@@ -3125,7 +3127,13 @@ fn add_lld_args(
 
     // 2. Implement the "linker flavor" part of this feature by asking `cc` to use some kind of
     // `lld` as the linker.
-    cmd.arg("-fuse-ld=lld");
+    //
+    // Note that wasm targets skip this step since the only option there anyway
+    // is to use LLD but the `wasm32-wasip2` target relies on a wrapper around
+    // this, `wasm-component-ld`, which is overridden if this option is passed.
+    if !sess.target.is_like_wasm {
+        cmd.arg("-fuse-ld=lld");
+    }
 
     if !flavor.is_gnu() {
         // Tell clang to use a non-default LLD flavor.

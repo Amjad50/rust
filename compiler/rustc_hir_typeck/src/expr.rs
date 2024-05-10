@@ -1,6 +1,6 @@
 //! Type checking expressions.
 //!
-//! See `mod.rs` for more context on type checking in general.
+//! See [`rustc_hir_analysis::check`] for more context on type checking in general.
 
 use crate::cast;
 use crate::coercion::CoerceMany;
@@ -35,10 +35,9 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{ExprKind, HirId, QPath};
-use rustc_hir_analysis::check::ty_kind_suggestion;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer as _;
 use rustc_infer::infer;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::infer::DefineOpaqueTypes;
 use rustc_infer::infer::InferOk;
 use rustc_infer::traits::query::NoSolution;
@@ -55,8 +54,8 @@ use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, FIRST_VARIANT};
-use rustc_target::spec::abi::Abi::RustIntrinsic;
 use rustc_trait_selection::infer::InferCtxtExt;
+use rustc_trait_selection::traits::error_reporting::suggestions::TypeErrCtxtExt as _;
 use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
 use rustc_trait_selection::traits::ObligationCtxt;
 use rustc_trait_selection::traits::{self, ObligationCauseCode};
@@ -81,10 +80,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return Ty::new_error(self.tcx(), reported);
             }
 
-            let adj_ty = self.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::AdjustmentType,
-                span: expr.span,
-            });
+            let adj_ty =
+                self.next_ty_var(TypeVariableOrigin { param_def_id: None, span: expr.span });
             self.apply_adjustments(
                 expr,
                 vec![Adjustment { kind: Adjust::NeverToAny, target: adj_ty }],
@@ -541,16 +538,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let ty::FnDef(did, _) = *ty.kind() {
             let fn_sig = ty.fn_sig(tcx);
 
-            if tcx.fn_sig(did).skip_binder().abi() == RustIntrinsic
-                && tcx.item_name(did) == sym::transmute
-            {
+            if tcx.is_intrinsic(did, sym::transmute) {
                 let Some(from) = fn_sig.inputs().skip_binder().get(0) else {
-                    let e = self.dcx().span_delayed_bug(
+                    span_bug!(
                         tcx.def_span(did),
-                        "intrinsic fn `transmute` defined with no parameters",
+                        "intrinsic fn `transmute` defined with no parameters"
                     );
-                    self.set_tainted_by_errors(e);
-                    return Ty::new_error(tcx, e);
                 };
                 let to = fn_sig.output().skip_binder();
                 // We defer the transmute to the end of typeck, once all inference vars have
@@ -661,7 +654,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             } else {
                 // Otherwise, this is a break *without* a value. That's
                 // always legal, and is equivalent to `break ()`.
-                e_ty = Ty::new_unit(tcx);
+                e_ty = tcx.types.unit;
                 cause = self.misc(expr.span);
             }
 
@@ -694,7 +687,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             );
                             let error = Some(Sorts(ExpectedFound { expected: ty, found: e_ty }));
                             self.annotate_loop_expected_due_to_inference(err, expr, error);
-                            if let Some(val) = ty_kind_suggestion(ty, tcx) {
+                            if let Some(val) =
+                                self.err_ctxt().ty_kind_suggestion(self.param_env, ty)
+                            {
                                 err.span_suggestion_verbose(
                                     expr.span.shrink_to_hi(),
                                     "give the `break` a value of the expected type",
@@ -1138,7 +1133,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // The expected type is `bool` but this will result in `()` so we can reasonably
             // say that the user intended to write `lhs == rhs` instead of `lhs = rhs`.
             // The likely cause of this is `if foo = bar { .. }`.
-            let actual_ty = Ty::new_unit(self.tcx);
+            let actual_ty = self.tcx.types.unit;
             let mut err = self.demand_suptype_diag(expr.span, expected_ty, actual_ty).unwrap();
             let lhs_ty = self.check_expr(lhs);
             let rhs_ty = self.check_expr(rhs);
@@ -1261,7 +1256,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Err(guar) = (lhs_ty, rhs_ty).error_reported() {
             Ty::new_error(self.tcx, guar)
         } else {
-            Ty::new_unit(self.tcx)
+            self.tcx.types.unit
         }
     }
 
@@ -1276,7 +1271,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // otherwise check exactly as a let statement
         self.check_decl((let_expr, hir_id).into());
         // but return a bool, for this is a boolean expression
-        if let Some(error_guaranteed) = let_expr.is_recovered {
+        if let ast::Recovered::Yes(error_guaranteed) = let_expr.recovered {
             self.set_tainted_by_errors(error_guaranteed);
             Ty::new_error(self.tcx, error_guaranteed)
         } else {
@@ -1324,7 +1319,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if ctxt.coerce.is_none() && !ctxt.may_break {
             self.dcx().span_bug(body.span, "no coercion, but loop may not break");
         }
-        ctxt.coerce.map(|c| c.complete(self)).unwrap_or_else(|| Ty::new_unit(self.tcx))
+        ctxt.coerce.map(|c| c.complete(self)).unwrap_or_else(|| self.tcx.types.unit)
     }
 
     /// Checks a method call.
@@ -1418,10 +1413,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     _ => None,
                 })
                 .unwrap_or_else(|| {
-                    self.next_ty_var(TypeVariableOrigin {
-                        kind: TypeVariableOriginKind::TypeInference,
-                        span: expr.span,
-                    })
+                    self.next_ty_var(TypeVariableOrigin { param_def_id: None, span: expr.span })
                 });
             let mut coerce = CoerceMany::with_coercion_sites(coerce_to, args);
             assert_eq!(self.diverges.get(), Diverges::Maybe);
@@ -1432,10 +1424,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             coerce.complete(self)
         } else {
-            self.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::TypeInference,
-                span: expr.span,
-            })
+            self.next_ty_var(TypeVariableOrigin { param_def_id: None, span: expr.span })
         };
         let array_len = args.len() as u64;
         self.suggest_array_len(expr, array_len);
@@ -1455,7 +1444,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return;
         };
         if let hir::TyKind::Array(_, length) = ty.peel_refs().kind
-            && let hir::ArrayLen::Body(hir::AnonConst { hir_id, .. }) = length
+            && let hir::ArrayLen::Body(&hir::AnonConst { hir_id, .. }) = length
         {
             let span = self.tcx.hir().span(hir_id);
             self.dcx().try_steal_modify_and_emit_err(
@@ -1494,7 +1483,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn check_expr_repeat(
         &self,
         element: &'tcx hir::Expr<'tcx>,
-        count: &'tcx hir::ArrayLen,
+        count: &'tcx hir::ArrayLen<'tcx>,
         expected: Expectation<'tcx>,
         expr: &'tcx hir::Expr<'tcx>,
     ) -> Ty<'tcx> {
@@ -1518,10 +1507,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 (uty, uty)
             }
             None => {
-                let ty = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::MiscVariable,
-                    span: element.span,
-                });
+                let ty =
+                    self.next_ty_var(TypeVariableOrigin { param_def_id: None, span: element.span });
                 let element_ty = self.check_expr_has_type_or_error(element, ty, |_| {});
                 (element_ty, ty)
             }
@@ -2710,7 +2697,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     fn point_at_param_definition(&self, err: &mut Diag<'_>, param: ty::ParamTy) {
         let generics = self.tcx.generics_of(self.body_id);
-        let generic_param = generics.type_param(&param, self.tcx);
+        let generic_param = generics.type_param(param, self.tcx);
         if let ty::GenericParamDefKind::Type { synthetic: true, .. } = generic_param.kind {
             return;
         }
@@ -2864,7 +2851,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         span: Span,
         base_ty: Ty<'tcx>,
         mod_id: DefId,
-        hir_id: hir::HirId,
+        hir_id: HirId,
     ) -> Vec<(Vec<&'tcx ty::FieldDef>, GenericArgsRef<'tcx>)> {
         debug!("get_field_candidates(span: {:?}, base_t: {:?}", span, base_ty);
 
@@ -3187,7 +3174,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 self.dcx().emit_err(YieldExprOutsideOfCoroutine { span: expr.span });
                 // Avoid expressions without types during writeback (#78653).
                 self.check_expr(value);
-                Ty::new_unit(self.tcx)
+                self.tcx.types.unit
             }
         }
     }

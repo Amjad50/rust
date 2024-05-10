@@ -6,7 +6,7 @@ use rustc_error_messages::MultiSpan;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::LocalDefId;
-use rustc_macros::HashStable;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_type_ir::ConstKind as IrConstKind;
 use rustc_type_ir::{ConstTy, IntoKind, TypeFlags, WithCachedTypeInfo};
 
@@ -21,6 +21,9 @@ use rustc_span::DUMMY_SP;
 pub use valtree::*;
 
 pub type ConstKind<'tcx> = IrConstKind<TyCtxt<'tcx>>;
+
+#[cfg(target_pointer_width = "64")]
+rustc_data_structures::static_assert_size!(ConstKind<'_>, 32);
 
 /// Use this rather than `ConstData`, whenever possible.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable)]
@@ -59,8 +62,8 @@ pub struct ConstData<'tcx> {
     pub kind: ConstKind<'tcx>,
 }
 
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
-static_assert_size!(ConstData<'_>, 40);
+#[cfg(target_pointer_width = "64")]
+rustc_data_structures::static_assert_size!(ConstData<'_>, 40);
 
 impl<'tcx> Const<'tcx> {
     #[inline]
@@ -406,7 +409,7 @@ impl<'tcx> Const<'tcx> {
         let size =
             tcx.layout_of(param_env.with_reveal_all_normalized(tcx).and(self.ty())).ok()?.size;
         // if `ty` does not depend on generic parameters, use an empty param_env
-        int.to_bits(size).ok()
+        int.try_to_bits(size).ok()
     }
 
     #[inline]

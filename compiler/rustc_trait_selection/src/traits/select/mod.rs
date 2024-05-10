@@ -571,7 +571,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             )?;
             // If the predicate has done any inference, then downgrade the
             // result to ambiguous.
-            if this.infcx.shallow_resolve(goal) != goal {
+            if this.infcx.resolve_vars_if_possible(goal) != goal {
                 result = result.max(EvaluatedToAmbig);
             }
             Ok(result)
@@ -815,7 +815,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                 // `EvaluatedToOkModuloRegions`), and skip re-evaluating the
                                 // sub-obligations.
                                 if let Some(key) =
-                                    ProjectionCacheKey::from_poly_projection_predicate(self, data)
+                                    ProjectionCacheKey::from_poly_projection_obligation(
+                                        self,
+                                        &project_obligation,
+                                    )
                                 {
                                     if let Some(cached_res) = self
                                         .infcx
@@ -844,8 +847,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                     && (eval_rslt == EvaluatedToOk
                                         || eval_rslt == EvaluatedToOkModuloRegions)
                                     && let Some(key) =
-                                        ProjectionCacheKey::from_poly_projection_predicate(
-                                            self, data,
+                                        ProjectionCacheKey::from_poly_projection_obligation(
+                                            self,
+                                            &project_obligation,
                                         )
                                 {
                                     // If the result is something that we can cache, then mark this
@@ -1493,7 +1497,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         // bound regions.
         let trait_ref = predicate.skip_binder().trait_ref;
 
-        coherence::trait_ref_is_knowable::<!>(self.tcx(), trait_ref, |ty| Ok(ty)).unwrap()
+        coherence::trait_ref_is_knowable::<!>(self.infcx, trait_ref, |ty| Ok(ty)).unwrap()
     }
 
     /// Returns `true` if the global caches can be used.
@@ -1774,9 +1778,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // that means that we must have newly inferred something about the GAT.
             // We should give up in that case.
             if !generics.params.is_empty()
-                && obligation.predicate.args[generics.parent_count..]
-                    .iter()
-                    .any(|&p| p.has_non_region_infer() && self.infcx.shallow_resolve(p) != p)
+                && obligation.predicate.args[generics.parent_count..].iter().any(|&p| {
+                    p.has_non_region_infer() && self.infcx.resolve_vars_if_possible(p) != p
+                })
             {
                 ProjectionMatchesProjection::Ambiguous
             } else {
@@ -1997,7 +2001,7 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                     // any associated items and there are no where-clauses.
                     //
                     // We can just arbitrarily drop one of the impls.
-                    Some(ty::ImplOverlapKind::Issue33140) => {
+                    Some(ty::ImplOverlapKind::FutureCompatOrderDepTraitObjects) => {
                         assert_eq!(other.evaluation, victim.evaluation);
                         DropVictim::Yes
                     }

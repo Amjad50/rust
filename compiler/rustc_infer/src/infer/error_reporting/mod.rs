@@ -61,13 +61,14 @@ use crate::traits::{
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_errors::{
     codes::*, pluralize, struct_span_code_err, Applicability, Diag, DiagCtxt, DiagStyledString,
-    ErrorGuaranteed, IntoDiagArg,
+    ErrorGuaranteed, IntoDiagArg, StringPart,
 };
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
+use rustc_macros::extension;
 use rustc_middle::dep_graph::DepContext;
 use rustc_middle::ty::print::{with_forced_trimmed_paths, PrintError};
 use rustc_middle::ty::relate::{self, RelateResult, TypeRelation};
@@ -1653,7 +1654,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                             .report(diag);
                         (false, Mismatch::Fixed("signature"))
                     }
-                    ValuePairs::PolyTraitRefs(_) => (false, Mismatch::Fixed("trait")),
+                    ValuePairs::TraitRefs(_) => (false, Mismatch::Fixed("trait")),
                     ValuePairs::Aliases(infer::ExpectedFound { expected, .. }) => {
                         (false, Mismatch::Fixed(self.tcx.def_descr(expected.def_id)))
                     }
@@ -1917,6 +1918,23 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     );
                     if !is_simple_error || terr.must_include_note() {
                         diag.note_expected_found(&expected_label, expected, &found_label, found);
+
+                        if let Some(ty::Closure(_, args)) =
+                            exp_found.map(|expected_type_found| expected_type_found.found.kind())
+                        {
+                            diag.highlighted_note(vec![
+                                StringPart::normal("closure has signature: `"),
+                                StringPart::highlighted(
+                                    self.tcx
+                                        .signature_unclosure(
+                                            args.as_closure().sig(),
+                                            rustc_hir::Unsafety::Normal,
+                                        )
+                                        .to_string(),
+                                ),
+                                StringPart::normal("`"),
+                            ]);
+                        }
                     }
                 }
             }
@@ -1969,8 +1987,8 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             self.note_and_explain_type_err(diag, exp_found, cause, span, cause.body_id.to_def_id());
         }
 
-        if let Some(ValuePairs::PolyTraitRefs(exp_found)) = values
-            && let ty::Closure(def_id, _) = exp_found.expected.skip_binder().self_ty().kind()
+        if let Some(ValuePairs::TraitRefs(exp_found)) = values
+            && let ty::Closure(def_id, _) = exp_found.expected.self_ty().kind()
             && let Some(def_id) = def_id.as_local()
             && terr.involves_regions()
         {
@@ -2188,7 +2206,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             infer::Aliases(exp_found) => self.expected_found_str(exp_found),
             infer::ExistentialTraitRef(exp_found) => self.expected_found_str(exp_found),
             infer::ExistentialProjection(exp_found) => self.expected_found_str(exp_found),
-            infer::PolyTraitRefs(exp_found) => {
+            infer::TraitRefs(exp_found) => {
                 let pretty_exp_found = ty::error::ExpectedFound {
                     expected: exp_found.expected.print_trait_sugared(),
                     found: exp_found.found.print_trait_sugared(),
@@ -2352,9 +2370,9 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 generic_param_scope = self.tcx.local_parent(generic_param_scope);
             }
 
-            // type_param_sugg_span is (span, has_bounds)
+            // type_param_sugg_span is (span, has_bounds, needs_parentheses)
             let (type_scope, type_param_sugg_span) = match bound_kind {
-                GenericKind::Param(ref param) => {
+                GenericKind::Param(param) => {
                     let generics = self.tcx.generics_of(generic_param_scope);
                     let def_id = generics.type_param(param, self.tcx).def_id.expect_local();
                     let scope = self.tcx.local_def_id_to_hir_id(def_id).owner.def_id;
@@ -2363,10 +2381,10 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     // instead we suggest `T: 'a + 'b` in that case.
                     let hir_generics = self.tcx.hir().get_generics(scope).unwrap();
                     let sugg_span = match hir_generics.bounds_span_for_suggestions(def_id) {
-                        Some(span) => Some((span, true)),
+                        Some((span, open_paren_sp)) => Some((span, true, open_paren_sp)),
                         // If `param` corresponds to `Self`, no usable suggestion span.
                         None if generics.has_self && param.index == 0 => None,
-                        None => Some((self.tcx.def_span(def_id).shrink_to_hi(), false)),
+                        None => Some((self.tcx.def_span(def_id).shrink_to_hi(), false, None)),
                     };
                     (scope, sugg_span)
                 }
@@ -2389,12 +2407,18 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             let mut suggs = vec![];
             let lt_name = self.suggest_name_region(sub, &mut suggs);
 
-            if let Some((sp, has_lifetimes)) = type_param_sugg_span
+            if let Some((sp, has_lifetimes, open_paren_sp)) = type_param_sugg_span
                 && suggestion_scope == type_scope
             {
                 let suggestion =
                     if has_lifetimes { format!(" + {lt_name}") } else { format!(": {lt_name}") };
-                suggs.push((sp, suggestion))
+
+                if let Some(open_paren_sp) = open_paren_sp {
+                    suggs.push((open_paren_sp, "(".to_string()));
+                    suggs.push((sp, format!("){suggestion}")));
+                } else {
+                    suggs.push((sp, suggestion))
+                }
             } else if let GenericKind::Alias(ref p) = bound_kind
                 && let ty::Projection = p.kind(self.tcx)
                 && let DefKind::AssocTy = self.tcx.def_kind(p.def_id)

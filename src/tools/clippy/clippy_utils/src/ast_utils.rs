@@ -446,7 +446,18 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
 pub fn eq_foreign_item_kind(l: &ForeignItemKind, r: &ForeignItemKind) -> bool {
     use ForeignItemKind::*;
     match (l, r) {
-        (Static(lt, lm, le), Static(rt, rm, re)) => lm == rm && eq_ty(lt, rt) && eq_expr_opt(le, re),
+        (
+            Static(box StaticForeignItem {
+                ty: lt,
+                mutability: lm,
+                expr: le,
+            }),
+            Static(box StaticForeignItem {
+                ty: rt,
+                mutability: rm,
+                expr: re,
+            }),
+        ) => lm == rm && eq_ty(lt, rt) && eq_expr_opt(le, re),
         (
             Fn(box ast::Fn {
                 defaultness: ld,
@@ -637,7 +648,7 @@ pub fn eq_use_tree_kind(l: &UseTreeKind, r: &UseTreeKind) -> bool {
     match (l, r) {
         (Glob, Glob) => true,
         (Simple(l), Simple(r)) => both(l, r, |l, r| eq_id(*l, *r)),
-        (Nested(l), Nested(r)) => over(l, r, |(l, _), (r, _)| eq_use_tree(l, r)),
+        (Nested { items: l, .. }, Nested { items: r, .. }) => over(l, r, |(l, _), (r, _)| eq_use_tree(l, r)),
         _ => false,
     }
 }
@@ -709,7 +720,12 @@ pub fn eq_ty(l: &Ty, r: &Ty) -> bool {
         (Tup(l), Tup(r)) => over(l, r, |l, r| eq_ty(l, r)),
         (Path(lq, lp), Path(rq, rp)) => both(lq, rq, eq_qself) && eq_path(lp, rp),
         (TraitObject(lg, ls), TraitObject(rg, rs)) => ls == rs && over(lg, rg, eq_generic_bound),
-        (ImplTrait(_, lg), ImplTrait(_, rg)) => over(lg, rg, eq_generic_bound),
+        (ImplTrait(_, lg, lc), ImplTrait(_, rg, rc)) => {
+            over(lg, rg, eq_generic_bound)
+                && both(lc, rc, |lc, rc| {
+                    over(lc.0.as_slice(), rc.0.as_slice(), eq_precise_capture)
+                })
+        },
         (Typeof(l), Typeof(r)) => eq_expr(&l.value, &r.value),
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
         _ => false,
@@ -766,6 +782,14 @@ pub fn eq_generic_bound(l: &GenericBound, r: &GenericBound) -> bool {
     match (l, r) {
         (Trait(ptr1, tbm1), Trait(ptr2, tbm2)) => tbm1 == tbm2 && eq_poly_ref_trait(ptr1, ptr2),
         (Outlives(l), Outlives(r)) => eq_id(l.ident, r.ident),
+        _ => false,
+    }
+}
+
+pub fn eq_precise_capture(l: &PreciseCapturingArg, r: &PreciseCapturingArg) -> bool {
+    match (l, r) {
+        (PreciseCapturingArg::Lifetime(l), PreciseCapturingArg::Lifetime(r)) => l.ident == r.ident,
+        (PreciseCapturingArg::Arg(l, _), PreciseCapturingArg::Arg(r, _)) => l.segments[0].ident == r.segments[0].ident,
         _ => false,
     }
 }

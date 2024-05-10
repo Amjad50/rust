@@ -14,8 +14,8 @@ pub struct PlaceTy<'tcx> {
 }
 
 // At least on 64 bit systems, `PlaceTy` should not be larger than two or three pointers.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
-static_assert_size!(PlaceTy<'_>, 16);
+#[cfg(target_pointer_width = "64")]
+rustc_data_structures::static_assert_size!(PlaceTy<'_>, 16);
 
 impl<'tcx> PlaceTy<'tcx> {
     #[inline]
@@ -206,6 +206,7 @@ impl<'tcx> Rvalue<'tcx> {
                 AggregateKind::CoroutineClosure(did, args) => {
                     Ty::new_coroutine_closure(tcx, did, args)
                 }
+                AggregateKind::RawPtr(ty, mutability) => Ty::new_ptr(tcx, ty, mutability),
             },
             Rvalue::ShallowInitBox(_, ty) => Ty::new_box(tcx, ty),
             Rvalue::CopyForDeref(ref place) => place.ty(local_decls, tcx).ty,
@@ -293,7 +294,7 @@ impl BorrowKind {
 
             // We have no type corresponding to a shallow borrow, so use
             // `&` as an approximation.
-            BorrowKind::Fake => hir::Mutability::Not,
+            BorrowKind::Fake(_) => hir::Mutability::Not,
         }
     }
 }
