@@ -64,9 +64,7 @@ r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std'] }
 
 [target.'cfg(target_os = "emerald")'.dependencies]
 # This is from `https://github.com/Amjad50/Emerald`, i.e. it must be run from that context
-# TODO: for now we are using relative path, as we are using `libm` from `git` and we can't publish
-#       that. Fix it later
-emerald_std = { version = "0.3.0", features = ['rustc-dep-of-std'], path = "../../../../libraries/emerald_std" }
+emerald_std = { version = "0.3.2", features = ['rustc-dep-of-std'] }
 
 [features]
 backtrace = [
