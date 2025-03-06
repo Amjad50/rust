@@ -1,4 +1,4 @@
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::get_enclosing_block;
 use clippy_utils::source::snippet;
 use clippy_utils::ty::{implements_trait, is_copy};
@@ -64,10 +64,10 @@ pub(crate) fn check<'tcx>(
                         |diag| {
                             let lsnip = snippet(cx, l.span, "...").to_string();
                             let rsnip = snippet(cx, r.span, "...").to_string();
-                            multispan_sugg(
-                                diag,
+                            diag.multipart_suggestion(
                                 "use the values directly",
                                 vec![(left.span, lsnip), (right.span, rsnip)],
+                                Applicability::MachineApplicable,
                             );
                         },
                     );
@@ -190,7 +190,8 @@ fn in_impl<'tcx>(
         && let Some(generic_args) = seg.args
         && let Some(GenericArg::Type(other_ty)) = generic_args.args.last()
     {
-        Some((item.self_ty, other_ty))
+        // `_` is not permitted in impl headers
+        Some((item.self_ty, other_ty.as_unambig_ty()))
     } else {
         None
     }

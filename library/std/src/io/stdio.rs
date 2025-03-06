@@ -3,11 +3,10 @@
 #[cfg(test)]
 mod tests;
 
-use crate::io::prelude::*;
-
 use crate::cell::{Cell, RefCell};
 use crate::fmt;
 use crate::fs::File;
+use crate::io::prelude::*;
 use crate::io::{
     self, BorrowedCursor, BufReader, IoSlice, IoSliceMut, LineWriter, Lines, SpecReadByte,
 };
@@ -21,7 +20,7 @@ type LocalStream = Arc<Mutex<Vec<u8>>>;
 
 thread_local! {
     /// Used by the test crate to capture the output of the print macros and panics.
-    static OUTPUT_CAPTURE: Cell<Option<LocalStream>> = {
+    static OUTPUT_CAPTURE: Cell<Option<LocalStream>> = const {
         Cell::new(None)
     }
 }
@@ -240,6 +239,7 @@ fn handle_ebadf_lazy<T>(r: io::Result<T>, default: impl FnOnce() -> T) -> io::Re
 /// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Stdin")]
 pub struct Stdin {
     inner: &'static Mutex<BufReader<StdinRaw>>,
 }
@@ -371,7 +371,12 @@ impl Stdin {
     /// Locks this handle and reads a line of input, appending it to the specified buffer.
     ///
     /// For detailed semantics of this method, see the documentation on
-    /// [`BufRead::read_line`].
+    /// [`BufRead::read_line`]. In particular:
+    /// * Previous content of the buffer will be preserved. To avoid appending
+    ///   to the buffer, you need to [`clear`] it first.
+    /// * The trailing newline character, if any, is included in the buffer.
+    ///
+    /// [`clear`]: String::clear
     ///
     /// # Examples
     ///
@@ -395,6 +400,7 @@ impl Stdin {
     ///   in which case it will wait for the Enter key to be pressed before
     ///   continuing
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_confusables("get_line")]
     pub fn read_line(&self, buf: &mut String) -> io::Result<usize> {
         self.lock().read_line(buf)
     }
@@ -569,6 +575,11 @@ impl fmt::Debug for StdinLock<'_> {
 /// output stream. Access is also synchronized via a lock and explicit control
 /// over locking is available via the [`lock`] method.
 ///
+/// By default, the handle is line-buffered when connected to a terminal, meaning
+/// it flushes automatically when a newline (`\n`) is encountered. For immediate
+/// output, you can manually call the [`flush`] method. When the handle goes out
+/// of scope, the buffer is automatically flushed.
+///
 /// Created by the [`io::stdout`] method.
 ///
 /// ### Note: Windows Portability Considerations
@@ -584,6 +595,7 @@ impl fmt::Debug for StdinLock<'_> {
 /// standard library or via raw Windows API calls, will fail.
 ///
 /// [`lock`]: Stdout::lock
+/// [`flush`]: Write::flush
 /// [`io::stdout`]: stdout
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Stdout {
@@ -598,6 +610,11 @@ pub struct Stdout {
 /// This handle implements the [`Write`] trait, and is constructed via
 /// the [`Stdout::lock`] method. See its documentation for more.
 ///
+/// By default, the handle is line-buffered when connected to a terminal, meaning
+/// it flushes automatically when a newline (`\n`) is encountered. For immediate
+/// output, you can manually call the [`flush`] method. When the handle goes out
+/// of scope, the buffer is automatically flushed.
+///
 /// ### Note: Windows Portability Considerations
 ///
 /// When operating in a console, the Windows implementation of this stream does not support
@@ -609,6 +626,8 @@ pub struct Stdout {
 /// the contained handle will be null. In such cases, the standard library's `Read` and
 /// `Write` will do nothing and silently succeed. All other I/O operations, via the
 /// standard library or via raw Windows API calls, will fail.
+///
+/// [`flush`]: Write::flush
 #[must_use = "if unused stdout will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StdoutLock<'a> {
@@ -622,6 +641,11 @@ static STDOUT: OnceLock<ReentrantLock<RefCell<LineWriter<StdoutRaw>>>> = OnceLoc
 /// Each handle returned is a reference to a shared global buffer whose access
 /// is synchronized via a mutex. If you need more explicit control over
 /// locking, see the [`Stdout::lock`] method.
+///
+/// By default, the handle is line-buffered when connected to a terminal, meaning
+/// it flushes automatically when a newline (`\n`) is encountered. For immediate
+/// output, you can manually call the [`flush`] method. When the handle goes out
+/// of scope, the buffer is automatically flushed.
 ///
 /// ### Note: Windows Portability Considerations
 ///
@@ -663,6 +687,22 @@ static STDOUT: OnceLock<ReentrantLock<RefCell<LineWriter<StdoutRaw>>>> = OnceLoc
 ///     Ok(())
 /// }
 /// ```
+///
+/// Ensuring output is flushed immediately:
+///
+/// ```no_run
+/// use std::io::{self, Write};
+///
+/// fn main() -> io::Result<()> {
+///     let mut stdout = io::stdout();
+///     stdout.write_all(b"hello, ")?;
+///     stdout.flush()?;                // Manual flush
+///     stdout.write_all(b"world!\n")?; // Automatically flushed
+///     Ok(())
+/// }
+/// ```
+///
+/// [`flush`]: Write::flush
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[cfg_attr(not(test), rustc_diagnostic_item = "io_stdout")]
@@ -1092,7 +1132,7 @@ pub fn try_set_output_capture(
     OUTPUT_CAPTURE.try_with(move |slot| slot.replace(sink))
 }
 
-/// Write `args` to the capture buffer if enabled and possible, or `global_s`
+/// Writes `args` to the capture buffer if enabled and possible, or `global_s`
 /// otherwise. `label` identifies the stream in a panic message.
 ///
 /// This function is used to print error messages, so it takes extra
@@ -1161,7 +1201,41 @@ pub trait IsTerminal: crate::sealed::Sealed {
     /// starting with `msys-` or `cygwin-` and ending in `-pty` will be considered terminals.
     /// Note that this [may change in the future][changes].
     ///
+    /// # Examples
+    ///
+    /// An example of a type for which `IsTerminal` is implemented is [`Stdin`]:
+    ///
+    /// ```no_run
+    /// use std::io::{self, IsTerminal, Write};
+    ///
+    /// fn main() -> io::Result<()> {
+    ///     let stdin = io::stdin();
+    ///
+    ///     // Indicate that the user is prompted for input, if this is a terminal.
+    ///     if stdin.is_terminal() {
+    ///         print!("> ");
+    ///         io::stdout().flush()?;
+    ///     }
+    ///
+    ///     let mut name = String::new();
+    ///     let _ = stdin.read_line(&mut name)?;
+    ///
+    ///     println!("Hello {}", name.trim_end());
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// The example can be run in two ways:
+    ///
+    /// - If you run this example by piping some text to it, e.g. `echo "foo" | path/to/executable`
+    ///   it will print: `Hello foo`.
+    /// - If you instead run the example interactively by running `path/to/executable` directly, it will
+    ///   prompt for input.
+    ///
     /// [changes]: io#platform-specific-behavior
+    /// [`Stdin`]: crate::io::Stdin
+    #[doc(alias = "isatty")]
     #[stable(feature = "is_terminal", since = "1.70.0")]
     fn is_terminal(&self) -> bool;
 }

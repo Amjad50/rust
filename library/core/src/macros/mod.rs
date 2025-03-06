@@ -14,6 +14,12 @@ macro_rules! panic {
 
 /// Asserts that two expressions are equal to each other (using [`PartialEq`]).
 ///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_eq!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_eq!`]: crate::debug_assert_eq
+///
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
 ///
@@ -63,6 +69,12 @@ macro_rules! assert_eq {
 }
 
 /// Asserts that two expressions are not equal to each other (using [`PartialEq`]).
+///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_ne!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_ne!`]: crate::debug_assert_ne
 ///
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
@@ -121,6 +133,12 @@ macro_rules! assert_ne {
 /// The pattern syntax is exactly the same as found in a match arm and the `matches!` macro. The
 /// optional if guard can be used to add additional checks that must be true for the matched value,
 /// otherwise this macro will panic.
+///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_matches!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_matches!`]: crate::assert_matches::debug_assert_matches
 ///
 /// On panic, this macro will print the value of the expression with its debug representation.
 ///
@@ -195,10 +213,10 @@ pub macro assert_matches {
 /// #![feature(cfg_match)]
 ///
 /// cfg_match! {
-///     cfg(unix) => {
+///     unix => {
 ///         fn foo() { /* unix specific functionality */ }
 ///     }
-///     cfg(target_pointer_width = "32") => {
+///     target_pointer_width = "32" => {
 ///         fn foo() { /* non-unix, 32-bit functionality */ }
 ///     }
 ///     _ => {
@@ -206,64 +224,37 @@ pub macro assert_matches {
 ///     }
 /// }
 /// ```
+///
+/// If desired, it is possible to return expressions through the use of surrounding braces:
+///
+/// ```
+/// #![feature(cfg_match)]
+///
+/// let _some_string = cfg_match! {{
+///     unix => { "With great power comes great electricity bills" }
+///     _ => { "Behind every successful diet is an unwatched pizza" }
+/// }};
+/// ```
 #[unstable(feature = "cfg_match", issue = "115585")]
 #[rustc_diagnostic_item = "cfg_match"]
 pub macro cfg_match {
-    // with a final wildcard
-    (
-        $(cfg($initial_meta:meta) => { $($initial_tokens:item)* })+
-        _ => { $($extra_tokens:item)* }
-    ) => {
-        cfg_match! {
-            @__items ();
-            $((($initial_meta) ($($initial_tokens)*)),)+
-            (() ($($extra_tokens)*)),
-        }
+    ({ $($tt:tt)* }) => {{
+        cfg_match! { $($tt)* }
+    }},
+    (_ => { $($output:tt)* }) => {
+        $($output)*
     },
-
-    // without a final wildcard
     (
-        $(cfg($extra_meta:meta) => { $($extra_tokens:item)* })*
+        $cfg:meta => $output:tt
+        $($( $rest:tt )+)?
     ) => {
-        cfg_match! {
-            @__items ();
-            $((($extra_meta) ($($extra_tokens)*)),)*
-        }
+        #[cfg($cfg)]
+        cfg_match! { _ => $output }
+        $(
+            #[cfg(not($cfg))]
+            cfg_match! { $($rest)+ }
+        )?
     },
-
-    // Internal and recursive macro to emit all the items
-    //
-    // Collects all the previous cfgs in a list at the beginning, so they can be
-    // negated. After the semicolon is all the remaining items.
-    (@__items ($($_:meta,)*);) => {},
-    (
-        @__items ($($no:meta,)*);
-        (($($yes:meta)?) ($($tokens:item)*)),
-        $($rest:tt,)*
-    ) => {
-        // Emit all items within one block, applying an appropriate #[cfg]. The
-        // #[cfg] will require all `$yes` matchers specified and must also negate
-        // all previous matchers.
-        #[cfg(all(
-            $($yes,)?
-            not(any($($no),*))
-        ))]
-        cfg_match! { @__identity $($tokens)* }
-
-        // Recurse to emit all other items in `$rest`, and when we do so add all
-        // our `$yes` matchers to the list of `$no` matchers as future emissions
-        // will have to negate everything we just matched as well.
-        cfg_match! {
-            @__items ($($no,)* $($yes,)?);
-            $($rest,)*
-        }
-    },
-
-    // Internal macro to make __apply work out right for different match types,
-    // because of how macros match/expand stuff.
-    (@__identity $($tokens:item)*) => {
-        $($tokens)*
-    }
 }
 
 /// Asserts that a boolean expression is `true` at runtime.
@@ -633,7 +624,7 @@ macro_rules! write {
     };
 }
 
-/// Write formatted data into a buffer, with a newline appended.
+/// Writes formatted data into a buffer, with a newline appended.
 ///
 /// On all platforms, the newline is the LINE FEED character (`\n`/`U+000A`) alone
 /// (no additional CARRIAGE RETURN (`\r`/`U+000D`).
@@ -1054,7 +1045,7 @@ pub(crate) mod builtin {
     /// If the environment variable is not defined, then a compilation error
     /// will be emitted. To not emit a compile error, use the [`option_env!`]
     /// macro instead. A compilation error will also be emitted if the
-    /// environment variable is not a vaild Unicode string.
+    /// environment variable is not a valid Unicode string.
     ///
     /// # Examples
     ///
@@ -1089,17 +1080,19 @@ pub(crate) mod builtin {
     ///
     /// If the named environment variable is present at compile time, this will
     /// expand into an expression of type `Option<&'static str>` whose value is
-    /// `Some` of the value of the environment variable. If the environment
-    /// variable is not present, then this will expand to `None`. See
-    /// [`Option<T>`][Option] for more information on this type.  Use
-    /// [`std::env::var`] instead if you want to read the value at runtime.
+    /// `Some` of the value of the environment variable (a compilation error
+    /// will be emitted if the environment variable is not a valid Unicode
+    /// string). If the environment variable is not present, then this will
+    /// expand to `None`. See [`Option<T>`][Option] for more information on this
+    /// type.  Use [`std::env::var`] instead if you want to read the value at
+    /// runtime.
     ///
     /// [`std::env::var`]: ../std/env/fn.var.html
     ///
-    /// A compile time error is never emitted when using this macro regardless
-    /// of whether the environment variable is present or not.
-    /// To emit a compile error if the environment variable is not present,
-    /// use the [`env!`] macro instead.
+    /// A compile time error is only emitted when using this macro if the
+    /// environment variable exists and is not a valid Unicode string. To also
+    /// emit a compile error if the environment variable is not present, use the
+    /// [`env!`] macro instead.
     ///
     /// # Examples
     ///
@@ -1521,6 +1514,23 @@ pub(crate) mod builtin {
         ($file:expr $(,)?) => {{ /* compiler built-in */ }};
     }
 
+    /// Automatic Differentiation macro which allows generating a new function to compute
+    /// the derivative of a given function. It may only be applied to a function.
+    /// The expected usage syntax is
+    /// `#[autodiff(NAME, MODE, INPUT_ACTIVITIES, OUTPUT_ACTIVITY)]`
+    /// where:
+    /// NAME is a string that represents a valid function name.
+    /// MODE is any of Forward, Reverse, ForwardFirst, ReverseFirst.
+    /// INPUT_ACTIVITIES consists of one valid activity for each input parameter.
+    /// OUTPUT_ACTIVITY must not be set if we implicitly return nothing (or explicitly return
+    /// `-> ()`). Otherwise it must be set to one of the allowed activities.
+    #[unstable(feature = "autodiff", issue = "124509")]
+    #[allow_internal_unstable(rustc_attrs)]
+    #[rustc_builtin_macro]
+    pub macro autodiff($item:item) {
+        /* compiler built-in */
+    }
+
     /// Asserts that a boolean expression is `true` at runtime.
     ///
     /// This will invoke the [`panic!`] macro if the provided expression cannot be
@@ -1569,7 +1579,12 @@ pub(crate) mod builtin {
     #[rustc_builtin_macro]
     #[macro_export]
     #[rustc_diagnostic_item = "assert_macro"]
-    #[allow_internal_unstable(panic_internals, edition_panic, generic_assert_internals)]
+    #[allow_internal_unstable(
+        core_intrinsics,
+        panic_internals,
+        edition_panic,
+        generic_assert_internals
+    )]
     macro_rules! assert {
         ($cond:expr $(,)?) => {{ /* compiler built-in */ }};
         ($cond:expr, $($arg:tt)+) => {{ /* compiler built-in */ }};
@@ -1672,6 +1687,30 @@ pub(crate) mod builtin {
         /* compiler built-in */
     }
 
+    /// Attribute macro applied to a function to give it a post-condition.
+    ///
+    /// The attribute carries an argument token-tree which is
+    /// eventually parsed as a unary closure expression that is
+    /// invoked on a reference to the return value.
+    #[unstable(feature = "contracts", issue = "128044")]
+    #[allow_internal_unstable(contracts_internals)]
+    #[rustc_builtin_macro]
+    pub macro contracts_ensures($item:item) {
+        /* compiler built-in */
+    }
+
+    /// Attribute macro applied to a function to give it a precondition.
+    ///
+    /// The attribute carries an argument token-tree which is
+    /// eventually parsed as an boolean expression with access to the
+    /// function's formal parameters
+    #[unstable(feature = "contracts", issue = "128044")]
+    #[allow_internal_unstable(contracts_internals)]
+    #[rustc_builtin_macro]
+    pub macro contracts_requires($item:item) {
+        /* compiler built-in */
+    }
+
     /// Attribute macro applied to a function to register it as a handler for allocation failure.
     ///
     /// See also [`std::alloc::handle_alloc_error`](../../../std/alloc/fn.handle_alloc_error.html).
@@ -1725,33 +1764,5 @@ pub(crate) mod builtin {
     )]
     pub macro deref($pat:pat) {
         builtin # deref($pat)
-    }
-
-    /// Derive macro for `rustc-serialize`. Should not be used in new code.
-    #[rustc_builtin_macro]
-    #[unstable(
-        feature = "rustc_encodable_decodable",
-        issue = "none",
-        soft,
-        reason = "derive macro for `rustc-serialize`; should not be used in new code"
-    )]
-    #[deprecated(since = "1.52.0", note = "rustc-serialize is deprecated and no longer supported")]
-    #[doc(hidden)] // While technically stable, using it is unstable, and deprecated. Hide it.
-    pub macro RustcDecodable($item:item) {
-        /* compiler built-in */
-    }
-
-    /// Derive macro for `rustc-serialize`. Should not be used in new code.
-    #[rustc_builtin_macro]
-    #[unstable(
-        feature = "rustc_encodable_decodable",
-        issue = "none",
-        soft,
-        reason = "derive macro for `rustc-serialize`; should not be used in new code"
-    )]
-    #[deprecated(since = "1.52.0", note = "rustc-serialize is deprecated and no longer supported")]
-    #[doc(hidden)] // While technically stable, using it is unstable, and deprecated. Hide it.
-    pub macro RustcEncodable($item:item) {
-        /* compiler built-in */
     }
 }

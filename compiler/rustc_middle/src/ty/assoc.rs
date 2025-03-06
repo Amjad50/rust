@@ -1,17 +1,17 @@
-use crate::ty;
 use rustc_data_structures::sorted_map::SortedIndexMultiMap;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Namespace};
 use rustc_hir::def_id::DefId;
 use rustc_macros::{Decodable, Encodable, HashStable};
-use rustc_span::symbol::{Ident, Symbol};
+use rustc_span::{Ident, Symbol, sym};
 
 use super::{TyCtxt, Visibility};
+use crate::ty;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, HashStable, Hash, Encodable, Decodable)]
 pub enum AssocItemContainer {
-    TraitContainer,
-    ImplContainer,
+    Trait,
+    Impl,
 }
 
 /// Information about an associated item
@@ -63,16 +63,16 @@ impl AssocItem {
     #[inline]
     pub fn trait_container(&self, tcx: TyCtxt<'_>) -> Option<DefId> {
         match self.container {
-            AssocItemContainer::ImplContainer => None,
-            AssocItemContainer::TraitContainer => Some(tcx.parent(self.def_id)),
+            AssocItemContainer::Impl => None,
+            AssocItemContainer::Trait => Some(tcx.parent(self.def_id)),
         }
     }
 
     #[inline]
     pub fn impl_container(&self, tcx: TyCtxt<'_>) -> Option<DefId> {
         match self.container {
-            AssocItemContainer::ImplContainer => Some(tcx.parent(self.def_id)),
-            AssocItemContainer::TraitContainer => None,
+            AssocItemContainer::Impl => Some(tcx.parent(self.def_id)),
+            AssocItemContainer::Trait => None,
         }
     }
 
@@ -96,8 +96,35 @@ impl AssocItem {
         }
     }
 
+    pub fn descr(&self) -> &'static str {
+        match self.kind {
+            ty::AssocKind::Const => "const",
+            ty::AssocKind::Fn if self.fn_has_self_parameter => "method",
+            ty::AssocKind::Fn => "associated function",
+            ty::AssocKind::Type => "type",
+        }
+    }
+
     pub fn is_impl_trait_in_trait(&self) -> bool {
         self.opt_rpitit_info.is_some()
+    }
+
+    /// Returns true if:
+    /// - This trait associated item has the `#[type_const]` attribute,
+    /// - If it is in a trait impl, the item from the original trait has this attribute, or
+    /// - It is an inherent assoc const.
+    pub fn is_type_const_capable(&self, tcx: TyCtxt<'_>) -> bool {
+        if self.kind != ty::AssocKind::Const {
+            return false;
+        }
+
+        let def_id = match (self.container, self.trait_item_def_id) {
+            (AssocItemContainer::Trait, _) => self.def_id,
+            (AssocItemContainer::Impl, Some(trait_item_did)) => trait_item_did,
+            // Inherent impl but this attr is only applied to trait assoc items.
+            (AssocItemContainer::Impl, None) => return true,
+        };
+        tcx.has_attr(def_id, sym::type_const)
     }
 }
 

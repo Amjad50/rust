@@ -7,14 +7,16 @@ use rustc_hir as hir;
 use rustc_hir::ImplItemKind;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for functions of type `Result` that contain `expect()` or `unwrap()`
     ///
-    /// ### Why is this bad?
-    /// These functions promote recoverable errors to non-recoverable errors which may be undesirable in code bases which wish to avoid panics.
+    /// ### Why restrict this?
+    /// These functions promote recoverable errors to non-recoverable errors,
+    /// which may be undesirable in code bases which wish to avoid panics,
+    /// or be a bug in the specific function.
     ///
     /// ### Known problems
     /// This can cause false positives in functions that handle both recoverable and non recoverable errors.
@@ -72,10 +74,10 @@ impl<'tcx> LateLintPass<'tcx> for UnwrapInResult {
 
 fn lint_impl_body<'tcx>(cx: &LateContext<'tcx>, impl_span: Span, impl_item: &'tcx hir::ImplItem<'_>) {
     if let ImplItemKind::Fn(_, body_id) = impl_item.kind {
-        let body = cx.tcx.hir().body(body_id);
+        let body = cx.tcx.hir_body(body_id);
         let typeck = cx.tcx.typeck(impl_item.owner_id.def_id);
         let mut result = Vec::new();
-        let _: Option<!> = for_each_expr(body.value, |e| {
+        let _: Option<!> = for_each_expr(cx, body.value, |e| {
             // check for `expect`
             if let Some(arglists) = method_chain_args(e, &["expect"]) {
                 let receiver_ty = typeck.expr_ty(arglists[0].0).peel_refs();

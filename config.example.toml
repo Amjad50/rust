@@ -1,6 +1,6 @@
 # Sample TOML configuration file for building Rust.
 #
-# To configure rustbuild, run `./configure` or `./x.py setup`.
+# To configure bootstrap, run `./configure` or `./x.py setup`.
 # See https://rustc-dev-guide.rust-lang.org/building/how-to-build-and-run.html#create-a-configtoml for more information.
 #
 # All options are commented out by default in this file, and they're commented
@@ -42,6 +42,9 @@
 # Unless you're developing for a target where Rust CI doesn't build a compiler
 # toolchain or changing LLVM locally, you probably want to leave this enabled.
 #
+# Set this to `true` to download if CI llvm available otherwise it builds
+# from `src/llvm-project`.
+#
 # Set this to `"if-unchanged"` to download only if the llvm-project has not
 # been modified. You can also use this if you are unsure whether you're on a
 # tier 1 target. All tier 1 targets are currently supported.
@@ -50,7 +53,7 @@
 #
 # Note that many of the LLVM options are not currently supported for
 # downloading. Currently only the "assertions" option can be toggled.
-#download-ci-llvm = if rust.channel == "dev" || rust.download-rustc != false { "if-unchanged" } else { false }
+#download-ci-llvm = true
 
 # Indicates whether the LLVM build is a Release or Debug build
 #optimize = true
@@ -78,14 +81,19 @@
 # Indicates whether the LLVM plugin is enabled or not
 #plugins = false
 
-# Indicates whether ccache is used when building LLVM. Set to `true` to use the first `ccache` in
-# PATH, or set an absolute path to use a specific version.
-#ccache = false
+# Whether to build Enzyme as AutoDiff backend.
+#enzyme = false
+
+# Whether to build LLVM with support for it's gpu offload runtime.
+#offload = false
 
 # When true, link libstdc++ statically into the rustc_llvm.
 # This is useful if you don't want to use the dynamic version of that
 # library provided by LLVM.
 #static-libstdcpp = false
+
+# Enable LLVM to use zstd for compression.
+#libzstd = false
 
 # Whether to use Ninja to build LLVM. This runs much faster than make.
 #ninja = true
@@ -96,7 +104,7 @@
 # the resulting rustc being unable to compile for the disabled architectures.
 #
 # To add support for new targets, see https://rustc-dev-guide.rust-lang.org/building/new-target.html.
-#targets = "AArch64;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86"
+#targets = "AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86"
 
 # LLVM experimental targets to build support for. These targets are specified in
 # the same format as above, but since these targets are experimental, they are
@@ -109,7 +117,7 @@
 # increases the size of binaries and consequently the memory required by
 # each linker process.
 # If set to 0, linker invocations are treated like any other job and
-# controlled by rustbuild's -j parameter.
+# controlled by bootstrap's -j parameter.
 #link-jobs = 0
 
 # Whether to build LLVM as a dynamically linked library (as opposed to statically linked).
@@ -181,6 +189,17 @@
 # The default stage to use for the `bench` subcommand
 #bench-stage = 2
 
+# A descriptive string to be appended to version output (e.g., `rustc --version`),
+# which is also used in places like debuginfo `DW_AT_producer`. This may be useful for
+# supplementary build information, like distro-specific package versions.
+#
+# The Rust compiler will differentiate between versions of itself, including
+# based on this string, which means that if you wish to be compatible with
+# upstream Rust you need to set this to "". However, note that if you set this to "" but
+# are not actually compatible -- for example if you've backported patches that change
+# behavior -- this may lead to miscompilations or other bugs.
+#description = ""
+
 # Build triple for the pre-compiled snapshot compiler. If `rustc` is set, this must match its host
 # triple (see `rustc --version --verbose`; cross-compiling the rust build system itself is NOT
 # supported). If `rustc` is unset, this must be a platform with pre-compiled host tools
@@ -213,19 +232,26 @@
 # the root of the repository.
 #build-dir = "build"
 
-# Instead of downloading the src/stage0.json version of Cargo specified, use
+# Instead of downloading the src/stage0 version of Cargo specified, use
 # this Cargo binary instead to build all Rust code
 # If you set this, you likely want to set `rustc` as well.
 #cargo = "/path/to/cargo"
 
-# Instead of downloading the src/stage0.json version of the compiler
+# Instead of downloading the src/stage0 version of the compiler
 # specified, use this rustc binary instead as the stage0 snapshot compiler.
 # If you set this, you likely want to set `cargo` as well.
 #rustc = "/path/to/rustc"
 
-# Instead of downloading the src/stage0.json version of rustfmt specified,
+# Instead of downloading the src/stage0 version of rustfmt specified,
 # use this rustfmt binary instead as the stage0 snapshot rustfmt.
 #rustfmt = "/path/to/rustfmt"
+
+# Instead of downloading the src/stage0 version of cargo-clippy specified,
+# use this cargo-clippy binary instead as the stage0 snapshot cargo-clippy.
+#
+# Note that this option should be used with the same toolchain as the `rustc` option above.
+# Otherwise, clippy is likely to fail due to a toolchain conflict.
+#cargo-clippy = "/path/to/cargo-clippy"
 
 # Whether to build documentation by default. If false, rustdoc and
 # friends will still be compiled but they will not be used to generate any
@@ -292,9 +318,8 @@
 # Indicate whether the vendored sources are used for Rust dependencies or not.
 #
 # Vendoring requires additional setup. We recommend using the pre-generated source tarballs if you
-# want to use vendoring. See
-# https://forge.rust-lang.org/infra/other-installation-methods.html#source-code.
-#vendor = false
+# want to use vendoring. See https://forge.rust-lang.org/infra/other-installation-methods.html#source-code.
+#vendor = if "is a tarball source" && "vendor" dir exists && ".cargo/config.toml" file exists { true } else { false }
 
 # Typically the build system will build the Rust compiler twice. The second
 # compiler, however, will simply use its own libraries to link against. If you
@@ -305,7 +330,7 @@
 #full-bootstrap = false
 
 # Set the bootstrap/download cache path. It is useful when building rust
-# repeatedly in a CI invironment.
+# repeatedly in a CI environment.
 #bootstrap-cache-path = /path/to/shared/cache
 
 # Enable a build of the extended Rust tool set which is not only the compiler
@@ -321,8 +346,7 @@
 #
 # If `extended = false`, the only one of these built by default is rustdoc.
 #
-# If `extended = true`, they're all included, with the exception of
-# rust-demangler which additionally requires `profiler = true` to be set.
+# If `extended = true`, they are all included.
 #
 # If any enabled tool fails to build, the installation fails.
 #tools = [
@@ -334,7 +358,8 @@
 #    "rust-analyzer-proc-macro-srv",
 #    "analysis",
 #    "src",
-#    "rust-demangler",  # if profiler = true
+#    "wasm-component-ld",
+#    "miri", "cargo-miri" # for dev/nightly channels
 #]
 
 # Verbosity level: 0 == not verbose, 1 == verbose, 2 == very verbose, 3 == print environment variables on each rustc invocation
@@ -373,11 +398,11 @@
 # Useful for modifying only the stage2 compiler without having to pass `--keep-stage 0` each time.
 #local-rebuild = false
 
-# Print out how long each rustbuild step took (mostly intended for CI and
+# Print out how long each bootstrap step took (mostly intended for CI and
 # tracking over time)
 #print-step-timings = false
 
-# Print out resource usage data for each rustbuild step, as defined by the Unix
+# Print out resource usage data for each bootstrap step, as defined by the Unix
 # struct rusage. (Note that this setting is completely unstable: the data it
 # captures, what platforms it supports, the format of its associated output, and
 # this setting's very existence, are all subject to change.)
@@ -389,14 +414,27 @@
 # a Nix toolchain on non-NixOS distributions.
 #patch-binaries-for-nix = false
 
-# Collect information and statistics about the current build and writes it to
-# disk. Enabling this or not has no impact on the resulting build output. The
+# Collect information and statistics about the current build, and write it to
+# disk. Enabling this has no impact on the resulting build output. The
 # schema of the file generated by the build metrics feature is unstable, and
 # this is not intended to be used during local development.
 #metrics = false
 
 # Specify the location of the Android NDK. Used when targeting Android.
-#android-ndk = "/path/to/android-ndk-r25b"
+#android-ndk = "/path/to/android-ndk-r26d"
+
+# Number of parallel jobs to be used for building and testing. If set to `0` or
+# omitted, it will be automatically determined. This is the `-j`/`--jobs` flag
+# passed to cargo invocations.
+#jobs = 0
+
+# What custom diff tool to use for displaying compiletest tests.
+#compiletest-diff-tool = <none>
+
+# Indicates whether ccache is used when building certain artifacts (e.g. LLVM).
+# Set to `true` to use the first `ccache` in PATH, or set an absolute path to use
+# a specific version.
+#ccache = false
 
 # =============================================================================
 # General install configuration options
@@ -469,11 +507,17 @@
 #
 #debug = false
 
-# Whether to download the stage 1 and 2 compilers from CI.
-# This is mostly useful for tools; if you have changes to `compiler/` or `library/` they will be ignored.
+# Whether to download the stage 1 and 2 compilers from CI. This is useful if you
+# are working on tools, doc-comments, or library (you will be able to build the
+# standard library without needing to build the compiler).
 #
-# Set this to "if-unchanged" to only download if the compiler and standard library have not been modified.
-# Set this to `true` to download unconditionally (useful if e.g. you are only changing doc-comments).
+# Set this to "if-unchanged" if you are working on `src/tools`, `tests` or
+# `library` (on CI, `library` changes triggers in-tree compiler build) to speed
+# up the build process if you don't need to build a compiler from the latest
+# commit from `master`.
+#
+# Set this to `true` to always download or `false` to always use the in-tree
+# compiler.
 #download-rustc = false
 
 # Number of codegen units to use for each compiler invocation. A value of 0
@@ -507,6 +551,9 @@
 # If you see a message from `tracing` saying "some trace filter directives would enable traces that
 # are disabled statically" because `max_level_info` is enabled, set this value to `true`.
 #debug-logging = rust.debug-assertions (boolean)
+
+# Whether or not to build rustc, tools and the libraries with randomized type layout
+#randomize-layout = false
 
 # Whether or not overflow checks are enabled for the compiler and standard
 # library.
@@ -560,12 +607,6 @@
 # Whether to always use incremental compilation when building rustc
 #incremental = false
 
-# Build a multi-threaded rustc. This allows users to use parallel rustc
-# via the unstable option `-Z threads=n`.
-# Since stable/beta channels only allow using stable features,
-# `parallel-compiler = false` should be set for these channels.
-#parallel-compiler = true
-
 # The default linker that will be hard-coded into the generated
 # compiler for targets that don't specify a default linker explicitly
 # in their target specifications.  Note that this is not the linker
@@ -578,19 +619,12 @@
 
 # The "channel" for the Rust build to produce. The stable/beta channels only
 # allow using stable features, whereas the nightly and dev channels allow using
-# nightly features
-#channel = "dev"
-
-# A descriptive string to be appended to `rustc --version` output, which is
-# also used in places like debuginfo `DW_AT_producer`. This may be useful for
-# supplementary build information, like distro-specific package versions.
+# nightly features.
 #
-# The Rust compiler will differentiate between versions of itself, including
-# based on this string, which means that if you wish to be compatible with
-# upstream Rust you need to set this to "". However, note that if you are not
-# actually compatible -- for example if you've backported patches that change
-# behavior -- this may lead to miscompilations or other bugs.
-#description = ""
+# You can set the channel to "auto-detect" to load the channel name from `src/ci/channel`.
+#
+# If using tarball sources, default value is "auto-detect", otherwise, it's "dev".
+#channel = if "is a tarball source" { "auto-detect" } else { "dev" }
 
 # The root location of the musl installation directory. The library directory
 # will also need to contain libunwind.a for an unwinding implementation. Note
@@ -611,7 +645,7 @@
 
 # Forces frame pointers to be used with `-Cforce-frame-pointers`.
 # This can be helpful for profiling at a small performance cost.
-# frame-pointers = false
+#frame-pointers = false
 
 # Indicates whether stack protectors should be used
 # via the unstable option `-Zstack-protector`.
@@ -621,7 +655,7 @@
 #stack-protector = "none"
 
 # Prints each test name as it is executed, to help debug issues in the test harness itself.
-#verbose-tests = false
+#verbose-tests = if is_verbose { true } else { false }
 
 # Flag indicating whether tests are compiled with optimizations (the -O flag).
 #optimize-tests = true
@@ -633,8 +667,6 @@
 
 # Flag indicating whether git info will be retrieved from .git automatically.
 # Having the git information can cause a lot of rebuilds during development.
-#
-# FIXME(#76720): this can causes bugs if different compilers reuse the same metadata cache.
 #omit-git-hash = if rust.channel == "dev" { true } else { false }
 
 # Whether to create a source tarball by default when running `x dist`.
@@ -653,9 +685,12 @@
 # when no explicit backend is specified.
 #codegen-backends = ["llvm"]
 
-# Indicates whether LLD will be compiled and made available in the sysroot for
-# rustc to execute.
-#lld = false
+# Indicates whether LLD will be compiled and made available in the sysroot for rustc to execute, and
+# whether to set it as rustc's default linker on `x86_64-unknown-linux-gnu`. This will also only be
+# when *not* building an external LLVM (so only when using `download-ci-llvm` or building LLVM from
+# the in-tree source): setting `llvm-config` in the `[target.x86_64-unknown-linux-gnu]` section will
+# make this default to false.
+#lld = false in all cases, except on `x86_64-unknown-linux-gnu` as described above, where it is true
 
 # Indicates whether LLD will be used to link Rust crates during bootstrap on
 # supported platforms.
@@ -673,7 +708,7 @@
 #llvm-tools = true
 
 # Indicates whether the `self-contained` llvm-bitcode-linker, will be made available
-# in the sysroot
+# in the sysroot. It is required for running nvptx tests.
 #llvm-bitcode-linker = false
 
 # Whether to deny warnings in crates
@@ -695,7 +730,8 @@
 #remap-debuginfo = false
 
 # Link the compiler and LLVM against `jemalloc` instead of the default libc allocator.
-# This option is only tested on Linux and OSX.
+# This option is only tested on Linux and OSX. It can also be configured per-target in the
+# [target.<tuple>] section.
 #jemalloc = false
 
 # Run tests in various test suites with the "nll compare mode" in addition to
@@ -733,6 +769,20 @@
 # Build compiler with the optimization enabled and -Zvalidate-mir, currently only for `std`
 #validate-mir-opts = 3
 
+# Configure `std` features used during bootstrap.
+#
+# Default features will be expanded in the following cases:
+#  - If `rust.llvm-libunwind` or `target.llvm-libunwind` is enabled:
+#    - "llvm-libunwind" will be added for in-tree LLVM builds.
+#    - "system-llvm-libunwind" will be added for system LLVM builds.
+#  - If `rust.backtrace` is enabled, "backtrace" will be added.
+#  - If `rust.profiler` or `target.profiler` is enabled, "profiler" will be added.
+#  - If building for a zkvm target, "compiler-builtins-mem" will be added.
+#
+# Since libstd also builds libcore and liballoc as dependencies and all their features are mirrored
+# as libstd features, this option can also be used to configure features such as optimize_for_size.
+#std-features = ["panic_unwind"]
+
 # =============================================================================
 # Options for specific targets
 #
@@ -744,12 +794,12 @@
 # C compiler to be used to compile C code. Note that the
 # default value is platform specific, and if not specified it may also depend on
 # what platform is crossing to what platform.
-# See `src/bootstrap/cc_detect.rs` for details.
+# See `src/bootstrap/src/utils/cc_detect.rs` for details.
 #cc = "cc" (path)
 
 # C++ compiler to be used to compile C++ code (e.g. LLVM and our LLVM shims).
 # This is only used for host targets.
-# See `src/bootstrap/cc_detect.rs` for details.
+# See `src/bootstrap/src/utils/cc_detect.rs` for details.
 #cxx = "c++" (path)
 
 # Archiver to be used to assemble static libraries compiled from C/C++ code.
@@ -870,6 +920,19 @@
 # argument as the test binary.
 #runner = <none> (string)
 
+# Use the optimized LLVM C intrinsics for `compiler_builtins`, rather than Rust intrinsics
+# on this target.
+# Requires the LLVM submodule to be managed by bootstrap (i.e. not external) so that `compiler-rt`
+# sources are available.
+#
+# Setting this to `false` generates slower code, but removes the requirement for a C toolchain in
+# order to run `x check`.
+#optimized-compiler-builtins = build.optimized-compiler-builtins (bool)
+
+# Link the compiler and LLVM against `jemalloc` instead of the default libc allocator.
+# This overrides the global `rust.jemalloc` option. See that option for more info.
+#jemalloc = rust.jemalloc (bool)
+
 # =============================================================================
 # Distribution options
 #
@@ -901,9 +964,6 @@
 # on linux
 #src-tarball = true
 
-# Whether to allow failures when building tools
-#missing-tools = false
-
 # List of compression formats to use when generating dist tarballs. The list of
 # formats is provided to rust-installer, which must support all of them.
 #
@@ -919,3 +979,6 @@
 # Copy the linker, DLLs, and various libraries from MinGW into the Rust toolchain.
 # Only applies when the host or target is pc-windows-gnu.
 #include-mingw-linker = true
+
+# Whether to vendor dependencies for the dist tarball.
+#vendor = if "is a tarball source" || "is a git repository" { true } else { false }

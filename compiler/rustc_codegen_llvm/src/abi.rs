@@ -1,32 +1,32 @@
-use crate::attributes;
-use crate::builder::Builder;
-use crate::context::CodegenCx;
-use crate::llvm::{self, Attribute, AttributePlace};
-use crate::llvm_util;
-use crate::type_::Type;
-use crate::type_of::LayoutLlvmExt;
-use crate::value::Value;
+use std::borrow::Borrow;
+use std::cmp;
 
+use libc::c_uint;
+use rustc_abi::{BackendRepr, HasDataLayout, Primitive, Reg, RegKind, Size};
+use rustc_codegen_ssa::MemFlags;
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::{PlaceRef, PlaceValue};
 use rustc_codegen_ssa::traits::*;
-use rustc_codegen_ssa::MemFlags;
-use rustc_middle::bug;
-use rustc_middle::ty::layout::LayoutOf;
-pub use rustc_middle::ty::layout::{FAT_PTR_ADDR, FAT_PTR_EXTRA};
 use rustc_middle::ty::Ty;
+use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::{bug, ty};
 use rustc_session::config;
-pub use rustc_target::abi::call::*;
-use rustc_target::abi::{self, HasDataLayout, Int, Size};
-pub use rustc_target::spec::abi::Abi;
+use rustc_target::callconv::{
+    ArgAbi, ArgAttribute, ArgAttributes, ArgExtension, CastTarget, Conv, FnAbi, PassMode,
+};
 use rustc_target::spec::SanitizerSet;
-
-use libc::c_uint;
 use smallvec::SmallVec;
 
-use std::cmp;
+use crate::attributes::llfn_attrs_from_instance;
+use crate::builder::Builder;
+use crate::context::CodegenCx;
+use crate::llvm::{self, Attribute, AttributePlace};
+use crate::type_::Type;
+use crate::type_of::LayoutLlvmExt;
+use crate::value::Value;
+use crate::{attributes, llvm_util};
 
-pub trait ArgAttributesExt {
+trait ArgAttributesExt {
     fn apply_attrs_to_llfn(&self, idx: AttributePlace, cx: &CodegenCx<'_, '_>, llfn: &Value);
     fn apply_attrs_to_callsite(
         &self,
@@ -112,7 +112,7 @@ impl ArgAttributesExt for ArgAttributes {
     }
 }
 
-pub trait LlvmType {
+pub(crate) trait LlvmType {
     fn llvm_type<'ll>(&self, cx: &CodegenCx<'ll, '_>) -> &'ll Type;
 }
 
@@ -121,8 +121,10 @@ impl LlvmType for Reg {
         match self.kind {
             RegKind::Integer => cx.type_ix(self.size.bits()),
             RegKind::Float => match self.size.bits() {
+                16 => cx.type_f16(),
                 32 => cx.type_f32(),
                 64 => cx.type_f64(),
+                128 => cx.type_f128(),
                 _ => bug!("unsupported float: {:?}", self),
             },
             RegKind::Vector => cx.type_vector(cx.type_i8(), self.size.bytes()),
@@ -170,7 +172,7 @@ impl LlvmType for CastTarget {
     }
 }
 
-pub trait ArgAbiExt<'ll, 'tcx> {
+trait ArgAbiExt<'ll, 'tcx> {
     fn memory_ty(&self, cx: &CodegenCx<'ll, 'tcx>) -> &'ll Type;
     fn store(
         &self,
@@ -226,7 +228,8 @@ impl<'ll, 'tcx> ArgAbiExt<'ll, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
                 //   when passed by value, making it smaller.
                 // - On some ABIs, the Rust layout { u16, u16, u16 } may be padded up to 8 bytes
                 //   when passed by value, making it larger.
-                let copy_bytes = cmp::min(scratch_size.bytes(), self.layout.size.bytes());
+                let copy_bytes =
+                    cmp::min(cast.unaligned_size(bx).bytes(), self.layout.size.bytes());
                 // Allocate some scratch space...
                 let llscratch = bx.alloca(scratch_size, scratch_align);
                 bx.lifetime_start(llscratch, scratch_size);
@@ -283,7 +286,7 @@ impl<'ll, 'tcx> ArgAbiExt<'ll, 'tcx> for ArgAbi<'tcx, Ty<'tcx>> {
     }
 }
 
-impl<'ll, 'tcx> ArgAbiMethods<'tcx> for Builder<'_, 'll, 'tcx> {
+impl<'ll, 'tcx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
     fn store_fn_arg(
         &mut self,
         arg_abi: &ArgAbi<'tcx, Ty<'tcx>>,
@@ -305,11 +308,20 @@ impl<'ll, 'tcx> ArgAbiMethods<'tcx> for Builder<'_, 'll, 'tcx> {
     }
 }
 
-pub trait FnAbiLlvmExt<'ll, 'tcx> {
+pub(crate) trait FnAbiLlvmExt<'ll, 'tcx> {
     fn llvm_type(&self, cx: &CodegenCx<'ll, 'tcx>) -> &'ll Type;
     fn ptr_to_llvm_type(&self, cx: &CodegenCx<'ll, 'tcx>) -> &'ll Type;
-    fn llvm_cconv(&self) -> llvm::CallConv;
-    fn apply_attrs_llfn(&self, cx: &CodegenCx<'ll, 'tcx>, llfn: &'ll Value);
+    fn llvm_cconv(&self, cx: &CodegenCx<'ll, 'tcx>) -> llvm::CallConv;
+
+    /// Apply attributes to a function declaration/definition.
+    fn apply_attrs_llfn(
+        &self,
+        cx: &CodegenCx<'ll, 'tcx>,
+        llfn: &'ll Value,
+        instance: Option<ty::Instance<'tcx>>,
+    );
+
+    /// Apply attributes to a function call.
     fn apply_attrs_callsite(&self, bx: &mut Builder<'_, 'll, 'tcx>, callsite: &'ll Value);
 }
 
@@ -391,13 +403,18 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
         cx.type_ptr_ext(cx.data_layout().instruction_address_space)
     }
 
-    fn llvm_cconv(&self) -> llvm::CallConv {
-        self.conv.into()
+    fn llvm_cconv(&self, cx: &CodegenCx<'ll, 'tcx>) -> llvm::CallConv {
+        llvm::CallConv::from_conv(self.conv, cx.tcx.sess.target.arch.borrow())
     }
 
-    fn apply_attrs_llfn(&self, cx: &CodegenCx<'ll, 'tcx>, llfn: &'ll Value) {
+    fn apply_attrs_llfn(
+        &self,
+        cx: &CodegenCx<'ll, 'tcx>,
+        llfn: &'ll Value,
+        instance: Option<ty::Instance<'tcx>>,
+    ) {
         let mut func_attrs = SmallVec::<[_; 3]>::new();
-        if self.ret.layout.abi.is_uninhabited() {
+        if self.ret.layout.is_uninhabited() {
             func_attrs.push(llvm::AttributeKind::NoReturn.create_attr(cx.llcx));
         }
         if !self.can_unwind {
@@ -405,6 +422,9 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
         }
         if let Conv::RiscvInterrupt { kind } = self.conv {
             func_attrs.push(llvm::CreateAttrStringValue(cx.llcx, "interrupt", kind.as_str()));
+        }
+        if let Conv::CCmseNonSecureEntry = self.conv {
+            func_attrs.push(llvm::CreateAttrString(cx.llcx, "cmse_nonsecure_entry"))
         }
         attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &{ func_attrs });
 
@@ -414,9 +434,32 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             i += 1;
             i - 1
         };
+
+        let apply_range_attr = |idx: AttributePlace, scalar: rustc_abi::Scalar| {
+            if cx.sess().opts.optimize != config::OptLevel::No
+                && llvm_util::get_version() >= (19, 0, 0)
+                && matches!(scalar.primitive(), Primitive::Int(..))
+                // If the value is a boolean, the range is 0..2 and that ultimately
+                // become 0..0 when the type becomes i1, which would be rejected
+                // by the LLVM verifier.
+                && !scalar.is_bool()
+                // LLVM also rejects full range.
+                && !scalar.is_always_valid(cx)
+            {
+                attributes::apply_to_llfn(
+                    llfn,
+                    idx,
+                    &[llvm::CreateRangeAttr(cx.llcx, scalar.size(cx), scalar.valid_range(cx))],
+                );
+            }
+        };
+
         match &self.ret.mode {
             PassMode::Direct(attrs) => {
                 attrs.apply_attrs_to_llfn(llvm::AttributePlace::ReturnValue, cx, llfn);
+                if let BackendRepr::Scalar(scalar) = self.ret.layout.backend_repr {
+                    apply_range_attr(llvm::AttributePlace::ReturnValue, scalar);
+                }
             }
             PassMode::Indirect { attrs, meta_attrs: _, on_stack } => {
                 assert!(!on_stack);
@@ -426,9 +469,7 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                     cx.type_array(cx.type_i8(), self.ret.layout.size.bytes()),
                 );
                 attributes::apply_to_llfn(llfn, llvm::AttributePlace::Argument(i), &[sret]);
-                if cx.sess().opts.optimize != config::OptLevel::No
-                    && llvm_util::get_version() >= (18, 0, 0)
-                {
+                if cx.sess().opts.optimize != config::OptLevel::No {
                     attributes::apply_to_llfn(
                         llfn,
                         llvm::AttributePlace::Argument(i),
@@ -455,8 +496,13 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                     );
                     attributes::apply_to_llfn(llfn, llvm::AttributePlace::Argument(i), &[byval]);
                 }
-                PassMode::Direct(attrs)
-                | PassMode::Indirect { attrs, meta_attrs: None, on_stack: false } => {
+                PassMode::Direct(attrs) => {
+                    let i = apply(attrs);
+                    if let BackendRepr::Scalar(scalar) = arg.layout.backend_repr {
+                        apply_range_attr(llvm::AttributePlace::Argument(i), scalar);
+                    }
+                }
+                PassMode::Indirect { attrs, meta_attrs: None, on_stack: false } => {
                     apply(attrs);
                 }
                 PassMode::Indirect { attrs, meta_attrs: Some(meta_attrs), on_stack } => {
@@ -465,8 +511,12 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                     apply(meta_attrs);
                 }
                 PassMode::Pair(a, b) => {
-                    apply(a);
-                    apply(b);
+                    let i = apply(a);
+                    let ii = apply(b);
+                    if let BackendRepr::ScalarPair(scalar_a, scalar_b) = arg.layout.backend_repr {
+                        apply_range_attr(llvm::AttributePlace::Argument(i), scalar_a);
+                        apply_range_attr(llvm::AttributePlace::Argument(ii), scalar_b);
+                    }
                 }
                 PassMode::Cast { cast, pad_i32 } => {
                     if *pad_i32 {
@@ -476,11 +526,16 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                 }
             }
         }
+
+        // If the declaration has an associated instance, compute extra attributes based on that.
+        if let Some(instance) = instance {
+            llfn_attrs_from_instance(cx, llfn, instance);
+        }
     }
 
     fn apply_attrs_callsite(&self, bx: &mut Builder<'_, 'll, 'tcx>, callsite: &'ll Value) {
         let mut func_attrs = SmallVec::<[_; 2]>::new();
-        if self.ret.layout.abi.is_uninhabited() {
+        if self.ret.layout.is_uninhabited() {
             func_attrs.push(llvm::AttributeKind::NoReturn.create_attr(bx.cx.llcx));
         }
         if !self.can_unwind {
@@ -516,15 +571,18 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             }
             _ => {}
         }
-        if let abi::Abi::Scalar(scalar) = self.ret.layout.abi {
-            // If the value is a boolean, the range is 0..2 and that ultimately
-            // become 0..0 when the type becomes i1, which would be rejected
-            // by the LLVM verifier.
-            if let Int(..) = scalar.primitive() {
-                if !scalar.is_bool() && !scalar.is_always_valid(bx) {
-                    bx.range_metadata(callsite, scalar.valid_range(bx));
-                }
-            }
+        if bx.cx.sess().opts.optimize != config::OptLevel::No
+                && llvm_util::get_version() < (19, 0, 0)
+                && let BackendRepr::Scalar(scalar) = self.ret.layout.backend_repr
+                && matches!(scalar.primitive(), Primitive::Int(..))
+                // If the value is a boolean, the range is 0..2 and that ultimately
+                // become 0..0 when the type becomes i1, which would be rejected
+                // by the LLVM verifier.
+                && !scalar.is_bool()
+                // LLVM also rejects full range.
+                && !scalar.is_always_valid(bx)
+        {
+            bx.range_metadata(callsite, scalar.valid_range(bx));
         }
         for arg in self.args.iter() {
             match &arg.mode {
@@ -562,7 +620,7 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             }
         }
 
-        let cconv = self.llvm_cconv();
+        let cconv = self.llvm_cconv(&bx.cx);
         if cconv != llvm::CCallConv {
             llvm::SetInstructionCallConv(callsite, cconv);
         }
@@ -583,7 +641,7 @@ impl<'ll, 'tcx> FnAbiLlvmExt<'ll, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
         let element_type_index = unsafe { llvm::LLVMRustGetElementTypeArgIndex(callsite) };
         if element_type_index >= 0 {
             let arg_ty = self.args[element_type_index as usize].layout.ty;
-            let pointee_ty = arg_ty.builtin_deref(true).expect("Must be pointer argument").ty;
+            let pointee_ty = arg_ty.builtin_deref(true).expect("Must be pointer argument");
             let element_type_attr = unsafe {
                 llvm::LLVMRustCreateElementTypeAttr(bx.llcx, bx.layout_of(pointee_ty).llvm_type(bx))
             };
@@ -602,20 +660,30 @@ impl<'tcx> AbiBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     }
 }
 
-impl From<Conv> for llvm::CallConv {
-    fn from(conv: Conv) -> Self {
+impl llvm::CallConv {
+    pub(crate) fn from_conv(conv: Conv, arch: &str) -> Self {
         match conv {
-            Conv::C | Conv::Rust | Conv::CCmseNonSecureCall | Conv::RiscvInterrupt { .. } => {
-                llvm::CCallConv
-            }
+            Conv::C
+            | Conv::Rust
+            | Conv::CCmseNonSecureCall
+            | Conv::CCmseNonSecureEntry
+            | Conv::RiscvInterrupt { .. } => llvm::CCallConv,
             Conv::Cold => llvm::ColdCallConv,
             Conv::PreserveMost => llvm::PreserveMost,
             Conv::PreserveAll => llvm::PreserveAll,
+            Conv::GpuKernel => {
+                if arch == "amdgpu" {
+                    llvm::AmdgpuKernel
+                } else if arch == "nvptx64" {
+                    llvm::PtxKernel
+                } else {
+                    panic!("Architecture {arch} does not support GpuKernel calling convention");
+                }
+            }
             Conv::AvrInterrupt => llvm::AvrInterrupt,
             Conv::AvrNonBlockingInterrupt => llvm::AvrNonBlockingInterrupt,
             Conv::ArmAapcs => llvm::ArmAapcsCallConv,
             Conv::Msp430Intr => llvm::Msp430Intr,
-            Conv::PtxKernel => llvm::PtxKernel,
             Conv::X86Fastcall => llvm::X86FastcallCallConv,
             Conv::X86Intr => llvm::X86_Intr,
             Conv::X86Stdcall => llvm::X86StdcallCallConv,

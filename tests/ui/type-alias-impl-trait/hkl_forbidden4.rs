@@ -8,7 +8,6 @@
 use std::future::Future;
 
 type FutNothing<'a> = impl 'a + Future<Output = ()>;
-//~^ ERROR: unconstrained opaque type
 
 async fn operation(_: &mut ()) -> () {
     //~^ ERROR: concrete type differs from previous
@@ -17,10 +16,12 @@ async fn operation(_: &mut ()) -> () {
 }
 
 async fn call<F>(_f: F)
+//~^ ERROR item does not constrain
 where
     for<'any> F: FnMut(&'any mut ()) -> FutNothing<'any>,
 {
     //~^ ERROR: expected generic lifetime parameter, found `'any`
+    //~| ERROR item does not constrain
 }
 
 fn main() {}

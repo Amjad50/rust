@@ -9,26 +9,30 @@
 //! pieces of `rustup.rs`!
 
 use std::collections::HashSet;
-use std::env;
 use std::ffi::OsStr;
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{env, fs};
 
-use object::read::archive::ArchiveFile;
 use object::BinaryFormat;
+use object::read::archive::ArchiveFile;
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
-use crate::core::build_steps::compile;
 use crate::core::build_steps::doc::DocumentationFormat;
-use crate::core::build_steps::llvm;
 use crate::core::build_steps::tool::{self, Tool};
+use crate::core::build_steps::vendor::{VENDOR_DIR, Vendor};
+use crate::core::build_steps::{compile, llvm};
 use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
+use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::channel::{self, Info};
-use crate::utils::helpers::{exe, is_dylib, output, t, target_supports_cranelift_backend, timeit};
+use crate::utils::exec::{BootstrapCommand, command};
+use crate::utils::helpers::{
+    exe, is_dylib, move_file, t, target_supports_cranelift_backend, timeit,
+};
 use crate::utils::tarball::{GeneratedTarball, OverlayKind, Tarball};
-use crate::{Compiler, DependencyType, Mode, LLVM_TOOLS};
+use crate::{Compiler, DependencyType, LLVM_TOOLS, Mode, trace};
 
 pub fn pkgname(builder: &Builder<'_>, component: &str) -> String {
     format!("{}-{}", component, builder.rust_package_vers())
@@ -46,7 +50,7 @@ fn should_build_extended_tool(builder: &Builder<'_>, tool: &str) -> bool {
     if !builder.config.extended {
         return false;
     }
-    builder.config.tools.as_ref().map_or(true, |tools| tools.contains(tool))
+    builder.config.tools.as_ref().is_none_or(|tools| tools.contains(tool))
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -76,7 +80,7 @@ impl Step for Docs {
 
         let mut tarball = Tarball::new(builder, "rust-docs", &host.triple);
         tarball.set_product_name("Rust Documentation");
-        tarball.add_bulk_dir(&builder.doc_out(host), dest);
+        tarball.add_bulk_dir(builder.doc_out(host), dest);
         tarball.add_file(builder.src.join("src/doc/robots.txt"), dest, 0o644);
         Some(tarball.generate())
     }
@@ -106,7 +110,6 @@ impl Step for JsonDocs {
         builder.ensure(crate::core::build_steps::doc::Std::new(
             builder.top_stage,
             host,
-            builder,
             DocumentationFormat::Json,
         ));
 
@@ -115,7 +118,7 @@ impl Step for JsonDocs {
         let mut tarball = Tarball::new(builder, "rust-docs-json", &host.triple);
         tarball.set_product_name("Rust Documentation In JSON Format");
         tarball.is_preview(true);
-        tarball.add_bulk_dir(&builder.json_doc_out(host), dest);
+        tarball.add_bulk_dir(builder.json_doc_out(host), dest);
         Some(tarball.generate())
     }
 }
@@ -146,7 +149,7 @@ impl Step for RustcDocs {
 
         let mut tarball = Tarball::new(builder, "rustc-docs", &host.triple);
         tarball.set_product_name("Rustc Documentation");
-        tarball.add_bulk_dir(&builder.compiler_doc_out(host), "share/doc/rust/html/rustc");
+        tarball.add_bulk_dir(builder.compiler_doc_out(host), "share/doc/rust/html/rustc");
         Some(tarball.generate())
     }
 }
@@ -178,9 +181,9 @@ fn make_win_dist(
     }
 
     //Ask gcc where it keeps its stuff
-    let mut cmd = Command::new(builder.cc(target));
+    let mut cmd = command(builder.cc(target));
     cmd.arg("-print-search-dirs");
-    let gcc_out = output(&mut cmd);
+    let gcc_out = cmd.run_capture_stdout(builder).stdout();
 
     let mut bin_path: Vec<_> = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect();
     let mut lib_path = Vec::new();
@@ -269,42 +272,45 @@ fn make_win_dist(
     let target_libs = find_files(&target_libs, &lib_path);
 
     // Copy runtime dlls next to rustc.exe
-    let dist_bin_dir = rust_root.join("bin/");
-    fs::create_dir_all(&dist_bin_dir).expect("creating dist_bin_dir failed");
-    for src in rustc_dlls {
-        builder.copy_link_to_folder(&src, &dist_bin_dir);
+    let rust_bin_dir = rust_root.join("bin/");
+    fs::create_dir_all(&rust_bin_dir).expect("creating rust_bin_dir failed");
+    for src in &rustc_dlls {
+        builder.copy_link_to_folder(src, &rust_bin_dir);
+    }
+
+    if builder.config.lld_enabled {
+        // rust-lld.exe also needs runtime dlls
+        let rust_target_bin_dir = rust_root.join("lib/rustlib").join(target).join("bin");
+        fs::create_dir_all(&rust_target_bin_dir).expect("creating rust_target_bin_dir failed");
+        for src in &rustc_dlls {
+            builder.copy_link_to_folder(src, &rust_target_bin_dir);
+        }
     }
 
     //Copy platform tools to platform-specific bin directory
-    let target_bin_dir = plat_root
-        .join("lib")
-        .join("rustlib")
-        .join(target.triple)
-        .join("bin")
-        .join("self-contained");
-    fs::create_dir_all(&target_bin_dir).expect("creating target_bin_dir failed");
+    let plat_target_bin_self_contained_dir =
+        plat_root.join("lib/rustlib").join(target).join("bin/self-contained");
+    fs::create_dir_all(&plat_target_bin_self_contained_dir)
+        .expect("creating plat_target_bin_self_contained_dir failed");
     for src in target_tools {
-        builder.copy_link_to_folder(&src, &target_bin_dir);
+        builder.copy_link_to_folder(&src, &plat_target_bin_self_contained_dir);
     }
 
     // Warn windows-gnu users that the bundled GCC cannot compile C files
     builder.create(
-        &target_bin_dir.join("GCC-WARNING.txt"),
+        &plat_target_bin_self_contained_dir.join("GCC-WARNING.txt"),
         "gcc.exe contained in this folder cannot be used for compiling C files - it is only \
          used as a linker. In order to be able to compile projects containing C code use \
          the GCC provided by MinGW or Cygwin.",
     );
 
     //Copy platform libs to platform-specific lib directory
-    let target_lib_dir = plat_root
-        .join("lib")
-        .join("rustlib")
-        .join(target.triple)
-        .join("lib")
-        .join("self-contained");
-    fs::create_dir_all(&target_lib_dir).expect("creating target_lib_dir failed");
+    let plat_target_lib_self_contained_dir =
+        plat_root.join("lib/rustlib").join(target).join("lib/self-contained");
+    fs::create_dir_all(&plat_target_lib_self_contained_dir)
+        .expect("creating plat_target_lib_self_contained_dir failed");
     for src in target_libs {
-        builder.copy_link_to_folder(&src, &target_lib_dir);
+        builder.copy_link_to_folder(&src, &plat_target_lib_self_contained_dir);
     }
 }
 
@@ -407,7 +413,7 @@ impl Step for Rustc {
                 .config
                 .tools
                 .as_ref()
-                .map_or(true, |tools| tools.iter().any(|tool| tool == "rustdoc"))
+                .is_none_or(|tools| tools.iter().any(|tool| tool == "rustdoc"))
             {
                 let rustdoc = builder.rustdoc(compiler);
                 builder.install(&rustdoc, &image.join("bin"), 0o755);
@@ -415,16 +421,12 @@ impl Step for Rustc {
 
             if let Some(ra_proc_macro_srv) = builder.ensure_if_default(
                 tool::RustAnalyzerProcMacroSrv {
-                    compiler: builder.compiler_for(
-                        compiler.stage,
-                        builder.config.build,
-                        compiler.host,
-                    ),
+                    compiler: builder.compiler(compiler.stage, builder.config.build),
                     target: compiler.host,
                 },
                 builder.kind,
             ) {
-                builder.install(&ra_proc_macro_srv, &image.join("libexec"), 0o755);
+                builder.install(&ra_proc_macro_srv.tool_path, &image.join("libexec"), 0o755);
             }
 
             let libdir_relative = builder.libdir_relative(compiler);
@@ -433,13 +435,10 @@ impl Step for Rustc {
             if libdir_relative.to_str() != Some("bin") {
                 let libdir = builder.rustc_libdir(compiler);
                 for entry in builder.read_dir(&libdir) {
-                    let name = entry.file_name();
-                    if let Some(s) = name.to_str() {
-                        if is_dylib(s) {
-                            // Don't use custom libdir here because ^lib/ will be resolved again
-                            // with installer
-                            builder.install(&entry.path(), &image.join("lib"), 0o644);
-                        }
+                    if is_dylib(&entry.path()) {
+                        // Don't use custom libdir here because ^lib/ will be resolved again
+                        // with installer
+                        builder.install(&entry.path(), &image.join("lib"), 0o644);
                     }
                 }
             }
@@ -451,12 +450,12 @@ impl Step for Rustc {
             // component for now.
             maybe_install_llvm_runtime(builder, host, image);
 
-            let dst_dir = image.join("lib/rustlib").join(&*host.triple).join("bin");
+            let dst_dir = image.join("lib/rustlib").join(host).join("bin");
             t!(fs::create_dir_all(&dst_dir));
 
             // Copy over lld if it's there
             if builder.config.lld_enabled {
-                let src_dir = builder.sysroot_libdir(compiler, host).parent().unwrap().join("bin");
+                let src_dir = builder.sysroot_target_bindir(compiler, host);
                 let rust_lld = exe("rust-lld", compiler.host);
                 builder.copy_link(&src_dir.join(&rust_lld), &dst_dir.join(&rust_lld));
                 let self_contained_lld_src_dir = src_dir.join("gcc-ld");
@@ -469,6 +468,19 @@ impl Step for Rustc {
                         &self_contained_lld_dst_dir.join(&exe_name),
                     );
                 }
+            }
+
+            if builder.config.llvm_enabled(compiler.host) && builder.config.llvm_tools_enabled {
+                let src_dir = builder.sysroot_target_bindir(compiler, host);
+                let llvm_objcopy = exe("llvm-objcopy", compiler.host);
+                let rust_objcopy = exe("rust-objcopy", compiler.host);
+                builder.copy_link(&src_dir.join(&llvm_objcopy), &dst_dir.join(&rust_objcopy));
+            }
+
+            if builder.tool_enabled("wasm-component-ld") {
+                let src_dir = builder.sysroot_target_bindir(compiler, host);
+                let ld = exe("wasm-component-ld", compiler.host);
+                builder.copy_link(&src_dir.join(&ld), &dst_dir.join(&ld));
             }
 
             // Man pages
@@ -490,14 +502,22 @@ impl Step for Rustc {
             // Debugger scripts
             builder.ensure(DebuggerScripts { sysroot: image.to_owned(), host });
 
-            // Misc license info
-            let cp = |file: &str| {
-                builder.install(&builder.src.join(file), &image.join("share/doc/rust"), 0o644);
+            // HTML copyright files
+            let file_list = builder.ensure(super::run::GenerateCopyright);
+            for file in file_list {
+                builder.install(&file, &image.join("share/doc/rust"), 0o644);
+            }
+
+            // README
+            builder.install(&builder.src.join("README.md"), &image.join("share/doc/rust"), 0o644);
+
+            // The REUSE-managed license files
+            let license = |path: &Path| {
+                builder.install(path, &image.join("share/doc/rust/licences"), 0o644);
             };
-            cp("COPYRIGHT");
-            cp("LICENSE-APACHE");
-            cp("LICENSE-MIT");
-            cp("README.md");
+            for entry in t!(std::fs::read_dir(builder.src.join("LICENSES"))).flatten() {
+                license(&entry.path());
+            }
         }
     }
 }
@@ -536,31 +556,31 @@ impl Step for DebuggerScripts {
             cp_debugger_script("natvis/liballoc.natvis");
             cp_debugger_script("natvis/libcore.natvis");
             cp_debugger_script("natvis/libstd.natvis");
-        } else {
-            cp_debugger_script("rust_types.py");
-
-            // gdb debugger scripts
-            builder.install(&builder.src.join("src/etc/rust-gdb"), &sysroot.join("bin"), 0o755);
-            builder.install(&builder.src.join("src/etc/rust-gdbgui"), &sysroot.join("bin"), 0o755);
-
-            cp_debugger_script("gdb_load_rust_pretty_printers.py");
-            cp_debugger_script("gdb_lookup.py");
-            cp_debugger_script("gdb_providers.py");
-
-            // lldb debugger scripts
-            builder.install(&builder.src.join("src/etc/rust-lldb"), &sysroot.join("bin"), 0o755);
-
-            cp_debugger_script("lldb_lookup.py");
-            cp_debugger_script("lldb_providers.py");
-            cp_debugger_script("lldb_commands")
         }
+
+        cp_debugger_script("rust_types.py");
+
+        // gdb debugger scripts
+        builder.install(&builder.src.join("src/etc/rust-gdb"), &sysroot.join("bin"), 0o755);
+        builder.install(&builder.src.join("src/etc/rust-gdbgui"), &sysroot.join("bin"), 0o755);
+
+        cp_debugger_script("gdb_load_rust_pretty_printers.py");
+        cp_debugger_script("gdb_lookup.py");
+        cp_debugger_script("gdb_providers.py");
+
+        // lldb debugger scripts
+        builder.install(&builder.src.join("src/etc/rust-lldb"), &sysroot.join("bin"), 0o755);
+
+        cp_debugger_script("lldb_lookup.py");
+        cp_debugger_script("lldb_providers.py");
+        cp_debugger_script("lldb_commands")
     }
 }
 
 fn skip_host_target_lib(builder: &Builder<'_>, compiler: Compiler) -> bool {
     // The only true set of target libraries came from the build triple, so
     // let's reduce redundant work by only producing archives from that host.
-    if compiler.host != builder.config.build {
+    if !builder.is_builder_target(compiler.host) {
         builder.info("\tskipping, not a build host");
         true
     } else {
@@ -571,7 +591,7 @@ fn skip_host_target_lib(builder: &Builder<'_>, compiler: Compiler) -> bool {
 /// Check that all objects in rlibs for UEFI targets are COFF. This
 /// ensures that the C compiler isn't producing ELF objects, which would
 /// not link correctly with the COFF objects.
-fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp: &Path) {
+fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp: &BuildStamp) {
     if !target.ends_with("-uefi") {
         return;
     }
@@ -602,15 +622,20 @@ fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp
 }
 
 /// Copy stamped files into an image's `target/lib` directory.
-fn copy_target_libs(builder: &Builder<'_>, target: TargetSelection, image: &Path, stamp: &Path) {
-    let dst = image.join("lib/rustlib").join(target.triple).join("lib");
+fn copy_target_libs(
+    builder: &Builder<'_>,
+    target: TargetSelection,
+    image: &Path,
+    stamp: &BuildStamp,
+) {
+    let dst = image.join("lib/rustlib").join(target).join("lib");
     let self_contained_dst = dst.join("self-contained");
     t!(fs::create_dir_all(&dst));
     t!(fs::create_dir_all(&self_contained_dst));
     for (path, dependency_type) in builder.read_stamp_file(stamp) {
         if dependency_type == DependencyType::TargetSelfContained {
             builder.copy_link(&path, &self_contained_dst.join(path.file_name().unwrap()));
-        } else if dependency_type == DependencyType::Target || builder.config.build == target {
+        } else if dependency_type == DependencyType::Target || builder.is_builder_target(target) {
             builder.copy_link(&path, &dst.join(path.file_name().unwrap()));
         }
     }
@@ -655,7 +680,7 @@ impl Step for Std {
         tarball.include_target_in_component_name(true);
 
         let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
-        let stamp = compile::libstd_stamp(builder, compiler_to_use, target);
+        let stamp = build_stamp::libstd_stamp(builder, compiler_to_use, target);
         verify_uefi_rlib_format(builder, target, &stamp);
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
@@ -663,6 +688,10 @@ impl Step for Std {
     }
 }
 
+/// Tarball containing the compiler that gets downloaded and used by
+/// `rust.download-rustc`.
+///
+/// (Don't confuse this with [`RustDev`], without the `c`!)
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
 pub struct RustcDev {
     pub compiler: Compiler,
@@ -701,7 +730,7 @@ impl Step for RustcDev {
         let tarball = Tarball::new(builder, "rustc-dev", &target.triple);
 
         let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
-        let stamp = compile::librustc_stamp(builder, compiler_to_use, target);
+        let stamp = build_stamp::librustc_stamp(builder, compiler_to_use, target);
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
         let src_files = &["Cargo.lock"];
@@ -742,11 +771,7 @@ impl Step for Analysis {
             // Find the actual compiler (handling the full bootstrap option) which
             // produced the save-analysis data because that data isn't copied
             // through the sysroot uplifting.
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -755,13 +780,13 @@ impl Step for Analysis {
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        if compiler.host != builder.config.build {
+        if !builder.is_builder_target(compiler.host) {
             return None;
         }
 
         let src = builder
             .stage_out(compiler, Mode::Std)
-            .join(target.triple)
+            .join(target)
             .join(builder.cargo_dir())
             .join("deps")
             .join("save-analysis");
@@ -896,7 +921,7 @@ impl Step for Src {
     /// Creates the `rust-src` installer component
     fn run(self, builder: &Builder<'_>) -> GeneratedTarball {
         if !builder.config.dry_run() {
-            builder.update_submodule(Path::new("src/llvm-project"));
+            builder.require_submodule("src/llvm-project", None);
         }
 
         let tarball = Tarball::new_targetless(builder, "rust-src");
@@ -910,7 +935,6 @@ impl Step for Src {
         // translation code in `imported_source_files` in `src/librustc_metadata/rmeta/decoder.rs`
         let dst_src = tarball.image_dir().join("lib/rustlib/src/rust");
 
-        let src_files = ["Cargo.lock"];
         // This is the reduced set of paths which will become the rust-src component
         // (essentially libstd and all of its path dependencies).
         copy_src_dirs(
@@ -929,9 +953,6 @@ impl Step for Src {
             ],
             &dst_src,
         );
-        for file in src_files.iter() {
-            builder.copy_link(&builder.src.join(file), &dst_src.join(file));
-        }
 
         tarball.generate()
     }
@@ -967,22 +988,50 @@ impl Step for PlainSourceTarball {
 
         // This is the set of root paths which will become part of the source package
         let src_files = [
+            // tidy-alphabetical-start
+            ".gitmodules",
+            "Cargo.lock",
+            "Cargo.toml",
+            "config.example.toml",
+            "configure",
+            "CONTRIBUTING.md",
             "COPYRIGHT",
             "LICENSE-APACHE",
+            "license-metadata.json",
             "LICENSE-MIT",
-            "CONTRIBUTING.md",
             "README.md",
             "RELEASES.md",
-            "configure",
+            "REUSE.toml",
+            "x",
+            "x.ps1",
             "x.py",
-            "config.example.toml",
-            "Cargo.toml",
-            "Cargo.lock",
-            ".gitmodules",
+            // tidy-alphabetical-end
         ];
-        let src_dirs = ["src", "compiler", "library", "tests"];
+        let src_dirs = ["src", "compiler", "library", "tests", "LICENSES"];
 
-        copy_src_dirs(builder, &builder.src, &src_dirs, &[], plain_dst_src);
+        copy_src_dirs(
+            builder,
+            &builder.src,
+            &src_dirs,
+            &[
+                // We don't currently use the GCC source code for building any official components,
+                // it is very big, and has unclear licensing implications due to being GPL licensed.
+                // We thus exclude it from the source tarball from now.
+                "src/gcc",
+            ],
+            plain_dst_src,
+        );
+        // We keep something in src/gcc because it is a registered submodule,
+        // and if it misses completely it can cause issues elsewhere
+        // (see https://github.com/rust-lang/rust/issues/137332).
+        // We can also let others know why is the source code missing.
+        if !builder.config.dry_run() {
+            builder.create_dir(&plain_dst_src.join("src/gcc"));
+            t!(std::fs::write(
+                plain_dst_src.join("src/gcc/notice.txt"),
+                "The GCC source code is not included due to unclear licensing implications\n"
+            ));
+        }
 
         // Copy the files normally
         for item in &src_files {
@@ -1003,44 +1052,32 @@ impl Step for PlainSourceTarball {
         write_git_info(builder.rust_info().info(), plain_dst_src);
         write_git_info(builder.cargo_info.info(), &plain_dst_src.join("./src/tools/cargo"));
 
-        // If we're building from git or tarball sources, we need to vendor
-        // a complete distribution.
-        if builder.rust_info().is_managed_git_subrepository()
-            || builder.rust_info().is_from_tarball()
-        {
-            // Ensure we have all submodules from src and other directories checked out.
-            for submodule in builder.get_all_submodules() {
-                builder.update_submodule(Path::new(submodule));
-            }
+        if builder.config.dist_vendor {
+            builder.require_and_update_all_submodules();
+
+            // Vendor packages that are required by opt-dist to collect PGO profiles.
+            let pkgs_for_pgo_training = build_helper::LLVM_PGO_CRATES
+                .iter()
+                .chain(build_helper::RUSTC_PGO_CRATES)
+                .map(|pkg| {
+                    let mut manifest_path =
+                        builder.src.join("./src/tools/rustc-perf/collector/compile-benchmarks");
+                    manifest_path.push(pkg);
+                    manifest_path.push("Cargo.toml");
+                    manifest_path
+                });
 
             // Vendor all Cargo dependencies
-            let mut cmd = Command::new(&builder.initial_cargo);
-            cmd.arg("vendor")
-                .arg("--versioned-dirs")
-                .arg("--sync")
-                .arg(builder.src.join("./src/tools/cargo/Cargo.toml"))
-                .arg("--sync")
-                .arg(builder.src.join("./src/tools/rust-analyzer/Cargo.toml"))
-                .arg("--sync")
-                .arg(builder.src.join("./compiler/rustc_codegen_cranelift/Cargo.toml"))
-                .arg("--sync")
-                .arg(builder.src.join("./compiler/rustc_codegen_gcc/Cargo.toml"))
-                .arg("--sync")
-                .arg(builder.src.join("./src/bootstrap/Cargo.toml"))
-                // Will read the libstd Cargo.toml
-                // which uses the unstable `public-dependency` feature.
-                .env("RUSTC_BOOTSTRAP", "1")
-                .current_dir(plain_dst_src);
-
-            let config = if !builder.config.dry_run() {
-                t!(String::from_utf8(t!(cmd.output()).stdout))
-            } else {
-                String::new()
-            };
+            let vendor = builder.ensure(Vendor {
+                sync_args: pkgs_for_pgo_training.collect(),
+                versioned_dirs: true,
+                root_dir: plain_dst_src.into(),
+                output_dir: VENDOR_DIR.into(),
+            });
 
             let cargo_config_dir = plain_dst_src.join(".cargo");
             builder.create_dir(&cargo_config_dir);
-            builder.create(&cargo_config_dir.join("config.toml"), &config);
+            builder.create(&cargo_config_dir.join("config.toml"), &vendor.config);
         }
 
         // Delete extraneous directories
@@ -1079,11 +1116,7 @@ impl Step for Cargo {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Cargo {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1100,7 +1133,7 @@ impl Step for Cargo {
         let mut tarball = Tarball::new(builder, "cargo", &target.triple);
         tarball.set_overlay(OverlayKind::Cargo);
 
-        tarball.add_file(cargo, "bin", 0o755);
+        tarball.add_file(cargo.tool_path, "bin", 0o755);
         tarball.add_file(etc.join("_cargo"), "share/zsh/site-functions", 0o644);
         tarball.add_renamed_file(etc.join("cargo.bashcomp.sh"), "etc/bash_completion.d", "cargo");
         tarball.add_dir(etc.join("man"), "share/man/man1");
@@ -1128,11 +1161,7 @@ impl Step for Rls {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Rls {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1141,12 +1170,12 @@ impl Step for Rls {
         let compiler = self.compiler;
         let target = self.target;
 
-        let rls = builder.ensure(tool::Rls { compiler, target, extra_features: Vec::new() });
+        let rls = builder.ensure(tool::Rls { compiler, target });
 
         let mut tarball = Tarball::new(builder, "rls", &target.triple);
         tarball.set_overlay(OverlayKind::Rls);
         tarball.is_preview(true);
-        tarball.add_file(rls, "bin", 0o755);
+        tarball.add_file(rls.tool_path, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/rls");
         Some(tarball.generate())
     }
@@ -1170,11 +1199,7 @@ impl Step for RustAnalyzer {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(RustAnalyzer {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1188,7 +1213,7 @@ impl Step for RustAnalyzer {
         let mut tarball = Tarball::new(builder, "rust-analyzer", &target.triple);
         tarball.set_overlay(OverlayKind::RustAnalyzer);
         tarball.is_preview(true);
-        tarball.add_file(rust_analyzer, "bin", 0o755);
+        tarball.add_file(rust_analyzer.tool_path, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/rust-analyzer");
         Some(tarball.generate())
     }
@@ -1212,11 +1237,7 @@ impl Step for Clippy {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Clippy {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1228,15 +1249,14 @@ impl Step for Clippy {
         // Prepare the image directory
         // We expect clippy to build, because we've exited this step above if tool
         // state for clippy isn't testing.
-        let clippy = builder.ensure(tool::Clippy { compiler, target, extra_features: Vec::new() });
-        let cargoclippy =
-            builder.ensure(tool::CargoClippy { compiler, target, extra_features: Vec::new() });
+        let clippy = builder.ensure(tool::Clippy { compiler, target });
+        let cargoclippy = builder.ensure(tool::CargoClippy { compiler, target });
 
         let mut tarball = Tarball::new(builder, "clippy", &target.triple);
         tarball.set_overlay(OverlayKind::Clippy);
         tarball.is_preview(true);
-        tarball.add_file(clippy, "bin", 0o755);
-        tarball.add_file(cargoclippy, "bin", 0o755);
+        tarball.add_file(clippy.tool_path, "bin", 0o755);
+        tarball.add_file(cargoclippy.tool_path, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/clippy");
         Some(tarball.generate())
     }
@@ -1260,11 +1280,7 @@ impl Step for Miri {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Miri {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1279,15 +1295,14 @@ impl Step for Miri {
         let compiler = self.compiler;
         let target = self.target;
 
-        let miri = builder.ensure(tool::Miri { compiler, target, extra_features: Vec::new() });
-        let cargomiri =
-            builder.ensure(tool::CargoMiri { compiler, target, extra_features: Vec::new() });
+        let miri = builder.ensure(tool::Miri { compiler, target });
+        let cargomiri = builder.ensure(tool::CargoMiri { compiler, target });
 
         let mut tarball = Tarball::new(builder, "miri", &target.triple);
         tarball.set_overlay(OverlayKind::Miri);
         tarball.is_preview(true);
-        tarball.add_file(miri, "bin", 0o755);
-        tarball.add_file(cargomiri, "bin", 0o755);
+        tarball.add_file(miri.tool_path, "bin", 0o755);
+        tarball.add_file(cargomiri.tool_path, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/miri");
         Some(tarball.generate())
     }
@@ -1338,18 +1353,9 @@ impl Step for CodegenBackend {
             return None;
         }
 
-        if self.backend == "cranelift" {
-            if !target_supports_cranelift_backend(self.compiler.host) {
-                builder.info("target not supported by rustc_codegen_cranelift. skipping");
-                return None;
-            }
-
-            if self.compiler.host.is_windows() {
-                builder.info(
-                    "dist currently disabled for windows by rustc_codegen_cranelift. skipping",
-                );
-                return None;
-            }
+        if self.backend == "cranelift" && !target_supports_cranelift_backend(self.compiler.host) {
+            builder.info("target not supported by rustc_codegen_cranelift. skipping");
+            return None;
         }
 
         let compiler = self.compiler;
@@ -1408,11 +1414,7 @@ impl Step for Rustfmt {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(Rustfmt {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -1421,72 +1423,14 @@ impl Step for Rustfmt {
         let compiler = self.compiler;
         let target = self.target;
 
-        let rustfmt =
-            builder.ensure(tool::Rustfmt { compiler, target, extra_features: Vec::new() });
-        let cargofmt =
-            builder.ensure(tool::Cargofmt { compiler, target, extra_features: Vec::new() });
+        let rustfmt = builder.ensure(tool::Rustfmt { compiler, target });
+        let cargofmt = builder.ensure(tool::Cargofmt { compiler, target });
         let mut tarball = Tarball::new(builder, "rustfmt", &target.triple);
         tarball.set_overlay(OverlayKind::Rustfmt);
         tarball.is_preview(true);
-        tarball.add_file(rustfmt, "bin", 0o755);
-        tarball.add_file(cargofmt, "bin", 0o755);
+        tarball.add_file(rustfmt.tool_path, "bin", 0o755);
+        tarball.add_file(cargofmt.tool_path, "bin", 0o755);
         tarball.add_legal_and_readme_to("share/doc/rustfmt");
-        Some(tarball.generate())
-    }
-}
-
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
-pub struct RustDemangler {
-    pub compiler: Compiler,
-    pub target: TargetSelection,
-}
-
-impl Step for RustDemangler {
-    type Output = Option<GeneratedTarball>;
-    const DEFAULT: bool = true;
-    const ONLY_HOSTS: bool = true;
-
-    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        // While other tools use `should_build_extended_tool` to decide whether to be run by
-        // default or not, `rust-demangler` must be build when *either* it's enabled as a tool like
-        // the other ones or if `profiler = true`. Because we don't know the target at this stage
-        // we run the step by default when only `extended = true`, and decide whether to actually
-        // run it or not later.
-        let default = run.builder.config.extended;
-        run.alias("rust-demangler").default_condition(default)
-    }
-
-    fn make_run(run: RunConfig<'_>) {
-        run.builder.ensure(RustDemangler {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
-            target: run.target,
-        });
-    }
-
-    fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
-        let compiler = self.compiler;
-        let target = self.target;
-
-        // Only build this extended tool if explicitly included in `tools`, or if `profiler = true`
-        let condition = should_build_extended_tool(builder, "rust-demangler")
-            || builder.config.profiler_enabled(target);
-        if builder.config.extended && !condition {
-            return None;
-        }
-
-        let rust_demangler =
-            builder.ensure(tool::RustDemangler { compiler, target, extra_features: Vec::new() });
-
-        // Prepare the image directory
-        let mut tarball = Tarball::new(builder, "rust-demangler", &target.triple);
-        tarball.set_overlay(OverlayKind::RustDemangler);
-        tarball.is_preview(true);
-        tarball.add_file(rust_demangler, "bin", 0o755);
-        tarball.add_legal_and_readme_to("share/doc/rust-demangler");
         Some(tarball.generate())
     }
 }
@@ -1520,7 +1464,7 @@ impl Step for Extended {
     fn run(self, builder: &Builder<'_>) {
         let target = self.target;
         let stage = self.stage;
-        let compiler = builder.compiler_for(self.stage, self.host, self.target);
+        let compiler = builder.compiler(self.stage, self.host);
 
         builder.info(&format!("Dist extended stage{} ({})", compiler.stage, target));
 
@@ -1542,13 +1486,12 @@ impl Step for Extended {
         tarballs.push(builder.ensure(Rustc { compiler: builder.compiler(stage, target) }));
         tarballs.push(builder.ensure(Std { compiler, target }).expect("missing std"));
 
-        if target.ends_with("windows-gnu") {
+        if target.is_windows_gnu() {
             tarballs.push(builder.ensure(Mingw { host: target }).expect("missing mingw"));
         }
 
         add_component!("rust-docs" => Docs { host: target });
         add_component!("rust-json-docs" => JsonDocs { host: target });
-        add_component!("rust-demangler"=> RustDemangler { compiler, target });
         add_component!("cargo" => Cargo { compiler, target });
         add_component!("rustfmt" => Rustfmt { compiler, target });
         add_component!("rls" => Rls { compiler, target });
@@ -1612,7 +1555,7 @@ impl Step for Extended {
 
         let xform = |p: &Path| {
             let mut contents = t!(fs::read_to_string(p));
-            for tool in &["rust-demangler", "miri", "rust-docs"] {
+            for tool in &["miri", "rust-docs"] {
                 if !built_tools.contains(tool) {
                     contents = filter(&contents, tool);
                 }
@@ -1628,14 +1571,14 @@ impl Step for Extended {
             let _ = fs::remove_dir_all(&pkg);
 
             let pkgbuild = |component: &str| {
-                let mut cmd = Command::new("pkgbuild");
+                let mut cmd = command("pkgbuild");
                 cmd.arg("--identifier")
                     .arg(format!("org.rust-lang.{}", component))
                     .arg("--scripts")
                     .arg(pkg.join(component))
                     .arg("--nopayload")
                     .arg(pkg.join(component).with_extension("pkg"));
-                builder.run(&mut cmd);
+                cmd.run(builder);
             };
 
             let prepare = |name: &str| {
@@ -1653,7 +1596,7 @@ impl Step for Extended {
             prepare("rust-analysis");
             prepare("clippy");
             prepare("rust-analyzer");
-            for tool in &["rust-docs", "rust-demangler", "miri", "rustc-codegen-cranelift"] {
+            for tool in &["rust-docs", "miri", "rustc-codegen-cranelift"] {
                 if built_tools.contains(tool) {
                     prepare(tool);
                 }
@@ -1665,7 +1608,7 @@ impl Step for Extended {
             builder.create_dir(&pkg.join("res"));
             builder.create(&pkg.join("res/LICENSE.txt"), &license);
             builder.install(&etc.join("gfx/rust-logo.png"), &pkg.join("res"), 0o644);
-            let mut cmd = Command::new("productbuild");
+            let mut cmd = command("productbuild");
             cmd.arg("--distribution")
                 .arg(xform(&etc.join("pkg/Distribution.xml")))
                 .arg("--resources")
@@ -1678,7 +1621,7 @@ impl Step for Extended {
                 .arg("--package-path")
                 .arg(&pkg);
             let _time = timeit(builder);
-            builder.run(&mut cmd);
+            cmd.run(builder);
         }
 
         if target.is_windows() {
@@ -1693,8 +1636,6 @@ impl Step for Extended {
                     "rust-analyzer-preview".to_string()
                 } else if name == "clippy" {
                     "clippy-preview".to_string()
-                } else if name == "rust-demangler" {
-                    "rust-demangler-preview".to_string()
                 } else if name == "miri" {
                     "miri-preview".to_string()
                 } else if name == "rustc-codegen-cranelift" {
@@ -1714,12 +1655,12 @@ impl Step for Extended {
             prepare("cargo");
             prepare("rust-analysis");
             prepare("rust-std");
-            for tool in &["clippy", "rust-analyzer", "rust-docs", "rust-demangler", "miri"] {
+            for tool in &["clippy", "rust-analyzer", "rust-docs", "miri"] {
                 if built_tools.contains(tool) {
                     prepare(tool);
                 }
             }
-            if target.ends_with("windows-gnu") {
+            if target.is_windows_gnu() {
                 prepare("rust-mingw");
             }
 
@@ -1734,187 +1675,159 @@ impl Step for Extended {
             let light = wix.join("bin/light.exe");
 
             let heat_flags = ["-nologo", "-gg", "-sfrag", "-srd", "-sreg"];
-            builder.run(
-                Command::new(&heat)
-                    .current_dir(&exe)
-                    .arg("dir")
-                    .arg("rustc")
-                    .args(heat_flags)
-                    .arg("-cg")
-                    .arg("RustcGroup")
-                    .arg("-dr")
-                    .arg("Rustc")
-                    .arg("-var")
-                    .arg("var.RustcDir")
-                    .arg("-out")
-                    .arg(exe.join("RustcGroup.wxs")),
-            );
+            command(&heat)
+                .current_dir(&exe)
+                .arg("dir")
+                .arg("rustc")
+                .args(heat_flags)
+                .arg("-cg")
+                .arg("RustcGroup")
+                .arg("-dr")
+                .arg("Rustc")
+                .arg("-var")
+                .arg("var.RustcDir")
+                .arg("-out")
+                .arg(exe.join("RustcGroup.wxs"))
+                .run(builder);
             if built_tools.contains("rust-docs") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("rust-docs")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("DocsGroup")
-                        .arg("-dr")
-                        .arg("Docs")
-                        .arg("-var")
-                        .arg("var.DocsDir")
-                        .arg("-out")
-                        .arg(exe.join("DocsGroup.wxs"))
-                        .arg("-t")
-                        .arg(etc.join("msi/squash-components.xsl")),
-                );
-            }
-            builder.run(
-                Command::new(&heat)
+                command(&heat)
                     .current_dir(&exe)
                     .arg("dir")
-                    .arg("cargo")
+                    .arg("rust-docs")
                     .args(heat_flags)
                     .arg("-cg")
-                    .arg("CargoGroup")
+                    .arg("DocsGroup")
                     .arg("-dr")
-                    .arg("Cargo")
+                    .arg("Docs")
                     .arg("-var")
-                    .arg("var.CargoDir")
+                    .arg("var.DocsDir")
                     .arg("-out")
-                    .arg(exe.join("CargoGroup.wxs"))
+                    .arg(exe.join("DocsGroup.wxs"))
                     .arg("-t")
-                    .arg(etc.join("msi/remove-duplicates.xsl")),
-            );
-            builder.run(
-                Command::new(&heat)
+                    .arg(etc.join("msi/squash-components.xsl"))
+                    .run(builder);
+            }
+            command(&heat)
+                .current_dir(&exe)
+                .arg("dir")
+                .arg("cargo")
+                .args(heat_flags)
+                .arg("-cg")
+                .arg("CargoGroup")
+                .arg("-dr")
+                .arg("Cargo")
+                .arg("-var")
+                .arg("var.CargoDir")
+                .arg("-out")
+                .arg(exe.join("CargoGroup.wxs"))
+                .arg("-t")
+                .arg(etc.join("msi/remove-duplicates.xsl"))
+                .run(builder);
+            command(&heat)
+                .current_dir(&exe)
+                .arg("dir")
+                .arg("rust-std")
+                .args(heat_flags)
+                .arg("-cg")
+                .arg("StdGroup")
+                .arg("-dr")
+                .arg("Std")
+                .arg("-var")
+                .arg("var.StdDir")
+                .arg("-out")
+                .arg(exe.join("StdGroup.wxs"))
+                .run(builder);
+            if built_tools.contains("rust-analyzer") {
+                command(&heat)
                     .current_dir(&exe)
                     .arg("dir")
-                    .arg("rust-std")
+                    .arg("rust-analyzer")
                     .args(heat_flags)
                     .arg("-cg")
-                    .arg("StdGroup")
+                    .arg("RustAnalyzerGroup")
                     .arg("-dr")
-                    .arg("Std")
+                    .arg("RustAnalyzer")
                     .arg("-var")
-                    .arg("var.StdDir")
+                    .arg("var.RustAnalyzerDir")
                     .arg("-out")
-                    .arg(exe.join("StdGroup.wxs")),
-            );
-            if built_tools.contains("rust-analyzer") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("rust-analyzer")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("RustAnalyzerGroup")
-                        .arg("-dr")
-                        .arg("RustAnalyzer")
-                        .arg("-var")
-                        .arg("var.RustAnalyzerDir")
-                        .arg("-out")
-                        .arg(exe.join("RustAnalyzerGroup.wxs"))
-                        .arg("-t")
-                        .arg(etc.join("msi/remove-duplicates.xsl")),
-                );
+                    .arg(exe.join("RustAnalyzerGroup.wxs"))
+                    .arg("-t")
+                    .arg(etc.join("msi/remove-duplicates.xsl"))
+                    .run(builder);
             }
             if built_tools.contains("clippy") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("clippy")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("ClippyGroup")
-                        .arg("-dr")
-                        .arg("Clippy")
-                        .arg("-var")
-                        .arg("var.ClippyDir")
-                        .arg("-out")
-                        .arg(exe.join("ClippyGroup.wxs"))
-                        .arg("-t")
-                        .arg(etc.join("msi/remove-duplicates.xsl")),
-                );
-            }
-            if built_tools.contains("rust-demangler") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("rust-demangler")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("RustDemanglerGroup")
-                        .arg("-dr")
-                        .arg("RustDemangler")
-                        .arg("-var")
-                        .arg("var.RustDemanglerDir")
-                        .arg("-out")
-                        .arg(exe.join("RustDemanglerGroup.wxs"))
-                        .arg("-t")
-                        .arg(etc.join("msi/remove-duplicates.xsl")),
-                );
-            }
-            if built_tools.contains("miri") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("miri")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("MiriGroup")
-                        .arg("-dr")
-                        .arg("Miri")
-                        .arg("-var")
-                        .arg("var.MiriDir")
-                        .arg("-out")
-                        .arg(exe.join("MiriGroup.wxs"))
-                        .arg("-t")
-                        .arg(etc.join("msi/remove-duplicates.xsl")),
-                );
-            }
-            builder.run(
-                Command::new(&heat)
+                command(&heat)
                     .current_dir(&exe)
                     .arg("dir")
-                    .arg("rust-analysis")
+                    .arg("clippy")
                     .args(heat_flags)
                     .arg("-cg")
-                    .arg("AnalysisGroup")
+                    .arg("ClippyGroup")
                     .arg("-dr")
-                    .arg("Analysis")
+                    .arg("Clippy")
                     .arg("-var")
-                    .arg("var.AnalysisDir")
+                    .arg("var.ClippyDir")
                     .arg("-out")
-                    .arg(exe.join("AnalysisGroup.wxs"))
+                    .arg(exe.join("ClippyGroup.wxs"))
                     .arg("-t")
-                    .arg(etc.join("msi/remove-duplicates.xsl")),
-            );
-            if target.ends_with("windows-gnu") {
-                builder.run(
-                    Command::new(&heat)
-                        .current_dir(&exe)
-                        .arg("dir")
-                        .arg("rust-mingw")
-                        .args(heat_flags)
-                        .arg("-cg")
-                        .arg("GccGroup")
-                        .arg("-dr")
-                        .arg("Gcc")
-                        .arg("-var")
-                        .arg("var.GccDir")
-                        .arg("-out")
-                        .arg(exe.join("GccGroup.wxs")),
-                );
+                    .arg(etc.join("msi/remove-duplicates.xsl"))
+                    .run(builder);
+            }
+            if built_tools.contains("miri") {
+                command(&heat)
+                    .current_dir(&exe)
+                    .arg("dir")
+                    .arg("miri")
+                    .args(heat_flags)
+                    .arg("-cg")
+                    .arg("MiriGroup")
+                    .arg("-dr")
+                    .arg("Miri")
+                    .arg("-var")
+                    .arg("var.MiriDir")
+                    .arg("-out")
+                    .arg(exe.join("MiriGroup.wxs"))
+                    .arg("-t")
+                    .arg(etc.join("msi/remove-duplicates.xsl"))
+                    .run(builder);
+            }
+            command(&heat)
+                .current_dir(&exe)
+                .arg("dir")
+                .arg("rust-analysis")
+                .args(heat_flags)
+                .arg("-cg")
+                .arg("AnalysisGroup")
+                .arg("-dr")
+                .arg("Analysis")
+                .arg("-var")
+                .arg("var.AnalysisDir")
+                .arg("-out")
+                .arg(exe.join("AnalysisGroup.wxs"))
+                .arg("-t")
+                .arg(etc.join("msi/remove-duplicates.xsl"))
+                .run(builder);
+            if target.is_windows_gnu() {
+                command(&heat)
+                    .current_dir(&exe)
+                    .arg("dir")
+                    .arg("rust-mingw")
+                    .args(heat_flags)
+                    .arg("-cg")
+                    .arg("GccGroup")
+                    .arg("-dr")
+                    .arg("Gcc")
+                    .arg("-var")
+                    .arg("var.GccDir")
+                    .arg("-out")
+                    .arg(exe.join("GccGroup.wxs"))
+                    .run(builder);
             }
 
             let candle = |input: &Path| {
                 let output = exe.join(input.file_stem().unwrap()).with_extension("wixobj");
                 let arch = if target.contains("x86_64") { "x64" } else { "x86" };
-                let mut cmd = Command::new(&candle);
+                let mut cmd = command(&candle);
                 cmd.current_dir(&exe)
                     .arg("-nologo")
                     .arg("-dRustcDir=rustc")
@@ -1934,19 +1847,16 @@ impl Step for Extended {
                 if built_tools.contains("rust-docs") {
                     cmd.arg("-dDocsDir=rust-docs");
                 }
-                if built_tools.contains("rust-demangler") {
-                    cmd.arg("-dRustDemanglerDir=rust-demangler");
-                }
                 if built_tools.contains("rust-analyzer") {
                     cmd.arg("-dRustAnalyzerDir=rust-analyzer");
                 }
                 if built_tools.contains("miri") {
                     cmd.arg("-dMiriDir=miri");
                 }
-                if target.ends_with("windows-gnu") {
+                if target.is_windows_gnu() {
                     cmd.arg("-dGccDir=rust-mingw");
                 }
-                builder.run(&mut cmd);
+                cmd.run(builder);
             };
             candle(&xform(&etc.join("msi/rust.wxs")));
             candle(&etc.join("msi/ui.wxs"));
@@ -1963,15 +1873,12 @@ impl Step for Extended {
             if built_tools.contains("miri") {
                 candle("MiriGroup.wxs".as_ref());
             }
-            if built_tools.contains("rust-demangler") {
-                candle("RustDemanglerGroup.wxs".as_ref());
-            }
             if built_tools.contains("rust-analyzer") {
                 candle("RustAnalyzerGroup.wxs".as_ref());
             }
             candle("AnalysisGroup.wxs".as_ref());
 
-            if target.ends_with("windows-gnu") {
+            if target.is_windows_gnu() {
                 candle("GccGroup.wxs".as_ref());
             }
 
@@ -1981,7 +1888,7 @@ impl Step for Extended {
 
             builder.info(&format!("building `msi` installer with {light:?}"));
             let filename = format!("{}-{}.msi", pkgname(builder, "rust"), target.triple);
-            let mut cmd = Command::new(&light);
+            let mut cmd = command(&light);
             cmd.arg("-nologo")
                 .arg("-ext")
                 .arg("WixUIExtension")
@@ -2007,30 +1914,27 @@ impl Step for Extended {
             if built_tools.contains("rust-analyzer") {
                 cmd.arg("RustAnalyzerGroup.wixobj");
             }
-            if built_tools.contains("rust-demangler") {
-                cmd.arg("RustDemanglerGroup.wixobj");
-            }
             if built_tools.contains("rust-docs") {
                 cmd.arg("DocsGroup.wixobj");
             }
 
-            if target.ends_with("windows-gnu") {
+            if target.is_windows_gnu() {
                 cmd.arg("GccGroup.wixobj");
             }
             // ICE57 wrongly complains about the shortcuts
             cmd.arg("-sice:ICE57");
 
             let _time = timeit(builder);
-            builder.run(&mut cmd);
+            cmd.run(builder);
 
             if !builder.config.dry_run() {
-                t!(fs::rename(exe.join(&filename), distdir(builder).join(&filename)));
+                t!(move_file(exe.join(&filename), distdir(builder).join(&filename)));
             }
         }
     }
 }
 
-fn add_env(builder: &Builder<'_>, cmd: &mut Command, target: TargetSelection) {
+fn add_env(builder: &Builder<'_>, cmd: &mut BootstrapCommand, target: TargetSelection) {
     let mut parts = builder.version.split('.');
     cmd.env("CFG_RELEASE_INFO", builder.rust_version())
         .env("CFG_RELEASE_NUM", &builder.version)
@@ -2046,7 +1950,7 @@ fn add_env(builder: &Builder<'_>, cmd: &mut Command, target: TargetSelection) {
 
     if target.contains("windows-gnullvm") {
         cmd.env("CFG_MINGW", "1").env("CFG_ABI", "LLVM");
-    } else if target.contains("windows-gnu") {
+    } else if target.is_windows_gnu() {
         cmd.env("CFG_MINGW", "1").env("CFG_ABI", "GNU");
     } else {
         cmd.env("CFG_MINGW", "0").env("CFG_ABI", "MSVC");
@@ -2096,6 +2000,15 @@ fn install_llvm_file(
 /// Maybe add LLVM object files to the given destination lib-dir. Allows either static or dynamic linking.
 ///
 /// Returns whether the files were actually copied.
+#[cfg_attr(
+    feature = "tracing",
+    instrument(
+        level = "trace",
+        name = "maybe_install_llvm",
+        skip_all,
+        fields(target = ?target, dst_libdir = ?dst_libdir, install_symlink = install_symlink),
+    ),
+)]
 fn maybe_install_llvm(
     builder: &Builder<'_>,
     target: TargetSelection,
@@ -2119,6 +2032,7 @@ fn maybe_install_llvm(
     // If the LLVM is coming from ourselves (just from CI) though, we
     // still want to install it, as it otherwise won't be available.
     if builder.is_system_llvm(target) {
+        trace!("system LLVM requested, no install");
         return false;
     }
 
@@ -2135,12 +2049,13 @@ fn maybe_install_llvm(
         }
         !builder.config.dry_run()
     } else if let llvm::LlvmBuildStatus::AlreadyBuilt(llvm::LlvmResult { llvm_config, .. }) =
-        llvm::prebuilt_llvm_config(builder, target)
+        llvm::prebuilt_llvm_config(builder, target, true)
     {
-        let mut cmd = Command::new(llvm_config);
+        trace!("LLVM already built, installing LLVM files");
+        let mut cmd = command(llvm_config);
         cmd.arg("--libfiles");
         builder.verbose(|| println!("running {cmd:?}"));
-        let files = if builder.config.dry_run() { "".into() } else { output(&mut cmd) };
+        let files = cmd.run_capture_stdout(builder).stdout();
         let build_llvm_out = &builder.llvm_out(builder.config.build);
         let target_llvm_out = &builder.llvm_out(target);
         for file in files.trim_end().split(' ') {
@@ -2159,8 +2074,21 @@ fn maybe_install_llvm(
 }
 
 /// Maybe add libLLVM.so to the target lib-dir for linking.
+#[cfg_attr(
+    feature = "tracing",
+    instrument(
+        level = "trace",
+        name = "maybe_install_llvm_target",
+        skip_all,
+        fields(
+            llvm_link_shared = ?builder.llvm_link_shared(),
+            target = ?target,
+            sysroot = ?sysroot,
+        ),
+    ),
+)]
 pub fn maybe_install_llvm_target(builder: &Builder<'_>, target: TargetSelection, sysroot: &Path) {
-    let dst_libdir = sysroot.join("lib/rustlib").join(&*target.triple).join("lib");
+    let dst_libdir = sysroot.join("lib/rustlib").join(target).join("lib");
     // We do not need to copy LLVM files into the sysroot if it is not
     // dynamically linked; it is already included into librustc_llvm
     // statically.
@@ -2170,6 +2098,19 @@ pub fn maybe_install_llvm_target(builder: &Builder<'_>, target: TargetSelection,
 }
 
 /// Maybe add libLLVM.so to the runtime lib-dir for rustc itself.
+#[cfg_attr(
+    feature = "tracing",
+    instrument(
+        level = "trace",
+        name = "maybe_install_llvm_runtime",
+        skip_all,
+        fields(
+            llvm_link_shared = ?builder.llvm_link_shared(),
+            target = ?target,
+            sysroot = ?sysroot,
+        ),
+    ),
+)]
 pub fn maybe_install_llvm_runtime(builder: &Builder<'_>, target: TargetSelection, sysroot: &Path) {
     let dst_libdir =
         sysroot.join(builder.sysroot_libdir_relative(Compiler { stage: 1, host: target }));
@@ -2193,8 +2134,13 @@ impl Step for LlvmTools {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let default = should_build_extended_tool(run.builder, "llvm-tools");
-        // FIXME: allow using the names of the tools themselves?
-        run.alias("llvm-tools").default_condition(default)
+
+        let mut run = run.alias("llvm-tools");
+        for tool in LLVM_TOOLS {
+            run = run.alias(tool);
+        }
+
+        run.default_condition(default)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -2202,6 +2148,32 @@ impl Step for LlvmTools {
     }
 
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
+        fn tools_to_install(paths: &[PathBuf]) -> Vec<&'static str> {
+            let mut tools = vec![];
+
+            for path in paths {
+                let path = path.to_str().unwrap();
+
+                // Include all tools if path is 'llvm-tools'.
+                if path == "llvm-tools" {
+                    return LLVM_TOOLS.to_owned();
+                }
+
+                for tool in LLVM_TOOLS {
+                    if path == *tool {
+                        tools.push(*tool);
+                    }
+                }
+            }
+
+            // If no specific tool is requested, include all tools.
+            if tools.is_empty() {
+                tools = LLVM_TOOLS.to_owned();
+            }
+
+            tools
+        }
+
         let target = self.target;
 
         /* run only if llvm-config isn't used */
@@ -2222,7 +2194,7 @@ impl Step for LlvmTools {
             // Prepare the image directory
             let src_bindir = builder.llvm_out(target).join("bin");
             let dst_bindir = format!("lib/rustlib/{}/bin", target.triple);
-            for tool in LLVM_TOOLS {
+            for tool in tools_to_install(&builder.paths) {
                 let exe = src_bindir.join(exe(tool, target));
                 tarball.add_file(&exe, &dst_bindir, 0o755);
             }
@@ -2256,11 +2228,7 @@ impl Step for LlvmBitcodeLinker {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(LlvmBitcodeLinker {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.build,
-                run.target,
-            ),
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
             target: run.target,
         });
     }
@@ -2279,7 +2247,7 @@ impl Step for LlvmBitcodeLinker {
         tarball.set_overlay(OverlayKind::LlvmBitcodeLinker);
         tarball.is_preview(true);
 
-        tarball.add_file(llbc_linker, self_contained_bin_dir, 0o755);
+        tarball.add_file(llbc_linker.tool_path, self_contained_bin_dir, 0o755);
 
         Some(tarball.generate())
     }
@@ -2288,6 +2256,11 @@ impl Step for LlvmBitcodeLinker {
 /// Tarball intended for internal consumption to ease rustc/std development.
 ///
 /// Should not be considered stable by end users.
+///
+/// In practice, this is the tarball that gets downloaded and used by
+/// `llvm.download-ci-llvm`.
+///
+/// (Don't confuse this with [`RustcDev`], with a `c`!)
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RustDev {
     pub target: TargetSelection,
@@ -2324,9 +2297,6 @@ impl Step for RustDev {
 
         builder.ensure(crate::core::build_steps::llvm::Llvm { target });
 
-        // We want to package `lld` to use it with `download-ci-llvm`.
-        builder.ensure(crate::core::build_steps::llvm::Lld { target });
-
         let src_bindir = builder.llvm_out(target).join("bin");
         // If updating this, you likely want to change
         // src/bootstrap/download-ci-llvm-stamp as well, otherwise local users
@@ -2343,10 +2313,15 @@ impl Step for RustDev {
             }
         }
 
-        // We don't build LLD on some platforms, so only add it if it exists
-        let lld_path = builder.lld_out(target).join("bin").join(exe("lld", target));
-        if lld_path.exists() {
-            tarball.add_file(lld_path, "bin", 0o755);
+        if builder.config.lld_enabled {
+            // We want to package `lld` to use it with `download-ci-llvm`.
+            let lld_out = builder.ensure(crate::core::build_steps::llvm::Lld { target });
+
+            // We don't build LLD on some platforms, so only add it if it exists
+            let lld_path = lld_out.join("bin").join(exe("lld", target));
+            if lld_path.exists() {
+                tarball.add_file(lld_path, "bin", 0o755);
+            }
         }
 
         tarball.add_file(builder.llvm_filecheck(target), "bin", 0o755);
@@ -2364,6 +2339,19 @@ impl Step for RustDev {
         maybe_install_llvm(builder, target, &dst_libdir, true);
         let link_type = if builder.llvm_link_shared() { "dynamic" } else { "static" };
         t!(std::fs::write(tarball.image_dir().join("link-type.txt"), link_type), dst_libdir);
+
+        // Copy the `compiler-rt` source, so that `library/profiler_builtins`
+        // can potentially use it to build the profiler runtime without needing
+        // to check out the LLVM submodule.
+        copy_src_dirs(
+            builder,
+            &builder.src.join("src").join("llvm-project"),
+            &["compiler-rt"],
+            // The test subdirectory is much larger than the rest of the source,
+            // and we currently don't use these test files anyway.
+            &["compiler-rt/test"],
+            tarball.image_dir(),
+        );
 
         Some(tarball.generate())
     }
@@ -2474,5 +2462,32 @@ impl Step for ReproducibleArtifacts {
             added_anything = true;
         }
         if added_anything { Some(tarball.generate()) } else { None }
+    }
+}
+
+/// Tarball containing a prebuilt version of the libgccjit library,
+/// needed as a dependency for the GCC codegen backend (similarly to the LLVM
+/// backend needing a prebuilt libLLVM).
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Gcc {
+    pub target: TargetSelection,
+}
+
+impl Step for Gcc {
+    type Output = GeneratedTarball;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.alias("gcc")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(Gcc { target: run.target });
+    }
+
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
+        let tarball = Tarball::new(builder, "gcc", &self.target.triple);
+        let output = builder.ensure(super::gcc::Gcc { target: self.target });
+        tarball.add_file(output.libgccjit, ".", 0o644);
+        tarball.generate()
     }
 }

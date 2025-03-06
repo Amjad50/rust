@@ -1,12 +1,12 @@
-use super::{repeat, BorrowedBuf, Cursor, SeekFrom};
+use super::{BorrowedBuf, Cursor, SeekFrom, repeat};
 use crate::cmp::{self, min};
-use crate::io::{self, IoSlice, IoSliceMut, DEFAULT_BUF_SIZE};
-use crate::io::{BufRead, BufReader, Read, Seek, Write};
+use crate::io::{
+    self, BufRead, BufReader, DEFAULT_BUF_SIZE, IoSlice, IoSliceMut, Read, Seek, Write,
+};
 use crate::mem::MaybeUninit;
 use crate::ops::Deref;
 
 #[test]
-#[cfg_attr(target_os = "emscripten", ignore)]
 fn read_until() {
     let mut buf = Cursor::new(&b"12"[..]);
     let mut v = Vec::new();
@@ -224,12 +224,12 @@ fn take_eof() {
 
     impl Read for R {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::const_io_error!(io::ErrorKind::Other, ""))
+            Err(io::const_error!(io::ErrorKind::Other, ""))
         }
     }
     impl BufRead for R {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            Err(io::const_io_error!(io::ErrorKind::Other, ""))
+            Err(io::const_error!(io::ErrorKind::Other, ""))
         }
         fn consume(&mut self, _amt: usize) {}
     }
@@ -358,7 +358,6 @@ fn chain_zero_length_read_is_not_eof() {
 }
 
 #[bench]
-#[cfg_attr(target_os = "emscripten", ignore)]
 #[cfg_attr(miri, ignore)] // Miri isn't fast...
 fn bench_read_to_end(b: &mut test::Bencher) {
     b.iter(|| {
@@ -530,7 +529,21 @@ fn io_slice_advance_slices_beyond_total_length() {
     assert!(bufs.is_empty());
 }
 
-/// Create a new writer that reads from at most `n_bufs` and reads
+#[test]
+fn io_slice_as_slice() {
+    let buf = [1; 8];
+    let slice = IoSlice::new(&buf).as_slice();
+    assert_eq!(slice, buf);
+}
+
+#[test]
+fn io_slice_into_slice() {
+    let mut buf = [1; 8];
+    let slice = IoSliceMut::new(&mut buf).into_slice();
+    assert_eq!(slice, [1; 8]);
+}
+
+/// Creates a new writer that reads from at most `n_bufs` and reads
 /// `per_call` bytes (in total) per call to write.
 fn test_writer(n_bufs: usize, per_call: usize) -> TestWriter {
     TestWriter { n_bufs, per_call, written: Vec::new() }
@@ -653,6 +666,38 @@ fn test_take_wrong_length() {
     let _ = reader.read(&mut buffer[..]);
 }
 
+#[test]
+fn slice_read_exact_eof() {
+    let slice = &b"123456"[..];
+
+    let mut r = slice;
+    assert!(r.read_exact(&mut [0; 10]).is_err());
+    assert!(r.is_empty());
+
+    let mut r = slice;
+    let buf = &mut [0; 10];
+    let mut buf = BorrowedBuf::from(buf.as_mut_slice());
+    assert!(r.read_buf_exact(buf.unfilled()).is_err());
+    assert!(r.is_empty());
+    assert_eq!(buf.filled(), b"123456");
+}
+
+#[test]
+fn cursor_read_exact_eof() {
+    let slice = Cursor::new(b"123456");
+
+    let mut r = slice.clone();
+    assert!(r.read_exact(&mut [0; 10]).is_err());
+    assert!(Cursor::split(&r).1.is_empty());
+
+    let mut r = slice;
+    let buf = &mut [0; 10];
+    let mut buf = BorrowedBuf::from(buf.as_mut_slice());
+    assert!(r.read_buf_exact(buf.unfilled()).is_err());
+    assert!(Cursor::split(&r).1.is_empty());
+    assert_eq!(buf.filled(), b"123456");
+}
+
 #[bench]
 fn bench_take_read(b: &mut test::Bencher) {
     b.iter(|| {
@@ -702,10 +747,73 @@ fn read_buf_full_read() {
     assert_eq!(BufReader::new(FullRead).fill_buf().unwrap().len(), DEFAULT_BUF_SIZE);
 }
 
+struct DataAndErrorReader(&'static [u8]);
+
+impl Read for DataAndErrorReader {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        panic!("We want tests to use `read_buf`")
+    }
+
+    fn read_buf(&mut self, buf: io::BorrowedCursor<'_>) -> io::Result<()> {
+        self.0.read_buf(buf).unwrap();
+        Err(io::Error::other("error"))
+    }
+}
+
+#[test]
+fn read_buf_data_and_error_take() {
+    let mut buf = [0; 64];
+    let mut buf = io::BorrowedBuf::from(buf.as_mut_slice());
+
+    let mut r = DataAndErrorReader(&[4, 5, 6]).take(1);
+    assert!(r.read_buf(buf.unfilled()).is_err());
+    assert_eq!(buf.filled(), &[4]);
+
+    assert!(r.read_buf(buf.unfilled()).is_ok());
+    assert_eq!(buf.filled(), &[4]);
+    assert_eq!(r.get_ref().0, &[5, 6]);
+}
+
+#[test]
+fn read_buf_data_and_error_buf() {
+    let mut r = BufReader::new(DataAndErrorReader(&[4, 5, 6]));
+
+    assert!(r.fill_buf().is_err());
+    assert_eq!(r.fill_buf().unwrap(), &[4, 5, 6]);
+}
+
+#[test]
+fn read_buf_data_and_error_read_to_end() {
+    let mut r = DataAndErrorReader(&[4, 5, 6]);
+
+    let mut v = Vec::with_capacity(200);
+    assert!(r.read_to_end(&mut v).is_err());
+
+    assert_eq!(v, &[4, 5, 6]);
+}
+
+#[test]
+fn read_to_end_error() {
+    struct ErrorReader;
+
+    impl Read for ErrorReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("error"))
+        }
+    }
+
+    let mut r = [4, 5, 6].chain(ErrorReader);
+
+    let mut v = Vec::with_capacity(200);
+    assert!(r.read_to_end(&mut v).is_err());
+
+    assert_eq!(v, &[4, 5, 6]);
+}
+
 #[test]
 // Miri does not support signalling OOM
 #[cfg_attr(miri, ignore)]
-// 64-bit only to be sure the allocator will fail fast on an impossible to satsify size
+// 64-bit only to be sure the allocator will fail fast on an impossible to satisfy size
 #[cfg(target_pointer_width = "64")]
 fn try_oom_error() {
     let mut v = Vec::<u8>::new();

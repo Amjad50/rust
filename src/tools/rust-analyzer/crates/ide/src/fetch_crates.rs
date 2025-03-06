@@ -1,6 +1,6 @@
 use ide_db::{
-    base_db::{CrateOrigin, FileId, SourceDatabase},
-    FxIndexSet, RootDatabase,
+    base_db::{CrateOrigin, SourceDatabase},
+    FileId, FxIndexSet, RootDatabase,
 };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14,13 +14,11 @@ pub struct CrateInfo {
 //
 // Shows a view tree with all the dependencies of this project
 //
-// |===
-// | Editor  | Panel Name
+// | Editor  | Panel Name |
+// |---------|------------|
+// | VS Code | **Rust Dependencies** |
 //
-// | VS Code | **Rust Dependencies**
-// |===
-//
-// image::https://user-images.githubusercontent.com/5748995/229394139-2625beab-f4c9-484b-84ed-ad5dee0b1e1a.png[]
+// ![Show Dependency Tree](https://user-images.githubusercontent.com/5748995/229394139-2625beab-f4c9-484b-84ed-ad5dee0b1e1a.png)
 pub(crate) fn fetch_crates(db: &RootDatabase) -> FxIndexSet<CrateInfo> {
     let crate_graph = db.crate_graph();
     crate_graph
@@ -38,5 +36,5 @@ fn crate_info(data: &ide_db::base_db::CrateData) -> CrateInfo {
 }
 
 fn crate_name(data: &ide_db::base_db::CrateData) -> Option<String> {
-    data.display_name.as_ref().map(|it| it.canonical_name().to_owned())
+    data.display_name.as_ref().map(|it| it.canonical_name().as_str().to_owned())
 }

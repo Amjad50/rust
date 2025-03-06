@@ -89,6 +89,16 @@ impl HasAttrs for AssocItem {
     }
 }
 
+impl HasAttrs for crate::Crate {
+    fn attrs(self, db: &dyn HirDatabase) -> AttrsWithOwner {
+        let def = AttrDefId::ModuleId(self.root_module().id);
+        AttrsWithOwner::new(db.upcast(), def)
+    }
+    fn attr_id(self) -> AttrDefId {
+        AttrDefId::ModuleId(self.root_module().id)
+    }
+}
+
 /// Resolves the item `link` points to in the scope of `def`.
 pub fn resolve_doc_path_on(
     db: &dyn HirDatabase,
@@ -257,7 +267,7 @@ fn resolve_impl_trait_item(
         &traits_in_scope,
         method_resolution::VisibleFromModule::None,
         Some(name),
-        &mut |assoc_item_id| {
+        &mut |_, assoc_item_id: AssocItemId, _| {
             // If two traits in scope define the same item, Rustdoc links to no specific trait (for
             // instance, given two methods `a`, Rustdoc simply links to `method.a` with no
             // disambiguation) so we just pick the first one we find as well.
@@ -307,7 +317,7 @@ fn doc_modpath_from_str(link: &str) -> Option<ModPath> {
         let kind = match parts.next()? {
             "" => PathKind::Abs,
             "crate" => PathKind::Crate,
-            "self" => PathKind::Super(0),
+            "self" => PathKind::SELF,
             "super" => {
                 let mut deg = 1;
                 for segment in parts.by_ref() {
@@ -327,9 +337,7 @@ fn doc_modpath_from_str(link: &str) -> Option<ModPath> {
         };
         let parts = first_segment.into_iter().chain(parts).map(|segment| match segment.parse() {
             Ok(idx) => Name::new_tuple_field(idx),
-            Err(_) => {
-                Name::new_text_dont_use(segment.split_once('<').map_or(segment, |it| it.0).into())
-            }
+            Err(_) => Name::new_root(segment.split_once('<').map_or(segment, |it| it.0)),
         });
         Some(ModPath::from_segments(kind, parts))
     };

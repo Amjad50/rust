@@ -1,12 +1,12 @@
 use clippy_utils::diagnostics::span_lint_hir_and_then;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use clippy_utils::{fulfill_or_allowed, is_cfg_test, is_from_proc_macro};
 use rustc_errors::{Applicability, SuggestionStyle};
 use rustc_hir::{HirId, Item, ItemKind, Mod};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
 use rustc_span::hygiene::AstPass;
-use rustc_span::{sym, ExpnKind};
+use rustc_span::{ExpnKind, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -58,7 +58,7 @@ fn cfg_test_module<'tcx>(cx: &LateContext<'tcx>, item: &Item<'tcx>) -> bool {
 
 impl LateLintPass<'_> for ItemsAfterTestModule {
     fn check_mod(&mut self, cx: &LateContext<'_>, module: &Mod<'_>, _: HirId) {
-        let mut items = module.item_ids.iter().map(|&id| cx.tcx.hir().item(id));
+        let mut items = module.item_ids.iter().map(|&id| cx.tcx.hir_item(id));
 
         let Some((mod_pos, test_mod)) = items.by_ref().enumerate().find(|(_, item)| cfg_test_module(cx, item)) else {
             return;
@@ -91,13 +91,16 @@ impl LateLintPass<'_> for ItemsAfterTestModule {
                 "items after a test module",
                 |diag| {
                     if let Some(prev) = mod_pos.checked_sub(1)
-                        && let prev = cx.tcx.hir().item(module.item_ids[prev])
+                        && let prev = cx.tcx.hir_item(module.item_ids[prev])
                         && let items_span = last.span.with_lo(test_mod.span.hi())
-                        && let Some(items) = snippet_opt(cx, items_span)
+                        && let Some(items) = items_span.get_source_text(cx)
                     {
                         diag.multipart_suggestion_with_style(
                             "move the items to before the test module was defined",
-                            vec![(prev.span.shrink_to_hi(), items), (items_span, String::new())],
+                            vec![
+                                (prev.span.shrink_to_hi(), items.to_owned()),
+                                (items_span, String::new()),
+                            ],
                             Applicability::MachineApplicable,
                             SuggestionStyle::HideCodeAlways,
                         );

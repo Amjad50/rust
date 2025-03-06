@@ -1,27 +1,31 @@
 use arrayvec::ArrayVec;
-use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
-use clippy_utils::is_diag_trait_item;
 use clippy_utils::macros::{
-    find_format_arg_expr, find_format_args, format_arg_removal_span, format_placeholder_format_span, is_assert_macro,
-    is_format_macro, is_panic, matching_root_macro_call, root_macro_call_first_node, FormatParamUsage, MacroCall,
+    FormatArgsStorage, FormatParamUsage, MacroCall, find_format_arg_expr, format_arg_removal_span,
+    format_placeholder_format_span, is_assert_macro, is_format_macro, is_panic, matching_root_macro_call,
+    root_macro_call_first_node,
 };
-use clippy_utils::source::snippet_opt;
+use clippy_utils::msrvs::{self, Msrv};
+use clippy_utils::source::{SpanRangeExt, snippet};
 use clippy_utils::ty::{implements_trait, is_type_lang_item};
+use clippy_utils::{is_diag_trait_item, is_from_proc_macro};
 use itertools::Itertools;
 use rustc_ast::{
     FormatArgPosition, FormatArgPositionKind, FormatArgsPiece, FormatArgumentKind, FormatCount, FormatOptions,
     FormatPlaceholder, FormatTrait,
 };
+use rustc_attr_parsing::RustcVersion;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::Applicability;
 use rustc_errors::SuggestionStyle::{CompletelyHidden, ShowCode};
 use rustc_hir::{Expr, ExprKind, LangItem};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::adjustment::{Adjust, Adjustment};
-use rustc_middle::ty::Ty;
+use rustc_middle::ty::{List, Ty, TyCtxt};
 use rustc_session::impl_lint_pass;
 use rustc_span::edition::Edition::Edition2021;
-use rustc_span::{sym, Span, Symbol};
+use rustc_span::{Span, Symbol, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -46,6 +50,36 @@ declare_clippy_lint! {
     pub FORMAT_IN_FORMAT_ARGS,
     perf,
     "`format!` used in a macro that does formatting"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for `Debug` formatting (`{:?}`) applied to an `OsStr` or `Path`.
+    ///
+    /// ### Why is this bad?
+    /// Rust doesn't guarantee what `Debug` formatting looks like, and it could
+    /// change in the future. `OsStr`s and `Path`s can be `Display` formatted
+    /// using their `display` methods.
+    ///
+    /// Furthermore, with `Debug` formatting, certain characters are escaped.
+    /// Thus, a `Debug` formatted `Path` is less likely to be clickable.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// # use std::path::Path;
+    /// let path = Path::new("...");
+    /// println!("The path is {:?}", path);
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// # use std::path::Path;
+    /// let path = Path::new("…");
+    /// println!("The path is {}", path.display());
+    /// ```
+    #[clippy::version = "1.87.0"]
+    pub UNNECESSARY_DEBUG_FORMATTING,
+    pedantic,
+    "`Debug` formatting applied to an `OsStr` or `Path` when `.display()` is available"
 }
 
 declare_clippy_lint! {
@@ -160,51 +194,57 @@ declare_clippy_lint! {
     "use of a format specifier that has no effect"
 }
 
-impl_lint_pass!(FormatArgs => [
+impl_lint_pass!(FormatArgs<'_> => [
     FORMAT_IN_FORMAT_ARGS,
     TO_STRING_IN_FORMAT_ARGS,
     UNINLINED_FORMAT_ARGS,
+    UNNECESSARY_DEBUG_FORMATTING,
     UNUSED_FORMAT_SPECS,
 ]);
 
-pub struct FormatArgs {
+#[allow(clippy::struct_field_names)]
+pub struct FormatArgs<'tcx> {
+    format_args: FormatArgsStorage,
     msrv: Msrv,
     ignore_mixed: bool,
+    ty_msrv_map: FxHashMap<Ty<'tcx>, Option<RustcVersion>>,
 }
 
-impl FormatArgs {
-    #[must_use]
-    pub fn new(msrv: Msrv, allow_mixed_uninlined_format_args: bool) -> Self {
+impl<'tcx> FormatArgs<'tcx> {
+    pub fn new(tcx: TyCtxt<'tcx>, conf: &'static Conf, format_args: FormatArgsStorage) -> Self {
+        let ty_msrv_map = make_ty_msrv_map(tcx);
         Self {
-            msrv,
-            ignore_mixed: allow_mixed_uninlined_format_args,
+            format_args,
+            msrv: conf.msrv,
+            ignore_mixed: conf.allow_mixed_uninlined_format_args,
+            ty_msrv_map,
         }
     }
 }
 
-impl<'tcx> LateLintPass<'tcx> for FormatArgs {
+impl<'tcx> LateLintPass<'tcx> for FormatArgs<'tcx> {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if let Some(macro_call) = root_macro_call_first_node(cx, expr)
             && is_format_macro(cx, macro_call.def_id)
-            && let Some(format_args) = find_format_args(cx, expr, macro_call.expn)
+            && let Some(format_args) = self.format_args.get(cx, expr, macro_call.expn)
         {
             let linter = FormatArgsExpr {
                 cx,
                 expr,
                 macro_call: &macro_call,
-                format_args: &format_args,
+                format_args,
                 ignore_mixed: self.ignore_mixed,
+                msrv: &self.msrv,
+                ty_msrv_map: &self.ty_msrv_map,
             };
 
             linter.check_templates();
 
-            if self.msrv.meets(msrvs::FORMAT_ARGS_CAPTURE) {
+            if self.msrv.meets(cx, msrvs::FORMAT_ARGS_CAPTURE) {
                 linter.check_uninlined_args();
             }
         }
     }
-
-    extract_msrv_attr!(LateContext);
 }
 
 struct FormatArgsExpr<'a, 'tcx> {
@@ -213,21 +253,21 @@ struct FormatArgsExpr<'a, 'tcx> {
     macro_call: &'a MacroCall,
     format_args: &'a rustc_ast::FormatArgs,
     ignore_mixed: bool,
+    msrv: &'a Msrv,
+    ty_msrv_map: &'a FxHashMap<Ty<'tcx>, Option<RustcVersion>>,
 }
 
-impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
+impl<'tcx> FormatArgsExpr<'_, 'tcx> {
     fn check_templates(&self) {
         for piece in &self.format_args.template {
             if let FormatArgsPiece::Placeholder(placeholder) = piece
                 && let Ok(index) = placeholder.argument.index
                 && let Some(arg) = self.format_args.arguments.all_args().get(index)
+                && let Some(arg_expr) = find_format_arg_expr(self.expr, arg)
             {
-                let arg_expr = find_format_arg_expr(self.expr, arg);
-
                 self.check_unused_format_specifier(placeholder, arg_expr);
 
-                if let Ok(arg_expr) = arg_expr
-                    && placeholder.format_trait == FormatTrait::Display
+                if placeholder.format_trait == FormatTrait::Display
                     && placeholder.format_options == FormatOptions::default()
                     && !self.is_aliased(index)
                 {
@@ -235,32 +275,22 @@ impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
                     self.check_format_in_format_args(name, arg_expr);
                     self.check_to_string_in_format_args(name, arg_expr);
                 }
+
+                if placeholder.format_trait == FormatTrait::Debug {
+                    let name = self.cx.tcx.item_name(self.macro_call.def_id);
+                    self.check_unnecessary_debug_formatting(name, arg_expr);
+                }
             }
         }
     }
 
-    fn check_unused_format_specifier(
-        &self,
-        placeholder: &FormatPlaceholder,
-        arg_expr: Result<&Expr<'_>, &rustc_ast::Expr>,
-    ) {
-        let ty_or_ast_expr = arg_expr.map(|expr| self.cx.typeck_results().expr_ty(expr).peel_refs());
-
-        let is_format_args = match ty_or_ast_expr {
-            Ok(ty) => is_type_lang_item(self.cx, ty, LangItem::FormatArguments),
-            Err(expr) => matches!(expr.peel_parens_and_refs().kind, rustc_ast::ExprKind::FormatArgs(_)),
-        };
-
+    fn check_unused_format_specifier(&self, placeholder: &FormatPlaceholder, arg: &Expr<'_>) {
         let options = &placeholder.format_options;
 
-        let arg_span = match arg_expr {
-            Ok(expr) => expr.span,
-            Err(expr) => expr.span,
-        };
-
         if let Some(placeholder_span) = placeholder.span
-            && is_format_args
             && *options != FormatOptions::default()
+            && let ty = self.cx.typeck_results().expr_ty(arg).peel_refs()
+            && is_type_lang_item(self.cx, ty, LangItem::FormatArguments)
         {
             span_lint_and_then(
                 self.cx,
@@ -271,7 +301,7 @@ impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
                     let mut suggest_format = |spec| {
                         let message = format!("for the {spec} to apply consider using `format!()`");
 
-                        if let Some(mac_call) = matching_root_macro_call(self.cx, arg_span, sym::format_args_macro) {
+                        if let Some(mac_call) = matching_root_macro_call(self.cx, arg.span, sym::format_args_macro) {
                             diag.span_suggestion(
                                 self.cx.sess().source_map().span_until_char(mac_call.span, '!'),
                                 message,
@@ -421,14 +451,14 @@ impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
                 count_needed_derefs(receiver_ty, cx.typeck_results().expr_adjustments(receiver).iter())
             && implements_trait(cx, target, display_trait_id, &[])
             && let Some(sized_trait_id) = cx.tcx.lang_items().sized_trait()
-            && let Some(receiver_snippet) = snippet_opt(cx, receiver.span)
+            && let Some(receiver_snippet) = receiver.span.source_callsite().get_source_text(cx)
         {
             let needs_ref = !implements_trait(cx, receiver_ty, sized_trait_id, &[]);
             if n_needed_derefs == 0 && !needs_ref {
                 span_lint_and_sugg(
                     cx,
                     TO_STRING_IN_FORMAT_ARGS,
-                    to_string_span.with_lo(receiver.span.hi()),
+                    to_string_span.with_lo(receiver.span.source_callsite().hi()),
                     format!("`to_string` applied to a type that implements `Display` in `{name}!` args"),
                     "remove this",
                     String::new(),
@@ -449,6 +479,33 @@ impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
                     Applicability::MachineApplicable,
                 );
             }
+        }
+    }
+
+    fn check_unnecessary_debug_formatting(&self, name: Symbol, value: &Expr<'tcx>) {
+        let cx = self.cx;
+        if !value.span.from_expansion()
+            && !is_from_proc_macro(cx, value)
+            && let ty = cx.typeck_results().expr_ty(value)
+            && self.can_display_format(ty)
+        {
+            let snippet = snippet(cx.sess(), value.span, "..");
+            span_lint_and_then(
+                cx,
+                UNNECESSARY_DEBUG_FORMATTING,
+                value.span,
+                format!("unnecessary `Debug` formatting in `{name}!` args"),
+                |diag| {
+                    diag.help(format!(
+                        "use `Display` formatting and change this to `{snippet}.display()`"
+                    ));
+                    diag.note(
+                        "switching to `Display` formatting will change how the value is shown; \
+                         escaped characters will no longer be escaped and surrounding quotes will \
+                         be removed",
+                    );
+                },
+            );
         }
     }
 
@@ -478,6 +535,41 @@ impl<'a, 'tcx> FormatArgsExpr<'a, 'tcx> {
             .at_most_one()
             .is_err()
     }
+
+    fn can_display_format(&self, ty: Ty<'tcx>) -> bool {
+        let ty = ty.peel_refs();
+
+        if let Some(msrv) = self.ty_msrv_map.get(&ty)
+            && msrv.is_none_or(|msrv| self.msrv.meets(self.cx, msrv))
+        {
+            return true;
+        }
+
+        // Even if `ty` is not in `self.ty_msrv_map`, check whether `ty` implements `Deref` with
+        // a `Target` that is in `self.ty_msrv_map`.
+        if let Some(deref_trait_id) = self.cx.tcx.lang_items().deref_trait()
+            && implements_trait(self.cx, ty, deref_trait_id, &[])
+            && let Some(target_ty) = self.cx.get_associated_type(ty, deref_trait_id, "Target")
+            && let Some(msrv) = self.ty_msrv_map.get(&target_ty)
+            && msrv.is_none_or(|msrv| self.msrv.meets(self.cx, msrv))
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
+fn make_ty_msrv_map(tcx: TyCtxt<'_>) -> FxHashMap<Ty<'_>, Option<RustcVersion>> {
+    [(sym::OsStr, Some(msrvs::OS_STR_DISPLAY)), (sym::Path, None)]
+        .into_iter()
+        .filter_map(|(name, feature)| {
+            tcx.get_diagnostic_item(name).map(|def_id| {
+                let ty = Ty::new_adt(tcx, tcx.adt_def(def_id), List::empty());
+                (ty, feature)
+            })
+        })
+        .collect()
 }
 
 fn count_needed_derefs<'tcx, I>(mut ty: Ty<'tcx>, mut iter: I) -> (usize, Ty<'tcx>)

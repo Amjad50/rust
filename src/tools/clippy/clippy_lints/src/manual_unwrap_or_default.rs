@@ -1,6 +1,6 @@
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
-use rustc_hir::{Arm, Expr, ExprKind, HirId, LangItem, MatchSource, Pat, PatKind, QPath};
+use rustc_hir::{Arm, Expr, ExprKind, HirId, LangItem, MatchSource, Pat, PatExpr, PatExprKind, PatKind, QPath};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::GenericArgKind;
 use rustc_session::declare_lint_pass;
@@ -9,8 +9,8 @@ use rustc_span::sym;
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::higher::IfLetOrMatch;
 use clippy_utils::sugg::Sugg;
-use clippy_utils::ty::implements_trait;
-use clippy_utils::{in_constant, is_default_equivalent, peel_blocks, span_contains_comment};
+use clippy_utils::ty::{expr_type_is_certain, implements_trait};
+use clippy_utils::{is_default_equivalent, is_in_const_context, path_res, peel_blocks, span_contains_comment};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -43,7 +43,7 @@ declare_clippy_lint! {
     /// let x: Option<Vec<String>> = Some(Vec::new());
     /// let y: Vec<String> = x.unwrap_or_default();
     /// ```
-    #[clippy::version = "1.78.0"]
+    #[clippy::version = "1.79.0"]
     pub MANUAL_UNWRAP_OR_DEFAULT,
     suspicious,
     "check if a `match` or `if let` can be simplified with `unwrap_or_default`"
@@ -53,31 +53,35 @@ declare_lint_pass!(ManualUnwrapOrDefault => [MANUAL_UNWRAP_OR_DEFAULT]);
 
 fn get_some<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'tcx>) -> Option<HirId> {
     if let PatKind::TupleStruct(QPath::Resolved(_, path), &[pat], _) = pat.kind
+        && let PatKind::Binding(_, pat_id, _, _) = pat.kind
         && let Some(def_id) = path.res.opt_def_id()
         // Since it comes from a pattern binding, we need to get the parent to actually match
         // against it.
         && let Some(def_id) = cx.tcx.opt_parent(def_id)
-        && cx.tcx.lang_items().get(LangItem::OptionSome) == Some(def_id)
+        && (cx.tcx.lang_items().get(LangItem::OptionSome) == Some(def_id)
+        || cx.tcx.lang_items().get(LangItem::ResultOk) == Some(def_id))
     {
-        let mut bindings = Vec::new();
-        pat.each_binding(|_, id, _, _| bindings.push(id));
-        if let &[id] = bindings.as_slice() {
-            Some(id)
-        } else {
-            None
-        }
+        Some(pat_id)
     } else {
         None
     }
 }
 
 fn get_none<'tcx>(cx: &LateContext<'tcx>, arm: &Arm<'tcx>) -> Option<&'tcx Expr<'tcx>> {
-    if let PatKind::Path(QPath::Resolved(_, path)) = arm.pat.kind
+    if let PatKind::Expr(PatExpr { kind: PatExprKind::Path(QPath::Resolved(_, path)), .. }) = arm.pat.kind
         && let Some(def_id) = path.res.opt_def_id()
         // Since it comes from a pattern binding, we need to get the parent to actually match
         // against it.
         && let Some(def_id) = cx.tcx.opt_parent(def_id)
         && cx.tcx.lang_items().get(LangItem::OptionNone) == Some(def_id)
+    {
+        Some(arm.body)
+    } else if let PatKind::TupleStruct(QPath::Resolved(_, path), _, _)= arm.pat.kind
+        && let Some(def_id) = path.res.opt_def_id()
+        // Since it comes from a pattern binding, we need to get the parent to actually match
+        // against it.
+        && let Some(def_id) = cx.tcx.opt_parent(def_id)
+        && cx.tcx.lang_items().get(LangItem::ResultErr) == Some(def_id)
     {
         Some(arm.body)
     } else if let PatKind::Wild = arm.pat.kind {
@@ -154,6 +158,36 @@ fn handle<'tcx>(cx: &LateContext<'tcx>, if_let_or_match: IfLetOrMatch<'tcx>, exp
         } else {
             Applicability::MachineApplicable
         };
+
+        // We now check if the condition is a None variant, in which case we need to specify the type
+        if path_res(cx, condition)
+            .opt_def_id()
+            .is_some_and(|id| Some(cx.tcx.parent(id)) == cx.tcx.lang_items().option_none_variant())
+        {
+            return span_lint_and_sugg(
+                cx,
+                MANUAL_UNWRAP_OR_DEFAULT,
+                expr.span,
+                format!("{expr_name} can be simplified with `.unwrap_or_default()`"),
+                "replace it with",
+                format!("{receiver}::<{expr_type}>.unwrap_or_default()"),
+                applicability,
+            );
+        }
+
+        // We check if the expression type is still uncertain, in which case we ask the user to specify it
+        if !expr_type_is_certain(cx, condition) {
+            return span_lint_and_sugg(
+                cx,
+                MANUAL_UNWRAP_OR_DEFAULT,
+                expr.span,
+                format!("{expr_name} can be simplified with `.unwrap_or_default()`"),
+                format!("ascribe the type {expr_type} and replace your expression with"),
+                format!("{receiver}.unwrap_or_default()"),
+                Applicability::Unspecified,
+            );
+        }
+
         span_lint_and_sugg(
             cx,
             MANUAL_UNWRAP_OR_DEFAULT,
@@ -168,11 +202,10 @@ fn handle<'tcx>(cx: &LateContext<'tcx>, if_let_or_match: IfLetOrMatch<'tcx>, exp
 
 impl<'tcx> LateLintPass<'tcx> for ManualUnwrapOrDefault {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        if expr.span.from_expansion() || in_constant(cx, expr.hir_id) {
-            return;
-        }
-        // Call handle only if the expression is `if let` or `match`
-        if let Some(if_let_or_match) = IfLetOrMatch::parse(cx, expr) {
+        if let Some(if_let_or_match) = IfLetOrMatch::parse(cx, expr)
+            && !expr.span.from_expansion()
+            && !is_in_const_context(cx)
+        {
             handle(cx, if_let_or_match, expr);
         }
     }

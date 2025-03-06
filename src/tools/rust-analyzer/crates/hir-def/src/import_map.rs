@@ -1,14 +1,14 @@
 //! A map of all publicly exported items in a crate.
 
-use std::{fmt, hash::BuildHasherDefault};
+use std::fmt;
 
 use base_db::CrateId;
 use fst::{raw::IndexedValue, Automaton, Streamer};
 use hir_expand::name::Name;
-use indexmap::IndexMap;
 use itertools::Itertools;
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use span::Edition;
 use stdx::{format_to, TupleExt};
 use triomphe::Arc;
 
@@ -17,7 +17,7 @@ use crate::{
     item_scope::{ImportOrExternCrate, ItemInNs},
     nameres::DefMap,
     visibility::Visibility,
-    AssocItemId, ModuleDefId, ModuleId, TraitId,
+    AssocItemId, FxIndexMap, ModuleDefId, ModuleId, TraitId,
 };
 
 /// Item import details stored in the `ImportMap`.
@@ -58,7 +58,6 @@ enum IsTraitAssocItem {
     No,
 }
 
-type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
 type ImportMapIndex = FxIndexMap<ItemInNs, (SmallVec<[ImportInfo; 1]>, IsTraitAssocItem)>;
 
 impl ImportMap {
@@ -67,7 +66,12 @@ impl ImportMap {
         for (k, v) in self.item_to_info_map.iter() {
             format_to!(out, "{:?} ({:?}) -> ", k, v.1);
             for v in &v.0 {
-                format_to!(out, "{}:{:?}, ", v.name.display(db.upcast()), v.container);
+                format_to!(
+                    out,
+                    "{}:{:?}, ",
+                    v.name.display(db.upcast(), Edition::CURRENT),
+                    v.container
+                );
             }
             format_to!(out, "\n");
         }
@@ -75,7 +79,7 @@ impl ImportMap {
     }
 
     pub(crate) fn import_map_query(db: &dyn DefDatabase, krate: CrateId) -> Arc<Self> {
-        let _p = tracing::span!(tracing::Level::INFO, "import_map_query").entered();
+        let _p = tracing::info_span!("import_map_query").entered();
 
         let map = Self::collect_import_map(db, krate);
 
@@ -85,7 +89,7 @@ impl ImportMap {
             .flat_map(|(&item, (info, _))| {
                 info.iter()
                     .enumerate()
-                    .map(move |(idx, info)| (item, info.name.to_smol_str(), idx as u32))
+                    .map(move |(idx, info)| (item, info.name.as_str(), idx as u32))
             })
             .collect();
         importables.sort_by(|(_, l_info, _), (_, r_info, _)| {
@@ -126,7 +130,7 @@ impl ImportMap {
     }
 
     fn collect_import_map(db: &dyn DefDatabase, krate: CrateId) -> ImportMapIndex {
-        let _p = tracing::span!(tracing::Level::INFO, "collect_import_map").entered();
+        let _p = tracing::info_span!("collect_import_map").entered();
 
         let def_map = db.crate_def_map(krate);
         let mut map = FxIndexMap::default();
@@ -163,7 +167,8 @@ impl ImportMap {
                     let attr_id = if let Some(import) = import {
                         match import {
                             ImportOrExternCrate::ExternCrate(id) => Some(id.into()),
-                            ImportOrExternCrate::Import(id) => Some(id.import.into()),
+                            ImportOrExternCrate::Import(id) => Some(id.use_.into()),
+                            ImportOrExternCrate::Glob(id) => Some(id.use_.into()),
                         }
                     } else {
                         match item {
@@ -216,7 +221,7 @@ impl ImportMap {
         is_type_in_ns: bool,
         trait_import_info: &ImportInfo,
     ) {
-        let _p = tracing::span!(tracing::Level::INFO, "collect_trait_assoc_items").entered();
+        let _p = tracing::info_span!("collect_trait_assoc_items").entered();
         for &(ref assoc_item_name, item) in &db.trait_data(tr).items {
             let module_def_id = match item {
                 AssocItemId::FunctionId(f) => ModuleDefId::from(f),
@@ -315,7 +320,7 @@ impl SearchMode {
                     };
                     match m {
                         Some((index, _)) => {
-                            name = &name[index + 1..];
+                            name = name[index..].strip_prefix(|_: char| true).unwrap_or_default();
                             true
                         }
                         None => false,
@@ -398,7 +403,7 @@ pub fn search_dependencies(
     krate: CrateId,
     query: &Query,
 ) -> FxHashSet<ItemInNs> {
-    let _p = tracing::span!(tracing::Level::INFO, "search_dependencies", ?query).entered();
+    let _p = tracing::info_span!("search_dependencies", ?query).entered();
 
     let graph = db.crate_graph();
 
@@ -414,7 +419,7 @@ pub fn search_dependencies(
             for map in &import_maps {
                 op = op.add(map.fst.search(&automaton));
             }
-            search_maps(&import_maps, op.union(), query)
+            search_maps(db, &import_maps, op.union(), query)
         }
         SearchMode::Fuzzy => {
             let automaton = fst::automaton::Subsequence::new(&query.lowercased);
@@ -422,7 +427,7 @@ pub fn search_dependencies(
             for map in &import_maps {
                 op = op.add(map.fst.search(&automaton));
             }
-            search_maps(&import_maps, op.union(), query)
+            search_maps(db, &import_maps, op.union(), query)
         }
         SearchMode::Prefix => {
             let automaton = fst::automaton::Str::new(&query.lowercased).starts_with();
@@ -430,12 +435,13 @@ pub fn search_dependencies(
             for map in &import_maps {
                 op = op.add(map.fst.search(&automaton));
             }
-            search_maps(&import_maps, op.union(), query)
+            search_maps(db, &import_maps, op.union(), query)
         }
     }
 }
 
 fn search_maps(
+    _db: &dyn DefDatabase,
     import_maps: &[Arc<ImportMap>],
     mut stream: fst::map::Union<'_>,
     query: &Query,
@@ -458,11 +464,7 @@ fn search_maps(
                         .then(|| (item, &import_infos[info_idx as usize]))
                 })
                 .filter(|&(_, info)| {
-                    query.search_mode.check(
-                        &query.query,
-                        query.case_sensitive,
-                        &info.name.to_smol_str(),
-                    )
+                    query.search_mode.check(&query.query, query.case_sensitive, info.name.as_str())
                 });
             res.extend(iter.map(TupleExt::head));
         }
@@ -503,7 +505,12 @@ mod tests {
         }
     }
 
-    fn check_search(ra_fixture: &str, crate_name: &str, query: Query, expect: Expect) {
+    fn check_search(
+        #[rust_analyzer::rust_fixture] ra_fixture: &str,
+        crate_name: &str,
+        query: Query,
+        expect: Expect,
+    ) {
         let db = TestDB::with_files(ra_fixture);
         let crate_graph = db.crate_graph();
         let krate = crate_graph
@@ -512,7 +519,7 @@ mod tests {
                 crate_graph[krate]
                     .display_name
                     .as_ref()
-                    .is_some_and(|it| &**it.crate_name() == crate_name)
+                    .is_some_and(|it| it.crate_name().as_str() == crate_name)
             })
             .expect("could not find crate");
 
@@ -577,11 +584,11 @@ mod tests {
         Some(format!(
             "{}::{}",
             render_path(db, &trait_info[0]),
-            assoc_item_name.display(db.upcast())
+            assoc_item_name.display(db.upcast(), Edition::CURRENT)
         ))
     }
 
-    fn check(ra_fixture: &str, expect: Expect) {
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
         let db = TestDB::with_files(ra_fixture);
         let crate_graph = db.crate_graph();
 
@@ -616,7 +623,7 @@ mod tests {
             module = parent;
         }
 
-        segments.iter().rev().map(|it| it.display(db.upcast())).join("::")
+        segments.iter().rev().map(|it| it.display(db.upcast(), Edition::CURRENT)).join("::")
     }
 
     #[test]
@@ -1030,6 +1037,24 @@ pub mod fmt {
                 dep::FMT (t)
                 dep::FMT (v)
             "#]],
+        );
+    }
+
+    #[test]
+    fn unicode_fn_name() {
+        let ra_fixture = r#"
+            //- /main.rs crate:main deps:dep
+            //- /dep.rs crate:dep
+            pub fn あい() {}
+        "#;
+
+        check_search(
+            ra_fixture,
+            "main",
+            Query::new("あ".to_owned()).fuzzy(),
+            expect![[r#"
+            dep::あい (f)
+        "#]],
         );
     }
 }

@@ -2,6 +2,7 @@ mod borrowed_box;
 mod box_collection;
 mod linked_list;
 mod option_option;
+mod owned_cow;
 mod rc_buffer;
 mod rc_mutex;
 mod redundant_allocation;
@@ -9,6 +10,7 @@ mod type_complexity;
 mod utils;
 mod vec_box;
 
+use clippy_config::Conf;
 use rustc_hir as hir;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
@@ -17,8 +19,8 @@ use rustc_hir::{
 };
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::impl_lint_pass;
-use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
+use rustc_span::def_id::LocalDefId;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -217,7 +219,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `Rc<T>` and `Arc<T>` when `T` is a mutable buffer type such as `String` or `Vec`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Expressions such as `Rc<String>` usually have no advantage over `Rc<str>`, since
     /// it is larger and involves an extra level of indirection, and doesn't implement `Borrow<str>`.
     ///
@@ -260,8 +262,59 @@ declare_clippy_lint! {
     /// ### Example
     /// ```no_run
     /// # use std::rc::Rc;
-    /// struct Foo {
-    ///     inner: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>>,
+    /// struct PointMatrixContainer {
+    ///     matrix: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>>,
+    /// }
+    ///
+    /// fn main() {
+    ///     let point_matrix: Vec<Vec<Box<(u32, u32, u32, u32)>>> = vec![
+    ///         vec![
+    ///             Box::new((1, 2, 3, 4)),
+    ///             Box::new((5, 6, 7, 8)),
+    ///         ],
+    ///         vec![
+    ///             Box::new((9, 10, 11, 12)),
+    ///         ],
+    ///     ];
+    ///
+    ///     let shared_point_matrix: Rc<Vec<Vec<Box<(u32, u32, u32, u32)>>>> = Rc::new(point_matrix);
+    ///
+    ///     let container = PointMatrixContainer {
+    ///         matrix: shared_point_matrix,
+    ///     };
+    ///
+    ///     // ...
+    /// }
+    /// ```
+    /// Use instead:
+    /// ### Example
+    /// ```no_run
+    /// # use std::rc::Rc;
+    /// type PointMatrix = Vec<Vec<Box<(u32, u32, u32, u32)>>>;
+    /// type SharedPointMatrix = Rc<PointMatrix>;
+    ///
+    /// struct PointMatrixContainer {
+    ///     matrix: SharedPointMatrix,
+    /// }
+    ///
+    /// fn main() {
+    ///     let point_matrix: PointMatrix = vec![
+    ///         vec![
+    ///             Box::new((1, 2, 3, 4)),
+    ///             Box::new((5, 6, 7, 8)),
+    ///         ],
+    ///         vec![
+    ///             Box::new((9, 10, 11, 12)),
+    ///         ],
+    ///     ];
+    ///
+    ///     let shared_point_matrix: SharedPointMatrix = Rc::new(point_matrix);
+    ///
+    ///     let container = PointMatrixContainer {
+    ///         matrix: shared_point_matrix,
+    ///     };
+    ///
+    ///     // ...
     /// }
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -274,7 +327,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `Rc<Mutex<T>>`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// `Rc` is used in single thread and `Mutex` is used in multi thread.
     /// Consider using `Rc<RefCell<T>>` in single thread or `Arc<Mutex<T>>` in multi thread.
     ///
@@ -303,13 +356,63 @@ declare_clippy_lint! {
     "usage of `Rc<Mutex<T>>`"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Detects needlessly owned `Cow` types.
+    ///
+    /// ### Why is this bad?
+    /// The borrowed types are usually more flexible, in that e.g. a
+    /// `Cow<'_, str>` can accept both `&str` and `String` while
+    /// `Cow<'_, String>` can only accept `&String` and `String`. In
+    /// particular, `&str` is more general, because it allows for string
+    /// literals while `&String` can only be borrowed from a heap-owned
+    /// `String`).
+    ///
+    /// ### Known Problems
+    /// The lint does not check for usage of the type. There may be external
+    /// interfaces that require the use of an owned type.
+    ///
+    /// At least the `CString` type also has a different API than `CStr`: The
+    /// former has an `as_bytes` method which the latter calls `to_bytes`.
+    /// There is no guarantee that other types won't gain additional methods
+    /// leading to a similar mismatch.
+    ///
+    /// In addition, the lint only checks for the known problematic types
+    /// `String`, `Vec<_>`, `CString`, `OsString` and `PathBuf`. Custom types
+    /// that implement `ToOwned` will not be detected.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// let wrogn: std::borrow::Cow<'_, Vec<u8>>;
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// let right: std::borrow::Cow<'_, [u8]>;
+    /// ```
+    #[clippy::version = "1.85.0"]
+    pub OWNED_COW,
+    style,
+    "needlessly owned Cow type"
+}
+
 pub struct Types {
     vec_box_size_threshold: u64,
     type_complexity_threshold: u64,
     avoid_breaking_exported_api: bool,
 }
 
-impl_lint_pass!(Types => [BOX_COLLECTION, VEC_BOX, OPTION_OPTION, LINKEDLIST, BORROWED_BOX, REDUNDANT_ALLOCATION, RC_BUFFER, RC_MUTEX, TYPE_COMPLEXITY]);
+impl_lint_pass!(Types => [
+    BOX_COLLECTION,
+    VEC_BOX,
+    OPTION_OPTION,
+    LINKEDLIST,
+    BORROWED_BOX,
+    REDUNDANT_ALLOCATION,
+    RC_BUFFER,
+    RC_MUTEX,
+    TYPE_COMPLEXITY,
+    OWNED_COW
+]);
 
 impl<'tcx> LateLintPass<'tcx> for Types {
     fn check_fn(
@@ -321,12 +424,10 @@ impl<'tcx> LateLintPass<'tcx> for Types {
         _: Span,
         def_id: LocalDefId,
     ) {
-        let is_in_trait_impl = if let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(
-            cx.tcx
-                .hir()
-                .get_parent_item(cx.tcx.local_def_id_to_hir_id(def_id))
-                .def_id,
-        ) {
+        let is_in_trait_impl = if let hir::Node::Item(item) = cx
+            .tcx
+            .hir_node_by_def_id(cx.tcx.hir_get_parent_item(cx.tcx.local_def_id_to_hir_id(def_id)).def_id)
+        {
             matches!(item.kind, ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }))
         } else {
             false
@@ -339,8 +440,8 @@ impl<'tcx> LateLintPass<'tcx> for Types {
             decl,
             CheckTyContext {
                 is_in_trait_impl,
-                is_exported,
                 in_body: matches!(fn_kind, FnKind::Closure),
+                is_exported,
                 ..CheckTyContext::default()
             },
         );
@@ -368,7 +469,7 @@ impl<'tcx> LateLintPass<'tcx> for Types {
             ImplItemKind::Const(ty, _) => {
                 let is_in_trait_impl = if let hir::Node::Item(item) = cx
                     .tcx
-                    .hir_node_by_def_id(cx.tcx.hir().get_parent_item(item.hir_id()).def_id)
+                    .hir_node_by_def_id(cx.tcx.hir_get_parent_item(item.hir_id()).def_id)
                 {
                     matches!(item.kind, ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }))
                 } else {
@@ -446,11 +547,11 @@ impl<'tcx> LateLintPass<'tcx> for Types {
 }
 
 impl Types {
-    pub fn new(vec_box_size_threshold: u64, type_complexity_threshold: u64, avoid_breaking_exported_api: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            vec_box_size_threshold,
-            type_complexity_threshold,
-            avoid_breaking_exported_api,
+            vec_box_size_threshold: conf.vec_box_size_threshold,
+            type_complexity_threshold: conf.type_complexity_threshold,
+            avoid_breaking_exported_api: conf.avoid_breaking_exported_api,
         }
     }
 
@@ -509,6 +610,7 @@ impl Types {
                         triggered |= option_option::check(cx, hir_ty, qpath, def_id);
                         triggered |= linked_list::check(cx, hir_ty, def_id);
                         triggered |= rc_mutex::check(cx, hir_ty, qpath, def_id);
+                        triggered |= owned_cow::check(cx, qpath, def_id);
 
                         if triggered {
                             return;
@@ -528,7 +630,7 @@ impl Types {
                                     _ => None,
                                 })
                         }) {
-                            self.check_ty(cx, ty, context);
+                            self.check_ty(cx, ty.as_unambig_ty(), context);
                         }
                     },
                     QPath::Resolved(None, p) => {
@@ -542,7 +644,7 @@ impl Types {
                                     _ => None,
                                 })
                         }) {
-                            self.check_ty(cx, ty, context);
+                            self.check_ty(cx, ty.as_unambig_ty(), context);
                         }
                     },
                     QPath::TypeRelative(ty, seg) => {
@@ -553,11 +655,19 @@ impl Types {
                                 GenericArg::Type(ty) => Some(ty),
                                 _ => None,
                             }) {
-                                self.check_ty(cx, ty, context);
+                                self.check_ty(cx, ty.as_unambig_ty(), context);
                             }
                         }
                     },
                     QPath::LangItem(..) => {},
+                }
+            },
+            TyKind::Path(ref qpath) => {
+                let res = cx.qpath_res(qpath, hir_ty.hir_id);
+                if let Some(def_id) = res.opt_def_id()
+                    && self.is_type_change_allowed(context)
+                {
+                    owned_cow::check(cx, qpath, def_id);
                 }
             },
             TyKind::Ref(lt, ref mut_ty) => {

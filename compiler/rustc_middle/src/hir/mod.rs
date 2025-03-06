@@ -6,17 +6,18 @@ pub mod map;
 pub mod nested_filter;
 pub mod place;
 
-use crate::query::Providers;
-use crate::ty::{EarlyBinder, ImplSubject, TyCtxt};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::sorted_map::SortedMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::{try_par_for_each_in, DynSend, DynSync};
+use rustc_data_structures::sync::{DynSend, DynSync, try_par_for_each_in};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::*;
 use rustc_macros::{Decodable, Encodable, HashStable};
 use rustc_span::{ErrorGuaranteed, ExpnId};
+
+use crate::query::Providers;
+use crate::ty::{EarlyBinder, ImplSubject, TyCtxt};
 
 /// Gather the LocalDefId for each item-like within a module, including items contained within
 /// bodies. The Ids are in visitor order. This is used to partition a pass between modules.
@@ -27,7 +28,9 @@ pub struct ModuleItems {
     trait_items: Box<[TraitItemId]>,
     impl_items: Box<[ImplItemId]>,
     foreign_items: Box<[ForeignItemId]>,
+    opaques: Box<[LocalDefId]>,
     body_owners: Box<[LocalDefId]>,
+    nested_bodies: Box<[LocalDefId]>,
 }
 
 impl ModuleItems {
@@ -37,25 +40,25 @@ impl ModuleItems {
     /// include foreign items. If you want to e.g. get all functions, use `definitions()` below.
     ///
     /// However, this does include the `impl` blocks themselves.
-    pub fn free_items(&self) -> impl Iterator<Item = ItemId> + '_ {
+    pub fn free_items(&self) -> impl Iterator<Item = ItemId> {
         self.free_items.iter().copied()
     }
 
-    pub fn trait_items(&self) -> impl Iterator<Item = TraitItemId> + '_ {
+    pub fn trait_items(&self) -> impl Iterator<Item = TraitItemId> {
         self.trait_items.iter().copied()
     }
 
     /// Returns all items that are associated with some `impl` block (both inherent and trait impl
     /// blocks).
-    pub fn impl_items(&self) -> impl Iterator<Item = ImplItemId> + '_ {
+    pub fn impl_items(&self) -> impl Iterator<Item = ImplItemId> {
         self.impl_items.iter().copied()
     }
 
-    pub fn foreign_items(&self) -> impl Iterator<Item = ForeignItemId> + '_ {
+    pub fn foreign_items(&self) -> impl Iterator<Item = ForeignItemId> {
         self.foreign_items.iter().copied()
     }
 
-    pub fn owners(&self) -> impl Iterator<Item = OwnerId> + '_ {
+    pub fn owners(&self) -> impl Iterator<Item = OwnerId> {
         self.free_items
             .iter()
             .map(|id| id.owner_id)
@@ -64,7 +67,15 @@ impl ModuleItems {
             .chain(self.foreign_items.iter().map(|id| id.owner_id))
     }
 
-    pub fn definitions(&self) -> impl Iterator<Item = LocalDefId> + '_ {
+    pub fn opaques(&self) -> impl Iterator<Item = LocalDefId> {
+        self.opaques.iter().copied()
+    }
+
+    pub fn nested_bodies(&self) -> impl Iterator<Item = LocalDefId> {
+        self.nested_bodies.iter().copied()
+    }
+
+    pub fn definitions(&self) -> impl Iterator<Item = LocalDefId> {
         self.owners().map(|id| id.def_id)
     }
 
@@ -95,6 +106,13 @@ impl ModuleItems {
     ) -> Result<(), ErrorGuaranteed> {
         try_par_for_each_in(&self.foreign_items[..], |&id| f(id))
     }
+
+    pub fn par_opaques(
+        &self,
+        f: impl Fn(LocalDefId) -> Result<(), ErrorGuaranteed> + DynSend + DynSync,
+    ) -> Result<(), ErrorGuaranteed> {
+        try_par_for_each_in(&self.opaques[..], |&id| f(id))
+    }
 }
 
 impl<'tcx> TyCtxt<'tcx> {
@@ -121,7 +139,7 @@ impl<'tcx> TyCtxt<'tcx> {
         LocalModDefId::new_unchecked(id)
     }
 
-    pub fn impl_subject(self, def_id: DefId) -> EarlyBinder<ImplSubject<'tcx>> {
+    pub fn impl_subject(self, def_id: DefId) -> EarlyBinder<'tcx, ImplSubject<'tcx>> {
         match self.impl_trait_ref(def_id) {
             Some(t) => t.map_bound(ImplSubject::Trait),
             None => self.type_of(def_id).map_bound(ImplSubject::Inherent),
@@ -138,7 +156,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         node: OwnerNode<'_>,
         bodies: &SortedMap<ItemLocalId, &Body<'_>>,
-        attrs: &SortedMap<ItemLocalId, &[rustc_ast::Attribute]>,
+        attrs: &SortedMap<ItemLocalId, &[Attribute]>,
     ) -> (Option<Fingerprint>, Option<Fingerprint>) {
         if self.needs_crate_hash() {
             self.with_stable_hashing_context(|mut hcx| {
@@ -194,9 +212,8 @@ pub fn provide(providers: &mut Providers) {
     };
     providers.fn_arg_names = |tcx, def_id| {
         let hir = tcx.hir();
-        let hir_id = tcx.local_def_id_to_hir_id(def_id);
-        if let Some(body_id) = hir.maybe_body_owned_by(def_id) {
-            tcx.arena.alloc_from_iter(hir.body_param_names(body_id))
+        if let Some(body_id) = tcx.hir_node_by_def_id(def_id).body_id() {
+            tcx.arena.alloc_from_iter(tcx.hir_body_param_names(body_id))
         } else if let Node::TraitItem(&TraitItem {
             kind: TraitItemKind::Fn(_, TraitFn::Required(idents)),
             ..
@@ -204,11 +221,15 @@ pub fn provide(providers: &mut Providers) {
         | Node::ForeignItem(&ForeignItem {
             kind: ForeignItemKind::Fn(_, idents, _),
             ..
-        }) = tcx.hir_node(hir_id)
+        }) = tcx.hir_node(tcx.local_def_id_to_hir_id(def_id))
         {
             idents
         } else {
-            span_bug!(hir.span(hir_id), "fn_arg_names: unexpected item {:?}", def_id);
+            span_bug!(
+                hir.span(tcx.local_def_id_to_hir_id(def_id)),
+                "fn_arg_names: unexpected item {:?}",
+                def_id
+            );
         }
     };
     providers.all_local_trait_impls = |tcx, ()| &tcx.resolutions(()).trait_impls;

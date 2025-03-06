@@ -1,21 +1,16 @@
-use super::operand::{OperandRef, OperandValue};
-use super::place::PlaceRef;
-use super::FunctionCx;
-use crate::errors;
-use crate::errors::InvalidMonomorphization;
-use crate::meth;
-use crate::size_of_val;
-use crate::traits::*;
-use crate::MemFlags;
-
+use rustc_abi::WrappingRange;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config::OptLevel;
-use rustc_span::{sym, Span};
-use rustc_target::abi::{
-    call::{FnAbi, PassMode},
-    WrappingRange,
-};
+use rustc_span::{Span, sym};
+use rustc_target::callconv::{FnAbi, PassMode};
+
+use super::FunctionCx;
+use super::operand::OperandRef;
+use super::place::PlaceRef;
+use crate::errors::InvalidMonomorphization;
+use crate::traits::*;
+use crate::{MemFlags, errors, meth, size_of_val};
 
 fn copy_intrinsic<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
@@ -64,14 +59,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llresult: Bx::Value,
         span: Span,
     ) -> Result<(), ty::Instance<'tcx>> {
-        let callee_ty = instance.ty(bx.tcx(), ty::ParamEnv::reveal_all());
+        let callee_ty = instance.ty(bx.tcx(), bx.typing_env());
 
         let ty::FnDef(def_id, fn_args) = *callee_ty.kind() else {
             bug!("expected fn item type, found {}", callee_ty);
         };
 
         let sig = callee_ty.fn_sig(bx.tcx());
-        let sig = bx.tcx().normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), sig);
+        let sig = bx.tcx().normalize_erasing_late_bound_regions(bx.typing_env(), sig);
         let arg_tys = sig.inputs();
         let ret_ty = sig.output();
         let name = bx.tcx().item_name(def_id);
@@ -80,7 +75,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         // If we're swapping something that's *not* an `OperandValue::Ref`,
         // then we can do it directly and avoid the alloca.
         // Otherwise, we'll let the fallback MIR body take care of it.
-        if let sym::typed_swap = name {
+        if let sym::typed_swap_nonoverlapping = name {
             let pointee_ty = fn_args.type_at(0);
             let pointee_layout = bx.layout_of(pointee_ty);
             if !bx.is_backend_ref(pointee_layout)
@@ -93,9 +88,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 // into the (unoptimized) direct swapping implementation, so we disable it.
                 || bx.sess().target.arch == "spirv"
             {
-                let x_place = PlaceRef::new_sized(args[0].immediate(), pointee_layout);
-                let y_place = PlaceRef::new_sized(args[1].immediate(), pointee_layout);
-                bx.typed_place_swap(x_place, y_place);
+                let align = pointee_layout.align.abi;
+                let x_place = args[0].val.deref(align);
+                let y_place = args[1].val.deref(align);
+                bx.typed_place_swap(x_place, y_place, pointee_layout);
                 return Ok(());
             }
         }
@@ -113,15 +109,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             sym::va_end => bx.va_end(args[0].immediate()),
             sym::size_of_val => {
                 let tp_ty = fn_args.type_at(0);
-                let meta =
-                    if let OperandValue::Pair(_, meta) = args[0].val { Some(meta) } else { None };
+                let (_, meta) = args[0].val.pointer_parts();
                 let (llsize, _) = size_of_val::size_and_align_of_dst(bx, tp_ty, meta);
                 llsize
             }
             sym::min_align_of_val => {
                 let tp_ty = fn_args.type_at(0);
-                let meta =
-                    if let OperandValue::Pair(_, meta) = args[0].val { Some(meta) } else { None };
+                let (_, meta) = args[0].val.pointer_parts();
                 let (_, llalign) = size_of_val::size_and_align_of_dst(bx, tp_ty, meta);
                 llalign
             }
@@ -132,7 +126,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     sym::vtable_align => ty::COMMON_VTABLE_ENTRIES_ALIGN,
                     _ => bug!(),
                 };
-                let value = meth::VirtualIndex::from_index(idx).get_usize(bx, vtable);
+                let value = meth::VirtualIndex::from_index(idx).get_usize(bx, vtable, callee_ty);
                 match name {
                     // Size is always <= isize::MAX.
                     sym::vtable_size => {
@@ -152,10 +146,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             | sym::type_id
             | sym::type_name
             | sym::variant_count => {
-                let value = bx
-                    .tcx()
-                    .const_eval_instance(ty::ParamEnv::reveal_all(), instance, span)
-                    .unwrap();
+                let value = bx.tcx().const_eval_instance(bx.typing_env(), instance, span).unwrap();
                 OperandRef::from_const(bx, value, ret_ty).immediate_or_packed_pair(bx)
             }
             sym::arith_offset => {
@@ -233,6 +224,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let dst = args[0].deref(bx.cx());
                 args[1].val.unaligned_volatile_store(bx, dst);
                 return Ok(());
+            }
+            sym::disjoint_bitor => {
+                let a = args[0].immediate();
+                let b = args[1].immediate();
+                bx.or_disjoint(a, b)
             }
             sym::exact_div => {
                 let ty = arg_tys[0];
@@ -371,7 +367,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             bx.sess().dcx().emit_fatal(errors::AtomicCompareExchange);
                         };
                         let ty = fn_args.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_raw_ptr() {
                             let weak = instruction == "cxchgweak";
                             let dst = args[0].immediate();
                             let cmp = args[1].immediate();
@@ -399,7 +395,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                     "load" => {
                         let ty = fn_args.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_raw_ptr() {
                             let layout = bx.layout_of(ty);
                             let size = layout.size;
                             let source = args[0].immediate();
@@ -417,7 +413,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                     "store" => {
                         let ty = fn_args.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_raw_ptr() {
                             let size = bx.layout_of(ty).size;
                             let val = args[1].immediate();
                             let ptr = args[0].immediate();
@@ -462,7 +458,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         };
 
                         let ty = fn_args.type_at(0);
-                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_unsafe_ptr() {
+                        if int_type_width_signed(ty, bx.tcx()).is_some() || ty.is_raw_ptr() {
                             let ptr = args[0].immediate();
                             let val = args[1].immediate();
                             bx.atomic_rmw(atom_op, ptr, val, parse_ordering(bx, ordering))
@@ -502,6 +498,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     let d = bx.unchecked_usub(a, b);
                     bx.exactudiv(d, pointee_size)
                 }
+            }
+
+            sym::cold_path => {
+                // This is a no-op. The intrinsic is just a hint to the optimizer.
+                return Ok(());
             }
 
             _ => {

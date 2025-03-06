@@ -1,8 +1,12 @@
 //! Discovery of `cargo` & `rustc` executables.
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
-
-use std::{env, iter, path::PathBuf};
+use std::{
+    env,
+    ffi::OsStr,
+    iter,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -23,7 +27,7 @@ impl Tool {
     ///
     /// The current implementation checks three places for an executable to use:
     /// 1) `$CARGO_HOME/bin/<executable_name>`
-    ///      where $CARGO_HOME defaults to ~/.cargo (see https://doc.rust-lang.org/cargo/guide/cargo-home.html)
+    ///      where $CARGO_HOME defaults to ~/.cargo (see <https://doc.rust-lang.org/cargo/guide/cargo-home.html>)
     ///      example: for cargo, this tries $CARGO_HOME/bin/cargo, or ~/.cargo/bin/cargo if $CARGO_HOME is unset.
     ///      It seems that this is a reasonable place to try for cargo, rustc, and rustup
     /// 2) Appropriate environment variable (erroring if this is set but not a usable executable)
@@ -45,7 +49,7 @@ impl Tool {
     ///      example: for cargo, this tries all paths in $PATH with appended `cargo`, returning the
     ///      first that exists
     /// 3) `$CARGO_HOME/bin/<executable_name>`
-    ///      where $CARGO_HOME defaults to ~/.cargo (see https://doc.rust-lang.org/cargo/guide/cargo-home.html)
+    ///      where $CARGO_HOME defaults to ~/.cargo (see <https://doc.rust-lang.org/cargo/guide/cargo-home.html>)
     ///      example: for cargo, this tries $CARGO_HOME/bin/cargo, or ~/.cargo/bin/cargo if $CARGO_HOME is unset.
     ///      It seems that this is a reasonable place to try for cargo, rustc, and rustup
     /// 4) If all else fails, we just try to use the executable name directly
@@ -65,6 +69,14 @@ impl Tool {
             Tool::Rustfmt => "rustfmt",
         }
     }
+}
+
+pub fn command(cmd: impl AsRef<OsStr>, working_directory: impl AsRef<Path>) -> Command {
+    // we are `toolchain::command``
+    #[allow(clippy::disallowed_methods)]
+    let mut cmd = Command::new(cmd);
+    cmd.current_dir(working_directory);
+    cmd
 }
 
 fn invoke(list: &[fn(&str) -> Option<Utf8PathBuf>], executable: &str) -> Utf8PathBuf {
@@ -104,7 +116,6 @@ fn lookup_in_path(exec: &str) -> Option<Utf8PathBuf> {
     let paths = env::var_os("PATH").unwrap_or_default();
     env::split_paths(&paths)
         .map(|path| path.join(exec))
-        .map(PathBuf::from)
         .map(Utf8PathBuf::try_from)
         .filter_map(Result::ok)
         .find_map(probe_for_binary)

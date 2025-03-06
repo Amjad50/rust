@@ -47,10 +47,16 @@ TrivialTypeTraversalImpls! {
     u16,
     u32,
     u64,
-    String,
-    crate::DebruijnIndex,
+    // tidy-alphabetical-start
     crate::AliasRelationDirection,
+    crate::BoundConstness,
+    crate::DebruijnIndex,
+    crate::PredicatePolarity,
+    crate::solve::BuiltinImplSource,
+    crate::solve::Certainty,
+    crate::solve::GoalSource,
     crate::UniverseIndex,
+    crate::Variance,
     rustc_ast_ir::Mutability,
-    rustc_ast_ir::Movability,
+    // tidy-alphabetical-end
 }

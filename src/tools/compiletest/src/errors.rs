@@ -1,15 +1,15 @@
-use self::WhichLine::*;
-
 use std::fmt;
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::BufReader;
+use std::io::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
 use regex::Regex;
 use tracing::*;
+
+use self::WhichLine::*;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ErrorKind {
@@ -57,6 +57,18 @@ pub struct Error {
     pub msg: String,
 }
 
+impl Error {
+    pub fn render_for_expected(&self) -> String {
+        use colored::Colorize;
+        format!(
+            "{: <10}line {: >3}: {}",
+            self.kind.map(|kind| kind.to_string()).unwrap_or_default().to_uppercase(),
+            self.line_num,
+            self.msg.cyan(),
+        )
+    }
+}
+
 #[derive(PartialEq, Debug)]
 enum WhichLine {
     ThisLine,
@@ -89,6 +101,8 @@ pub fn load_errors(testfile: &Path, revision: Option<&str>) -> Vec<Error> {
 
     rdr.lines()
         .enumerate()
+        // We want to ignore utf-8 failures in tests during collection of annotations.
+        .filter(|(_, line)| line.is_ok())
         .filter_map(|(line_num, line)| {
             parse_expected(last_nonfollow_error, line_num + 1, &line.unwrap(), revision).map(
                 |(which, error)| {

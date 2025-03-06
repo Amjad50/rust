@@ -1,14 +1,16 @@
-use crate::mir::{Operand, Place, Rvalue, StatementKind, UnwindAction, VarDebugInfoContents};
-use crate::ty::{Const, IndexedVal, Ty};
-use crate::{with, Body, Mutability};
-use fmt::{Display, Formatter};
+//! Implement methods to pretty print stable MIR body.
 use std::fmt::Debug;
 use std::io::Write;
 use std::{fmt, io, iter};
 
-use super::{AssertMessage, BinOp, TerminatorKind};
+use fmt::{Display, Formatter};
 
-use super::{BorrowKind, FakeBorrowKind};
+use super::{AggregateKind, AssertMessage, BinOp, BorrowKind, FakeBorrowKind, TerminatorKind};
+use crate::mir::{
+    Operand, Place, RawPtrKind, Rvalue, StatementKind, UnwindAction, VarDebugInfoContents,
+};
+use crate::ty::{AdtKind, IndexedVal, MirConst, Ty, TyConst};
+use crate::{Body, CrateDef, Mutability, with};
 
 impl Display for Ty {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -23,11 +25,12 @@ impl Debug for Place {
 }
 
 pub(crate) fn function_body<W: Write>(writer: &mut W, body: &Body, name: &str) -> io::Result<()> {
-    write!(writer, "fn {}(", name)?;
-    body.arg_locals()
-        .iter()
-        .enumerate()
-        .try_for_each(|(index, local)| write!(writer, "_{}: {}", index + 1, local.ty))?;
+    write!(writer, "fn {name}(")?;
+    let mut sep = "";
+    for (index, local) in body.arg_locals().iter().enumerate() {
+        write!(writer, "{}_{}: {}", sep, index + 1, local.ty)?;
+        sep = ", ";
+    }
     write!(writer, ")")?;
 
     let return_local = body.ret_local();
@@ -46,7 +49,7 @@ pub(crate) fn function_body<W: Write>(writer: &mut W, body: &Body, name: &str) -
             VarDebugInfoContents::Place(place) => {
                 format!("{place:?}")
             }
-            VarDebugInfoContents::Const(constant) => pretty_const(&constant.const_),
+            VarDebugInfoContents::Const(constant) => pretty_mir_const(&constant.const_),
         };
         writeln!(writer, "    debug {} => {};", info.name, content)
     })?;
@@ -55,7 +58,7 @@ pub(crate) fn function_body<W: Write>(writer: &mut W, body: &Body, name: &str) -
         .iter()
         .enumerate()
         .map(|(index, block)| -> io::Result<()> {
-            writeln!(writer, "    bb{}: {{", index)?;
+            writeln!(writer, "    bb{index}: {{")?;
             let _ = block
                 .statements
                 .iter()
@@ -74,39 +77,40 @@ pub(crate) fn function_body<W: Write>(writer: &mut W, body: &Body, name: &str) -
 }
 
 fn pretty_statement<W: Write>(writer: &mut W, statement: &StatementKind) -> io::Result<()> {
+    const INDENT: &str = "        ";
     match statement {
         StatementKind::Assign(place, rval) => {
-            write!(writer, "        {:?} = ", place)?;
+            write!(writer, "{INDENT}{place:?} = ")?;
             pretty_rvalue(writer, rval)?;
             writeln!(writer, ";")
         }
         // FIXME: Add rest of the statements
         StatementKind::FakeRead(cause, place) => {
-            writeln!(writer, "FakeRead({cause:?}, {place:?});")
+            writeln!(writer, "{INDENT}FakeRead({cause:?}, {place:?});")
         }
         StatementKind::SetDiscriminant { place, variant_index } => {
-            writeln!(writer, "discriminant({place:?} = {};", variant_index.to_index())
+            writeln!(writer, "{INDENT}discriminant({place:?} = {};", variant_index.to_index())
         }
         StatementKind::Deinit(place) => writeln!(writer, "Deinit({place:?};"),
         StatementKind::StorageLive(local) => {
-            writeln!(writer, "StorageLive(_{local});")
+            writeln!(writer, "{INDENT}StorageLive(_{local});")
         }
         StatementKind::StorageDead(local) => {
-            writeln!(writer, "StorageDead(_{local});")
+            writeln!(writer, "{INDENT}StorageDead(_{local});")
         }
         StatementKind::Retag(kind, place) => writeln!(writer, "Retag({kind:?}, {place:?});"),
         StatementKind::PlaceMention(place) => {
-            writeln!(writer, "PlaceMention({place:?};")
+            writeln!(writer, "{INDENT}PlaceMention({place:?};")
         }
         StatementKind::ConstEvalCounter => {
-            writeln!(writer, "ConstEvalCounter;")
+            writeln!(writer, "{INDENT}ConstEvalCounter;")
         }
-        StatementKind::Nop => writeln!(writer, "nop;"),
+        StatementKind::Nop => writeln!(writer, "{INDENT}nop;"),
         StatementKind::AscribeUserType { .. }
         | StatementKind::Coverage(_)
         | StatementKind::Intrinsic(_) => {
             // FIX-ME: Make them pretty.
-            writeln!(writer, "{statement:?};")
+            writeln!(writer, "{INDENT}{statement:?};")
         }
     }
 }
@@ -156,7 +160,7 @@ fn pretty_terminator<W: Write>(writer: &mut W, terminator: &TerminatorKind) -> i
 
 fn pretty_terminator_head<W: Write>(writer: &mut W, terminator: &TerminatorKind) -> io::Result<()> {
     use self::TerminatorKind::*;
-    const INDENT: &'static str = "        ";
+    const INDENT: &str = "        ";
     match terminator {
         Goto { .. } => write!(writer, "{INDENT}goto"),
         SwitchInt { discr, .. } => {
@@ -166,7 +170,7 @@ fn pretty_terminator_head<W: Write>(writer: &mut W, terminator: &TerminatorKind)
         Abort => write!(writer, "{INDENT}abort"),
         Return => write!(writer, "{INDENT}return"),
         Unreachable => write!(writer, "{INDENT}unreachable"),
-        Drop { place, .. } => write!(writer, "{INDENT}drop({:?})", place),
+        Drop { place, .. } => write!(writer, "{INDENT}drop({place:?})"),
         Call { func, args, destination, .. } => {
             write!(writer, "{INDENT}{:?} = {}(", destination, pretty_operand(func))?;
             let mut args_iter = args.iter();
@@ -179,7 +183,7 @@ fn pretty_terminator_head<W: Write>(writer: &mut W, terminator: &TerminatorKind)
             if !expected {
                 write!(writer, "!")?;
             }
-            write!(writer, "{}, ", &pretty_operand(cond))?;
+            write!(writer, "{}, ", pretty_operand(cond))?;
             pretty_assert_message(writer, msg)?;
             write!(writer, ")")
         }
@@ -190,7 +194,9 @@ fn pretty_terminator_head<W: Write>(writer: &mut W, terminator: &TerminatorKind)
 fn pretty_successor_labels(terminator: &TerminatorKind) -> Vec<String> {
     use self::TerminatorKind::*;
     match terminator {
-        Resume | Abort | Return | Unreachable => vec![],
+        Call { target: None, unwind: UnwindAction::Cleanup(_), .. }
+        | InlineAsm { destination: None, .. } => vec!["unwind".into()],
+        Resume | Abort | Return | Unreachable | Call { target: None, unwind: _, .. } => vec![],
         Goto { .. } => vec!["".to_string()],
         SwitchInt { targets, .. } => targets
             .branches()
@@ -198,19 +204,15 @@ fn pretty_successor_labels(terminator: &TerminatorKind) -> Vec<String> {
             .chain(iter::once("otherwise".into()))
             .collect(),
         Drop { unwind: UnwindAction::Cleanup(_), .. } => vec!["return".into(), "unwind".into()],
-        Drop { unwind: _, .. } => vec!["return".into()],
         Call { target: Some(_), unwind: UnwindAction::Cleanup(_), .. } => {
             vec!["return".into(), "unwind".into()]
         }
-        Call { target: Some(_), unwind: _, .. } => vec!["return".into()],
-        Call { target: None, unwind: UnwindAction::Cleanup(_), .. } => vec!["unwind".into()],
-        Call { target: None, unwind: _, .. } => vec![],
+        Drop { unwind: _, .. } | Call { target: Some(_), unwind: _, .. } => vec!["return".into()],
         Assert { unwind: UnwindAction::Cleanup(_), .. } => {
             vec!["success".into(), "unwind".into()]
         }
         Assert { unwind: _, .. } => vec!["success".into()],
         InlineAsm { destination: Some(_), .. } => vec!["goto".into(), "unwind".into()],
-        InlineAsm { destination: None, .. } => vec!["unwind".into()],
     }
 }
 
@@ -296,6 +298,9 @@ fn pretty_assert_message<W: Write>(writer: &mut W, msg: &AssertMessage) -> io::R
                 "\"misaligned pointer dereference: address must be a multiple of {{}} but is {{}}\",{pretty_required}, {pretty_found}"
             )
         }
+        AssertMessage::NullPointerDereference => {
+            write!(writer, "\"null pointer dereference occurred\"")
+        }
         AssertMessage::ResumedAfterReturn(_) | AssertMessage::ResumedAfterPanic(_) => {
             write!(writer, "{}", msg.description().unwrap())
         }
@@ -305,49 +310,49 @@ fn pretty_assert_message<W: Write>(writer: &mut W, msg: &AssertMessage) -> io::R
 fn pretty_operand(operand: &Operand) -> String {
     match operand {
         Operand::Copy(copy) => {
-            format!("{:?}", copy)
+            format!("{copy:?}")
         }
         Operand::Move(mv) => {
-            format!("move {:?}", mv)
+            format!("move {mv:?}")
         }
-        Operand::Constant(cnst) => pretty_const(&cnst.literal),
+        Operand::Constant(cnst) => pretty_mir_const(&cnst.const_),
     }
 }
 
-fn pretty_const(literal: &Const) -> String {
-    with(|cx| cx.const_pretty(&literal))
+fn pretty_mir_const(literal: &MirConst) -> String {
+    with(|cx| cx.mir_const_pretty(literal))
+}
+
+fn pretty_ty_const(ct: &TyConst) -> String {
+    with(|cx| cx.ty_const_pretty(ct.id))
 }
 
 fn pretty_rvalue<W: Write>(writer: &mut W, rval: &Rvalue) -> io::Result<()> {
     match rval {
         Rvalue::AddressOf(mutability, place) => {
-            write!(writer, "&raw {}(*{:?})", &pretty_mut(*mutability), place)
+            write!(writer, "&raw {} {:?}", pretty_raw_ptr_kind(*mutability), place)
         }
         Rvalue::Aggregate(aggregate_kind, operands) => {
             // FIXME: Add pretty_aggregate function that returns a pretty string
-            write!(writer, "{aggregate_kind:?} (")?;
-            let mut op_iter = operands.iter();
-            op_iter.next().map_or(Ok(()), |op| write!(writer, "{}", pretty_operand(op)))?;
-            op_iter.try_for_each(|op| write!(writer, ", {}", pretty_operand(op)))?;
-            write!(writer, ")")
+            pretty_aggregate(writer, aggregate_kind, operands)
         }
         Rvalue::BinaryOp(bin, op1, op2) => {
-            write!(writer, "{:?}({}, {})", bin, &pretty_operand(op1), pretty_operand(op2))
+            write!(writer, "{:?}({}, {})", bin, pretty_operand(op1), pretty_operand(op2))
         }
         Rvalue::Cast(_, op, ty) => {
             write!(writer, "{} as {}", pretty_operand(op), ty)
         }
         Rvalue::CheckedBinaryOp(bin, op1, op2) => {
-            write!(writer, "Checked{:?}({}, {})", bin, &pretty_operand(op1), pretty_operand(op2))
+            write!(writer, "Checked{:?}({}, {})", bin, pretty_operand(op1), pretty_operand(op2))
         }
         Rvalue::CopyForDeref(deref) => {
-            write!(writer, "CopyForDeref({:?})", deref)
+            write!(writer, "CopyForDeref({deref:?})")
         }
         Rvalue::Discriminant(place) => {
-            write!(writer, "discriminant({:?})", place)
+            write!(writer, "discriminant({place:?})")
         }
         Rvalue::Len(len) => {
-            write!(writer, "len({:?})", len)
+            write!(writer, "len({len:?})")
         }
         Rvalue::Ref(_, borrowkind, place) => {
             let kind = match borrowkind {
@@ -356,28 +361,92 @@ fn pretty_rvalue<W: Write>(writer: &mut W, rval: &Rvalue) -> io::Result<()> {
                 BorrowKind::Fake(FakeBorrowKind::Shallow) => "&fake shallow ",
                 BorrowKind::Mut { .. } => "&mut ",
             };
-            write!(writer, "{kind}{:?}", place)
+            write!(writer, "{kind}{place:?}")
         }
         Rvalue::Repeat(op, cnst) => {
-            write!(writer, "{} \" \" {}", &pretty_operand(op), cnst.ty())
+            write!(writer, "[{}; {}]", pretty_operand(op), pretty_ty_const(cnst))
         }
         Rvalue::ShallowInitBox(_, _) => Ok(()),
         Rvalue::ThreadLocalRef(item) => {
-            write!(writer, "thread_local_ref{:?}", item)
+            write!(writer, "thread_local_ref{item:?}")
         }
         Rvalue::NullaryOp(nul, ty) => {
-            write!(writer, "{:?} {} \" \"", nul, ty)
+            write!(writer, "{nul:?}::<{ty}>() \" \"")
         }
         Rvalue::UnaryOp(un, op) => {
-            write!(writer, "{} \" \" {:?}", pretty_operand(op), un)
+            write!(writer, "{:?}({})", un, pretty_operand(op))
         }
         Rvalue::Use(op) => write!(writer, "{}", pretty_operand(op)),
     }
+}
+
+fn pretty_aggregate<W: Write>(
+    writer: &mut W,
+    aggregate_kind: &AggregateKind,
+    operands: &Vec<Operand>,
+) -> io::Result<()> {
+    let suffix = match aggregate_kind {
+        AggregateKind::Array(_) => {
+            write!(writer, "[")?;
+            "]"
+        }
+        AggregateKind::Tuple => {
+            write!(writer, "(")?;
+            ")"
+        }
+        AggregateKind::Adt(def, var, _, _, _) => {
+            if def.kind() == AdtKind::Enum {
+                write!(writer, "{}::{}", def.name(), def.variant(*var).unwrap().name())?;
+            } else {
+                write!(writer, "{}", def.variant(*var).unwrap().name())?;
+            }
+            if operands.is_empty() {
+                return Ok(());
+            }
+            // FIXME: Change this once we have CtorKind in StableMIR.
+            write!(writer, "(")?;
+            ")"
+        }
+        AggregateKind::Closure(def, _) => {
+            write!(writer, "{{closure@{}}}(", def.span().diagnostic())?;
+            ")"
+        }
+        AggregateKind::Coroutine(def, _, _) => {
+            write!(writer, "{{coroutine@{}}}(", def.span().diagnostic())?;
+            ")"
+        }
+        AggregateKind::CoroutineClosure(def, _) => {
+            write!(writer, "{{coroutine-closure@{}}}(", def.span().diagnostic())?;
+            ")"
+        }
+        AggregateKind::RawPtr(ty, mutability) => {
+            write!(
+                writer,
+                "*{} {ty} from (",
+                if *mutability == Mutability::Mut { "mut" } else { "const" }
+            )?;
+            ")"
+        }
+    };
+    let mut separator = "";
+    for op in operands {
+        write!(writer, "{}{}", separator, pretty_operand(op))?;
+        separator = ", ";
+    }
+    write!(writer, "{suffix}")
 }
 
 fn pretty_mut(mutability: Mutability) -> &'static str {
     match mutability {
         Mutability::Not => " ",
         Mutability::Mut => "mut ",
+    }
+}
+
+fn pretty_raw_ptr_kind(kind: RawPtrKind) -> &'static str {
+    match kind {
+        RawPtrKind::Const => "const",
+        RawPtrKind::Mut => "mut",
+        RawPtrKind::FakeForPtrMetadata => "const (fake)",
     }
 }

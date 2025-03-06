@@ -1,9 +1,10 @@
 use std::iter;
 
-use hir::{db::ExpandDatabase, Adt, HasSource, HirDisplay, InFile, Struct, Union};
+use either::Either;
+use hir::{db::ExpandDatabase, Adt, FileRange, HasSource, HirDisplay, InFile, Struct, Union};
+use ide_db::text_edit::TextEdit;
 use ide_db::{
     assists::{Assist, AssistId, AssistKind},
-    base_db::FileRange,
     helpers::is_editable_crate,
     label::Label,
     source_change::{SourceChange, SourceChangeBuilder},
@@ -17,7 +18,6 @@ use syntax::{
     ast::{edit::AstNodeEdit, Type},
     SyntaxNode,
 };
-use text_edit::TextEdit;
 
 use crate::{adjusted_display_range, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
@@ -37,12 +37,12 @@ pub(crate) fn unresolved_field(
         DiagnosticCode::RustcHardError("E0559"),
         format!(
             "no field `{}` on type `{}`{method_suffix}",
-            d.name.display(ctx.sema.db),
-            d.receiver.display(ctx.sema.db)
+            d.name.display(ctx.sema.db, ctx.edition),
+            d.receiver.display(ctx.sema.db, ctx.edition)
         ),
         adjusted_display_range(ctx, d.expr, &|expr| {
             Some(
-                match expr {
+                match expr.left()? {
                     ast::Expr::MethodCallExpr(it) => it.name_ref(),
                     ast::Expr::FieldExpr(it) => it.name_ref(),
                     _ => None,
@@ -73,10 +73,10 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::UnresolvedField) -> Option<Vec<A
 fn field_fix(ctx: &DiagnosticsContext<'_>, d: &hir::UnresolvedField) -> Option<Assist> {
     // Get the FileRange of the invalid field access
     let root = ctx.sema.db.parse_or_expand(d.expr.file_id);
-    let expr = d.expr.value.to_node(&root);
+    let expr = d.expr.value.to_node(&root).left()?;
 
     let error_range = ctx.sema.original_range_opt(expr.syntax())?;
-    let field_name = d.name.as_str()?;
+    let field_name = d.name.as_str();
     // Convert the receiver to an ADT
     let adt = d.receiver.strip_references().as_adt()?;
     let target_module = adt.module(ctx.sema.db);
@@ -91,7 +91,9 @@ fn field_fix(ctx: &DiagnosticsContext<'_>, d: &hir::UnresolvedField) -> Option<A
         make::ty("()")
     };
 
-    if !is_editable_crate(target_module.krate(), ctx.sema.db) {
+    if !is_editable_crate(target_module.krate(), ctx.sema.db)
+        || SyntaxKind::from_keyword(field_name, ctx.edition).is_some()
+    {
         return None;
     }
 
@@ -130,7 +132,7 @@ fn add_variant_to_union(
         group: None,
         target: error_range.range,
         source_change: Some(src_change_builder.finish()),
-        trigger_signature_help: false,
+        command: None,
     })
 }
 
@@ -153,7 +155,12 @@ fn add_field_to_struct_fix(
             } else {
                 Some(make::visibility_pub_crate())
             };
-            let field_name = make::name(field_name);
+
+            let field_name = match field_name.chars().next() {
+                Some(ch) if ch.is_numeric() => return None,
+                Some(_) => make::name(field_name),
+                None => return None,
+            };
 
             let (offset, record_field) = record_field_layout(
                 visibility,
@@ -173,13 +180,18 @@ fn add_field_to_struct_fix(
                 group: None,
                 target: error_range.range,
                 source_change: Some(src_change_builder.finish()),
-                trigger_signature_help: false,
+                command: None,
             })
         }
         None => {
             // Add a field list to the Unit Struct
             let mut src_change_builder = SourceChangeBuilder::new(struct_range.file_id);
-            let field_name = make::name(field_name);
+            let field_name = match field_name.chars().next() {
+                // FIXME : See match arm below regarding tuple structs.
+                Some(ch) if ch.is_numeric() => return None,
+                Some(_) => make::name(field_name),
+                None => return None,
+            };
             let visibility = if error_range.file_id == struct_range.file_id {
                 None
             } else {
@@ -204,7 +216,7 @@ fn add_field_to_struct_fix(
                 group: None,
                 target: error_range.range,
                 source_change: Some(src_change_builder.finish()),
-                trigger_signature_help: false,
+                command: None,
             })
         }
         Some(FieldList::TupleFieldList(_tuple)) => {
@@ -252,7 +264,7 @@ fn record_field_layout(
 // FIXME: We should fill out the call here, move the cursor and trigger signature help
 fn method_fix(
     ctx: &DiagnosticsContext<'_>,
-    expr_ptr: &InFile<AstPtr<ast::Expr>>,
+    expr_ptr: &InFile<AstPtr<Either<ast::Expr, ast::Pat>>>,
 ) -> Option<Assist> {
     let root = ctx.sema.db.parse_or_expand(expr_ptr.file_id);
     let expr = expr_ptr.value.to_node(&root);
@@ -266,7 +278,7 @@ fn method_fix(
             file_id,
             TextEdit::insert(range.end(), "()".to_owned()),
         )),
-        trigger_signature_help: false,
+        command: None,
     })
 }
 #[cfg(test)]
@@ -275,7 +287,7 @@ mod tests {
     use crate::{
         tests::{
             check_diagnostics, check_diagnostics_with_config, check_diagnostics_with_disabled,
-            check_fix,
+            check_fix, check_no_fix,
         },
         DiagnosticsConfig,
     };
@@ -458,6 +470,53 @@ fn foo() {
                     foo.bar;
                 }
             "#,
+        );
+    }
+
+    #[test]
+    fn no_fix_when_indexed() {
+        check_no_fix(
+            r#"
+            struct Kek {}
+impl Kek {
+    pub fn foo(self) {
+        self.$00
+    }
+}
+
+fn main() {}
+            "#,
+        )
+    }
+
+    #[test]
+    fn no_fix_when_without_field() {
+        check_no_fix(
+            r#"
+            struct Kek {}
+impl Kek {
+    pub fn foo(self) {
+        self.$0
+    }
+}
+
+fn main() {}
+            "#,
+        )
+    }
+
+    #[test]
+    fn regression_18683() {
+        check_diagnostics(
+            r#"
+struct S;
+impl S {
+    fn f(self) {
+        self.self
+          // ^^^^ error: no field `self` on type `S`
+    }
+}
+        "#,
         );
     }
 }

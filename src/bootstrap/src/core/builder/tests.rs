@@ -1,27 +1,38 @@
+use std::thread;
+
+use llvm::prebuilt_llvm_config;
+
 use super::*;
+use crate::Flags;
 use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::config::Config;
-use std::thread;
+
+static TEST_TRIPLE_1: &str = "i686-unknown-haiku";
+static TEST_TRIPLE_2: &str = "i686-unknown-hurd-gnu";
+static TEST_TRIPLE_3: &str = "i686-unknown-netbsd";
 
 fn configure(cmd: &str, host: &[&str], target: &[&str]) -> Config {
     configure_with_args(&[cmd.to_owned()], host, target)
 }
 
 fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config {
-    let mut config = Config::parse(cmd);
+    let mut config = Config::parse(Flags::parse(cmd));
     // don't save toolstates
     config.save_toolstates = None;
     config.dry_run = DryRun::SelfCheck;
 
-    // Ignore most submodules, since we don't need them for a dry run.
-    // But make sure to check out the `doc` and `rust-analyzer` submodules, since some steps need them
-    // just to know which commands to run.
+    // Ignore most submodules, since we don't need them for a dry run, and the
+    // tests run much faster without them.
+    //
+    // The src/doc/book submodule is needed because TheBook step tries to
+    // access files even during a dry-run (may want to consider just skipping
+    // that in a dry run).
     let submodule_build = Build::new(Config {
         // don't include LLVM, so CI doesn't require ninja/cmake to be installed
         rust_codegen_backends: vec![],
-        ..Config::parse(&["check".to_owned()])
+        ..Config::parse(Flags::parse(&["check".to_owned()]))
     });
-    submodule_build.update_submodule(Path::new("src/doc/book"));
+    submodule_build.require_submodule("src/doc/book", None);
     config.submodules = Some(false);
 
     config.ninja_in_file = false;
@@ -32,7 +43,7 @@ fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config
         .join(&thread::current().name().unwrap_or("unknown").replace(":", "-"));
     t!(fs::create_dir_all(&dir));
     config.out = dir;
-    config.build = TargetSelection::from_user("A-A");
+    config.build = TargetSelection::from_user(TEST_TRIPLE_1);
     config.hosts = host.iter().map(|s| TargetSelection::from_user(s)).collect();
     config.targets = target.iter().map(|s| TargetSelection::from_user(s)).collect();
     config
@@ -53,38 +64,28 @@ fn run_build(paths: &[PathBuf], config: Config) -> Cache {
 fn check_cli<const N: usize>(paths: [&str; N]) {
     run_build(
         &paths.map(PathBuf::from),
-        configure_with_args(&paths.map(String::from), &["A-A"], &["A-A"]),
+        configure_with_args(&paths.map(String::from), &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]),
     );
 }
 
 macro_rules! std {
     ($host:ident => $target:ident, stage = $stage:literal) => {
         compile::Std::new(
-            Compiler { host: TargetSelection::from_user(concat!(stringify!($host), "-", stringify!($host))), stage: $stage },
-            TargetSelection::from_user(concat!(stringify!($target), "-", stringify!($target))),
+            Compiler { host: TargetSelection::from_user($host), stage: $stage },
+            TargetSelection::from_user($target),
         )
     };
 }
 
 macro_rules! doc_std {
-    ($host:ident => $target:ident, stage = $stage:literal) => {{
-        let config = configure("doc", &["A-A"], &["A-A"]);
-        let build = Build::new(config);
-        let builder = Builder::new(&build);
-        doc::Std::new(
-            $stage,
-            TargetSelection::from_user(concat!(stringify!($target), "-", stringify!($target))),
-            &builder,
-            DocumentationFormat::Html,
-        )
-    }};
+    ($host:ident => $target:ident, stage = $stage:literal) => {{ doc::Std::new($stage, TargetSelection::from_user($target), DocumentationFormat::Html) }};
 }
 
 macro_rules! rustc {
     ($host:ident => $target:ident, stage = $stage:literal) => {
         compile::Rustc::new(
-            Compiler { host: TargetSelection::from_user(concat!(stringify!($host), "-", stringify!($host))), stage: $stage },
-            TargetSelection::from_user(concat!(stringify!($target), "-", stringify!($target))),
+            Compiler { host: TargetSelection::from_user($host), stage: $stage },
+            TargetSelection::from_user($target),
         )
     };
 }
@@ -92,7 +93,7 @@ macro_rules! rustc {
 #[test]
 fn test_valid() {
     // make sure multi suite paths are accepted
-    check_cli(["test", "tests/ui/attr-start.rs", "tests/ui/attr-shebang.rs"]);
+    check_cli(["test", "tests/ui/bootstrap/self-test/a.rs", "tests/ui/bootstrap/self-test/b.rs"]);
 }
 
 #[test]
@@ -108,16 +109,49 @@ fn test_intersection() {
         PathSet::Set(paths.into_iter().map(|p| TaskPath { path: p.into(), kind: None }).collect())
     };
     let library_set = set(&["library/core", "library/alloc", "library/std"]);
-    let mut command_paths =
-        vec![Path::new("library/core"), Path::new("library/alloc"), Path::new("library/stdarch")];
+    let mut command_paths = vec![
+        CLIStepPath::from(PathBuf::from("library/core")),
+        CLIStepPath::from(PathBuf::from("library/alloc")),
+        CLIStepPath::from(PathBuf::from("library/stdarch")),
+    ];
     let subset = library_set.intersection_removing_matches(&mut command_paths, Kind::Build);
     assert_eq!(subset, set(&["library/core", "library/alloc"]),);
-    assert_eq!(command_paths, vec![Path::new("library/stdarch")]);
+    assert_eq!(
+        command_paths,
+        vec![
+            CLIStepPath::from(PathBuf::from("library/core")).will_be_executed(true),
+            CLIStepPath::from(PathBuf::from("library/alloc")).will_be_executed(true),
+            CLIStepPath::from(PathBuf::from("library/stdarch")).will_be_executed(false),
+        ]
+    );
+}
+
+#[test]
+fn test_resolve_parent_and_subpaths() {
+    let set = |paths: &[&str]| {
+        PathSet::Set(paths.into_iter().map(|p| TaskPath { path: p.into(), kind: None }).collect())
+    };
+
+    let mut command_paths = vec![
+        CLIStepPath::from(PathBuf::from("src/tools/miri")),
+        CLIStepPath::from(PathBuf::from("src/tools/miri/cargo-miri")),
+    ];
+
+    let library_set = set(&["src/tools/miri", "src/tools/miri/cargo-miri"]);
+    library_set.intersection_removing_matches(&mut command_paths, Kind::Build);
+
+    assert_eq!(
+        command_paths,
+        vec![
+            CLIStepPath::from(PathBuf::from("src/tools/miri")).will_be_executed(true),
+            CLIStepPath::from(PathBuf::from("src/tools/miri/cargo-miri")).will_be_executed(true),
+        ]
+    );
 }
 
 #[test]
 fn validate_path_remap() {
-    let build = Build::new(configure("test", &["A-A"], &["A-A"]));
+    let build = Build::new(configure("test", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
 
     PATH_REMAP
         .iter()
@@ -129,8 +163,32 @@ fn validate_path_remap() {
 }
 
 #[test]
+fn check_missing_paths_for_x_test_tests() {
+    let build = Build::new(configure("test", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
+
+    let (_, tests_remap_paths) =
+        PATH_REMAP.iter().find(|(target_path, _)| *target_path == "tests").unwrap();
+
+    let tests_dir = fs::read_dir(build.src.join("tests")).unwrap();
+    for dir in tests_dir {
+        let path = dir.unwrap().path();
+
+        // Skip if not a test directory.
+        if path.ends_with("tests/auxiliary") || !path.is_dir() {
+            continue;
+        }
+
+        assert!(
+            tests_remap_paths.iter().any(|item| path.ends_with(*item)),
+            "{} is missing in PATH_REMAP tests list.",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn test_exclude() {
-    let mut config = configure("test", &["A-A"], &["A-A"]);
+    let mut config = configure("test", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
     config.skip = vec!["src/tools/tidy".into()];
     let cache = run_build(&[], config);
 
@@ -145,7 +203,7 @@ fn test_exclude() {
 fn test_exclude_kind() {
     let path = PathBuf::from("compiler/rustc_data_structures");
 
-    let mut config = configure("test", &["A-A"], &["A-A"]);
+    let mut config = configure("test", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
     // Ensure our test is valid, and `test::Rustc` would be run without the exclude.
     assert!(run_build(&[], config.clone()).contains::<test::CrateLibrustc>());
     // Ensure tests for rustc are not skipped.
@@ -158,31 +216,79 @@ fn test_exclude_kind() {
 /// Ensure that if someone passes both a single crate and `library`, all library crates get built.
 #[test]
 fn alias_and_path_for_library() {
-    let mut cache =
-        run_build(&["library".into(), "core".into()], configure("build", &["A-A"], &["A-A"]));
+    let mut cache = run_build(
+        &["library".into(), "core".into()],
+        configure("build", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]),
+    );
     assert_eq!(
         first(cache.all::<compile::Std>()),
-        &[std!(A => A, stage = 0), std!(A => A, stage = 1)]
+        &[
+            std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+            std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1)
+        ]
     );
 
-    let mut cache = run_build(&["library".into(), "core".into()], configure("doc", &["A-A"], &["A-A"]));
-    assert_eq!(first(cache.all::<doc::Std>()), &[doc_std!(A => A, stage = 0)]);
+    let mut cache = run_build(
+        &["library".into(), "core".into()],
+        configure("doc", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]),
+    );
+    assert_eq!(
+        first(cache.all::<doc::Std>()),
+        &[doc_std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0)]
+    );
+}
+
+#[test]
+fn ci_rustc_if_unchanged_logic() {
+    let config = Config::parse_inner(
+        Flags::parse(&[
+            "build".to_owned(),
+            "--dry-run".to_owned(),
+            "--set=rust.download-rustc='if-unchanged'".to_owned(),
+        ]),
+        |&_| Ok(Default::default()),
+    );
+
+    let build = Build::new(config.clone());
+    let builder = Builder::new(&build);
+
+    if config.out.exists() {
+        fs::remove_dir_all(&config.out).unwrap();
+    }
+
+    builder.run_step_descriptions(&Builder::get_step_descriptions(config.cmd.kind()), &[]);
+
+    // Make sure "if-unchanged" logic doesn't try to use CI rustc while there are changes
+    // in compiler and/or library.
+    if config.download_rustc_commit.is_some() {
+        let has_changes =
+            config.last_modified_commit(&["compiler", "library"], "download-rustc", true).is_none();
+
+        assert!(
+            !has_changes,
+            "CI-rustc can't be used with 'if-unchanged' while there are changes in compiler and/or library."
+        );
+    }
 }
 
 mod defaults {
-    use super::{configure, first, run_build};
-    use crate::core::builder::*;
-    use crate::Config;
     use pretty_assertions::assert_eq;
+
+    use super::{TEST_TRIPLE_1, TEST_TRIPLE_2, configure, first, run_build};
+    use crate::Config;
+    use crate::core::builder::*;
 
     #[test]
     fn build_default() {
-        let mut cache = run_build(&[], configure("build", &["A-A"], &["A-A"]));
+        let mut cache = run_build(&[], configure("build", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
 
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
         assert_eq!(
             first(cache.all::<compile::Std>()),
-            &[std!(A => A, stage = 0), std!(A => A, stage = 1),]
+            &[
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+            ]
         );
         assert!(!cache.all::<compile::Assemble>().is_empty());
         // Make sure rustdoc is only built once.
@@ -192,16 +298,22 @@ mod defaults {
             // - this is the compiler it's _linked_ to, not built with.
             &[tool::Rustdoc { compiler: Compiler { host: a, stage: 1 } }],
         );
-        assert_eq!(first(cache.all::<compile::Rustc>()), &[rustc!(A => A, stage = 0)],);
+        assert_eq!(
+            first(cache.all::<compile::Rustc>()),
+            &[rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0)],
+        );
     }
 
     #[test]
     fn build_stage_0() {
-        let config = Config { stage: 0, ..configure("build", &["A-A"], &["A-A"]) };
+        let config = Config { stage: 0, ..configure("build", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]) };
         let mut cache = run_build(&[], config);
 
-        let a = TargetSelection::from_user("A-A");
-        assert_eq!(first(cache.all::<compile::Std>()), &[std!(A => A, stage = 0)]);
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        assert_eq!(
+            first(cache.all::<compile::Std>()),
+            &[std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0)]
+        );
         assert!(!cache.all::<compile::Assemble>().is_empty());
         assert_eq!(
             first(cache.all::<tool::Rustdoc>()),
@@ -214,24 +326,27 @@ mod defaults {
 
     #[test]
     fn build_cross_compile() {
-        let config = Config { stage: 1, ..configure("build", &["A-A", "B-B"], &["A-A", "B-B"]) };
+        let config = Config {
+            stage: 1,
+            ..configure("build", &[TEST_TRIPLE_1, TEST_TRIPLE_2], &[TEST_TRIPLE_1, TEST_TRIPLE_2])
+        };
         let mut cache = run_build(&[], config);
 
-        let a = TargetSelection::from_user("A-A");
-        let b = TargetSelection::from_user("B-B");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
 
         // Ideally, this build wouldn't actually have `target: a`
         // rustdoc/rustcc/std here (the user only requested a host=B build, so
         // there's not really a need for us to build for target A in this case
         // (since we're producing stage 1 libraries/binaries).  But currently
-        // rustbuild is just a bit buggy here; this should be fixed though.
+        // bootstrap is just a bit buggy here; this should be fixed though.
         assert_eq!(
             first(cache.all::<compile::Std>()),
             &[
-                std!(A => A, stage = 0),
-                std!(A => A, stage = 1),
-                std!(A => B, stage = 0),
-                std!(A => B, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
             ]
         );
         assert_eq!(
@@ -251,17 +366,20 @@ mod defaults {
         );
         assert_eq!(
             first(cache.all::<compile::Rustc>()),
-            &[rustc!(A => A, stage = 0), rustc!(A => B, stage = 0),]
+            &[
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 0),
+            ]
         );
     }
 
     #[test]
     fn doc_default() {
-        let mut config = configure("doc", &["A-A"], &["A-A"]);
+        let mut config = configure("doc", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
         config.compiler_docs = true;
         config.cmd = Subcommand::Doc { open: false, json: false };
         let mut cache = run_build(&[], config);
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
 
         // error_index_generator uses stage 0 to share rustdoc artifacts with the
         // rustdoc tool.
@@ -281,9 +399,10 @@ mod defaults {
 }
 
 mod dist {
-    use super::{first, run_build, Config};
-    use crate::core::builder::*;
     use pretty_assertions::assert_eq;
+
+    use super::{Config, TEST_TRIPLE_1, TEST_TRIPLE_2, TEST_TRIPLE_3, first, run_build};
+    use crate::core::builder::*;
 
     fn configure(host: &[&str], target: &[&str]) -> Config {
         Config { stage: 2, ..super::configure("dist", host, target) }
@@ -291,9 +410,9 @@ mod dist {
 
     #[test]
     fn dist_baseline() {
-        let mut cache = run_build(&[], configure(&["A-A"], &["A-A"]));
+        let mut cache = run_build(&[], configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
 
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
 
         assert_eq!(first(cache.all::<dist::Docs>()), &[dist::Docs { host: a },]);
         assert_eq!(first(cache.all::<dist::Mingw>()), &[dist::Mingw { host: a },]);
@@ -315,10 +434,11 @@ mod dist {
 
     #[test]
     fn dist_with_targets() {
-        let mut cache = run_build(&[], configure(&["A-A"], &["A-A", "B-B"]));
+        let mut cache =
+            run_build(&[], configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_1, TEST_TRIPLE_2]));
 
-        let a = TargetSelection::from_user("A-A");
-        let b = TargetSelection::from_user("B-B");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
 
         assert_eq!(
             first(cache.all::<dist::Docs>()),
@@ -344,10 +464,13 @@ mod dist {
 
     #[test]
     fn dist_with_hosts() {
-        let mut cache = run_build(&[], configure(&["A-A", "B-B"], &["A-A", "B-B"]));
+        let mut cache = run_build(
+            &[],
+            configure(&[TEST_TRIPLE_1, TEST_TRIPLE_2], &[TEST_TRIPLE_1, TEST_TRIPLE_2]),
+        );
 
-        let a = TargetSelection::from_user("A-A");
-        let b = TargetSelection::from_user("B-B");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
 
         assert_eq!(
             first(cache.all::<dist::Docs>()),
@@ -374,11 +497,11 @@ mod dist {
         assert_eq!(
             first(cache.all::<compile::Std>()),
             &[
-                std!(A => A, stage = 0),
-                std!(A => A, stage = 1),
-                std!(A => A, stage = 2),
-                std!(A => B, stage = 1),
-                std!(A => B, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 2),
             ],
         );
         assert_eq!(first(cache.all::<dist::Src>()), &[dist::Src]);
@@ -386,8 +509,9 @@ mod dist {
 
     #[test]
     fn dist_only_cross_host() {
-        let b = TargetSelection::from_user("B-B");
-        let mut config = configure(&["A-A", "B-B"], &["A-A", "B-B"]);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
+        let mut config =
+            configure(&[TEST_TRIPLE_1, TEST_TRIPLE_2], &[TEST_TRIPLE_1, TEST_TRIPLE_2]);
         config.docs = false;
         config.extended = true;
         config.hosts = vec![b];
@@ -399,17 +523,27 @@ mod dist {
         );
         assert_eq!(
             first(cache.all::<compile::Rustc>()),
-            &[rustc!(A => A, stage = 0), rustc!(A => B, stage = 1),]
+            &[
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
+            ]
         );
     }
 
     #[test]
     fn dist_with_targets_and_hosts() {
-        let mut cache = run_build(&[], configure(&["A-A", "B-B"], &["A-A", "B-B", "C-C"]));
+        let mut cache = run_build(
+            &[],
+            configure(
+                &[TEST_TRIPLE_1, TEST_TRIPLE_2],
+                &[TEST_TRIPLE_1, TEST_TRIPLE_2, TEST_TRIPLE_3],
+            ),
+        );
 
-        let a = TargetSelection::from_user("A-A");
-        let b = TargetSelection::from_user("B-B");
-        let c = TargetSelection::from_user("C-C");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
+        let c = TargetSelection::from_user(TEST_TRIPLE_3);
 
         assert_eq!(
             first(cache.all::<dist::Docs>()),
@@ -439,11 +573,11 @@ mod dist {
 
     #[test]
     fn dist_with_empty_host() {
-        let config = configure(&[], &["C-C"]);
+        let config = configure(&[], &[TEST_TRIPLE_3]);
         let mut cache = run_build(&[], config);
 
-        let a = TargetSelection::from_user("A-A");
-        let c = TargetSelection::from_user("C-C");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let c = TargetSelection::from_user(TEST_TRIPLE_3);
 
         assert_eq!(first(cache.all::<dist::Docs>()), &[dist::Docs { host: c },]);
         assert_eq!(first(cache.all::<dist::Mingw>()), &[dist::Mingw { host: c },]);
@@ -455,10 +589,13 @@ mod dist {
 
     #[test]
     fn dist_with_same_targets_and_hosts() {
-        let mut cache = run_build(&[], configure(&["A-A", "B-B"], &["A-A", "B-B"]));
+        let mut cache = run_build(
+            &[],
+            configure(&[TEST_TRIPLE_1, TEST_TRIPLE_2], &[TEST_TRIPLE_1, TEST_TRIPLE_2]),
+        );
 
-        let a = TargetSelection::from_user("A-A");
-        let b = TargetSelection::from_user("B-B");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
+        let b = TargetSelection::from_user(TEST_TRIPLE_2);
 
         assert_eq!(
             first(cache.all::<dist::Docs>()),
@@ -486,11 +623,11 @@ mod dist {
         assert_eq!(
             first(cache.all::<compile::Std>()),
             &[
-                std!(A => A, stage = 0),
-                std!(A => A, stage = 1),
-                std!(A => A, stage = 2),
-                std!(A => B, stage = 1),
-                std!(A => B, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 2),
             ]
         );
         assert_eq!(
@@ -506,66 +643,106 @@ mod dist {
 
     #[test]
     fn build_all() {
-        let build = Build::new(configure(&["A-A", "B-B"], &["A-A", "B-B", "C-C"]));
+        let build = Build::new(configure(
+            &[TEST_TRIPLE_1, TEST_TRIPLE_2],
+            &[TEST_TRIPLE_1, TEST_TRIPLE_2, TEST_TRIPLE_3],
+        ));
         let mut builder = Builder::new(&build);
         builder.run_step_descriptions(
             &Builder::get_step_descriptions(Kind::Build),
             &["compiler/rustc".into(), "library".into()],
         );
 
-        assert_eq!(
-            first(builder.cache.all::<compile::Std>()),
-            &[
-                std!(A => A, stage = 0),
-                std!(A => A, stage = 1),
-                std!(A => A, stage = 2),
-                std!(A => B, stage = 1),
-                std!(A => B, stage = 2),
-                std!(A => C, stage = 2),
-            ]
-        );
-        assert_eq!(builder.cache.all::<compile::Assemble>().len(), 5);
+        assert_eq!(builder.config.stage, 2);
+
+        // `compile::Rustc` includes one-stage-off compiler information as the target compiler
+        // artifacts get copied from there to the target stage sysroot.
+        // For example, `stage2/bin/rustc` gets copied from the `stage1-rustc` build directory.
         assert_eq!(
             first(builder.cache.all::<compile::Rustc>()),
             &[
-                rustc!(A => A, stage = 0),
-                rustc!(A => A, stage = 1),
-                rustc!(A => A, stage = 2),
-                rustc!(A => B, stage = 1),
-                rustc!(A => B, stage = 2),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
+            ]
+        );
+
+        assert_eq!(
+            first(builder.cache.all::<compile::Std>()),
+            &[
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_2, stage = 2),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_3, stage = 2),
+            ]
+        );
+
+        assert_eq!(
+            first(builder.cache.all::<compile::Assemble>()),
+            &[
+                compile::Assemble {
+                    target_compiler: Compiler {
+                        host: TargetSelection::from_user(TEST_TRIPLE_1),
+                        stage: 0
+                    }
+                },
+                compile::Assemble {
+                    target_compiler: Compiler {
+                        host: TargetSelection::from_user(TEST_TRIPLE_1),
+                        stage: 1
+                    }
+                },
+                compile::Assemble {
+                    target_compiler: Compiler {
+                        host: TargetSelection::from_user(TEST_TRIPLE_1),
+                        stage: 2
+                    }
+                },
+                compile::Assemble {
+                    target_compiler: Compiler {
+                        host: TargetSelection::from_user(TEST_TRIPLE_2),
+                        stage: 2
+                    }
+                },
             ]
         );
     }
 
     #[test]
     fn llvm_out_behaviour() {
-        let mut config = configure(&["A-A"], &["B-B"]);
+        let mut config = configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_2]);
         config.llvm_from_ci = true;
         let build = Build::new(config.clone());
 
-        let target = TargetSelection::from_user("A-A");
+        let target = TargetSelection::from_user(TEST_TRIPLE_1);
         assert!(build.llvm_out(target).ends_with("ci-llvm"));
-        let target = TargetSelection::from_user("B-B");
+        let target = TargetSelection::from_user(TEST_TRIPLE_2);
         assert!(build.llvm_out(target).ends_with("llvm"));
 
         config.llvm_from_ci = false;
         let build = Build::new(config.clone());
-        let target = TargetSelection::from_user("A-A");
+        let target = TargetSelection::from_user(TEST_TRIPLE_1);
         assert!(build.llvm_out(target).ends_with("llvm"));
     }
 
     #[test]
     fn build_with_empty_host() {
-        let config = configure(&[], &["C-C"]);
+        let config = configure(&[], &[TEST_TRIPLE_3]);
         let build = Build::new(config);
         let mut builder = Builder::new(&build);
         builder.run_step_descriptions(&Builder::get_step_descriptions(Kind::Build), &[]);
 
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
 
         assert_eq!(
             first(builder.cache.all::<compile::Std>()),
-            &[std!(A => A, stage = 0), std!(A => A, stage = 1), std!(A => C, stage = 2),]
+            &[
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+                std!(TEST_TRIPLE_1 => TEST_TRIPLE_3, stage = 2),
+            ]
         );
         assert_eq!(
             first(builder.cache.all::<compile::Assemble>()),
@@ -577,18 +754,21 @@ mod dist {
         );
         assert_eq!(
             first(builder.cache.all::<compile::Rustc>()),
-            &[rustc!(A => A, stage = 0), rustc!(A => A, stage = 1),]
+            &[
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0),
+                rustc!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1),
+            ]
         );
     }
 
     #[test]
     fn test_with_no_doc_stage0() {
-        let mut config = configure(&["A-A"], &["A-A"]);
+        let mut config = configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
         config.stage = 0;
         config.paths = vec!["library/std".into()];
         config.cmd = Subcommand::Test {
             test_args: vec![],
-            rustc_args: vec![],
+            compiletest_rustc_args: vec![],
             no_fail_fast: false,
             no_doc: true,
             doc: false,
@@ -600,12 +780,13 @@ mod dist {
             run: None,
             only_modified: false,
             extra_checks: None,
+            no_capture: false,
         };
 
         let build = Build::new(config);
         let mut builder = Builder::new(&build);
 
-        let host = TargetSelection::from_user("A-A");
+        let host = TargetSelection::from_user(TEST_TRIPLE_1);
 
         builder.run_step_descriptions(
             &[StepDescription::from::<test::Crate>(Kind::Test)],
@@ -619,7 +800,7 @@ mod dist {
             &[test::Crate {
                 compiler: Compiler { host, stage: 0 },
                 target: host,
-                mode: Mode::Std,
+                mode: crate::Mode::Std,
                 crates: vec!["std".to_owned()],
             },]
         );
@@ -627,13 +808,13 @@ mod dist {
 
     #[test]
     fn doc_ci() {
-        let mut config = configure(&["A-A"], &["A-A"]);
+        let mut config = configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
         config.compiler_docs = true;
         config.cmd = Subcommand::Doc { open: false, json: false };
         let build = Build::new(config);
         let mut builder = Builder::new(&build);
         builder.run_step_descriptions(&Builder::get_step_descriptions(Kind::Doc), &[]);
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
 
         // error_index_generator uses stage 1 to share rustdoc artifacts with the
         // rustdoc tool.
@@ -656,10 +837,10 @@ mod dist {
     #[test]
     fn test_docs() {
         // Behavior of `x.py test` doing various documentation tests.
-        let mut config = configure(&["A-A"], &["A-A"]);
+        let mut config = configure(&[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
         config.cmd = Subcommand::Test {
             test_args: vec![],
-            rustc_args: vec![],
+            compiletest_rustc_args: vec![],
             no_fail_fast: false,
             doc: true,
             no_doc: false,
@@ -671,6 +852,7 @@ mod dist {
             run: None,
             only_modified: false,
             extra_checks: None,
+            no_capture: false,
         };
         // Make sure rustfmt binary not being found isn't an error.
         config.channel = "beta".to_string();
@@ -678,7 +860,7 @@ mod dist {
         let mut builder = Builder::new(&build);
 
         builder.run_step_descriptions(&Builder::get_step_descriptions(Kind::Test), &[]);
-        let a = TargetSelection::from_user("A-A");
+        let a = TargetSelection::from_user(TEST_TRIPLE_1);
 
         // error_index_generator uses stage 1 to share rustdoc artifacts with the
         // rustdoc tool.
@@ -710,4 +892,259 @@ mod dist {
             ]
         );
     }
+}
+
+mod sysroot_target_dirs {
+    use super::{
+        Build, Builder, Compiler, TEST_TRIPLE_1, TEST_TRIPLE_2, TargetSelection, configure,
+    };
+
+    #[test]
+    fn test_sysroot_target_libdir() {
+        let build = Build::new(configure("build", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
+        let builder = Builder::new(&build);
+        let target_triple_1 = TargetSelection::from_user(TEST_TRIPLE_1);
+        let compiler = Compiler { stage: 1, host: target_triple_1 };
+        let target_triple_2 = TargetSelection::from_user(TEST_TRIPLE_2);
+        let actual = builder.sysroot_target_libdir(compiler, target_triple_2);
+
+        assert_eq!(
+            builder
+                .sysroot(compiler)
+                .join(builder.sysroot_libdir_relative(compiler))
+                .join("rustlib")
+                .join(TEST_TRIPLE_2)
+                .join("lib"),
+            actual
+        );
+    }
+
+    #[test]
+    fn test_sysroot_target_bindir() {
+        let build = Build::new(configure("build", &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]));
+        let builder = Builder::new(&build);
+        let target_triple_1 = TargetSelection::from_user(TEST_TRIPLE_1);
+        let compiler = Compiler { stage: 1, host: target_triple_1 };
+        let target_triple_2 = TargetSelection::from_user(TEST_TRIPLE_2);
+        let actual = builder.sysroot_target_bindir(compiler, target_triple_2);
+
+        assert_eq!(
+            builder
+                .sysroot(compiler)
+                .join(builder.sysroot_libdir_relative(compiler))
+                .join("rustlib")
+                .join(TEST_TRIPLE_2)
+                .join("bin"),
+            actual
+        );
+    }
+}
+
+/// Regression test for <https://github.com/rust-lang/rust/issues/134916>.
+///
+/// The command `./x test compiler` should invoke the step that runs unit tests
+/// for (most) compiler crates; it should not be hijacked by the cg_clif or
+/// cg_gcc tests instead.
+#[test]
+fn test_test_compiler() {
+    let cmd = &["test", "compiler"].map(str::to_owned);
+    let config = configure_with_args(cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
+    let cache = run_build(&config.paths.clone(), config);
+
+    let compiler = cache.contains::<test::CrateLibrustc>();
+    let cranelift = cache.contains::<test::CodegenCranelift>();
+    let gcc = cache.contains::<test::CodegenGCC>();
+
+    assert_eq!((compiler, cranelift, gcc), (true, false, false));
+}
+
+#[test]
+fn test_test_coverage() {
+    struct Case {
+        cmd: &'static [&'static str],
+        expected: &'static [&'static str],
+    }
+    let cases = &[
+        Case { cmd: &["test"], expected: &["coverage-map", "coverage-run"] },
+        Case { cmd: &["test", "coverage"], expected: &["coverage-map", "coverage-run"] },
+        Case { cmd: &["test", "coverage-map"], expected: &["coverage-map"] },
+        Case { cmd: &["test", "coverage-run"], expected: &["coverage-run"] },
+        Case { cmd: &["test", "coverage", "--skip=coverage"], expected: &[] },
+        Case { cmd: &["test", "coverage", "--skip=tests/coverage"], expected: &[] },
+        Case { cmd: &["test", "coverage", "--skip=coverage-map"], expected: &["coverage-run"] },
+        Case { cmd: &["test", "coverage", "--skip=coverage-run"], expected: &["coverage-map"] },
+        Case { cmd: &["test", "--skip=coverage-map", "--skip=coverage-run"], expected: &[] },
+        Case { cmd: &["test", "coverage", "--skip=tests"], expected: &[] },
+    ];
+
+    for &Case { cmd, expected } in cases {
+        // Print each test case so that if one fails, the most recently printed
+        // case is the one that failed.
+        println!("Testing case: {cmd:?}");
+        let cmd = cmd.iter().copied().map(str::to_owned).collect::<Vec<_>>();
+        let config = configure_with_args(&cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
+        let mut cache = run_build(&config.paths.clone(), config);
+
+        let modes =
+            cache.all::<test::Coverage>().iter().map(|(step, ())| step.mode).collect::<Vec<_>>();
+        assert_eq!(modes, expected);
+    }
+}
+
+#[test]
+fn test_prebuilt_llvm_config_path_resolution() {
+    fn configure(config: &str) -> Config {
+        Config::parse_inner(
+            Flags::parse(&[
+                "build".to_string(),
+                "--dry-run".to_string(),
+                "--config=/does/not/exist".to_string(),
+            ]),
+            |&_| toml::from_str(&config),
+        )
+    }
+
+    // Removes Windows disk prefix if present
+    fn drop_win_disk_prefix_if_present(path: PathBuf) -> PathBuf {
+        let path_str = path.to_str().unwrap();
+        if let Some((_, without_prefix)) = path_str.split_once(":/") {
+            return PathBuf::from(format!("/{}", without_prefix));
+        }
+
+        path
+    }
+
+    let config = configure(
+        r#"
+            [llvm]
+            download-ci-llvm = false
+
+            [build]
+            build = "x86_64-unknown-linux-gnu"
+            host = ["arm-unknown-linux-gnueabihf"]
+            target = ["arm-unknown-linux-gnueabihf"]
+
+            [target.x86_64-unknown-linux-gnu]
+            llvm-config = "/some/path/to/llvm-config"
+
+            [target.arm-unknown-linux-gnueabihf]
+            cc = "arm-linux-gnueabihf-gcc"
+            cxx = "arm-linux-gnueabihf-g++"
+        "#,
+    );
+
+    let build = Build::new(config);
+    let builder = Builder::new(&build);
+
+    let expected = PathBuf::from("/some/path/to/llvm-config");
+
+    let actual = prebuilt_llvm_config(
+        &builder,
+        TargetSelection::from_user("arm-unknown-linux-gnueabihf"),
+        false,
+    )
+    .llvm_result()
+    .llvm_config
+    .clone();
+    let actual = drop_win_disk_prefix_if_present(actual);
+    assert_eq!(expected, actual);
+
+    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+        .llvm_result()
+        .llvm_config
+        .clone();
+    let actual = drop_win_disk_prefix_if_present(actual);
+    assert_eq!(expected, actual);
+    assert_eq!(expected, actual);
+
+    let config = configure(
+        r#"
+            [llvm]
+            download-ci-llvm = false
+        "#,
+    );
+
+    let build = Build::new(config.clone());
+    let builder = Builder::new(&build);
+
+    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+        .llvm_result()
+        .llvm_config
+        .clone();
+    let expected = builder
+        .out
+        .join(builder.config.build)
+        .join("llvm/bin")
+        .join(exe("llvm-config", builder.config.build));
+    assert_eq!(expected, actual);
+
+    let config = configure(
+        r#"
+            [llvm]
+            download-ci-llvm = true
+        "#,
+    );
+
+    // CI-LLVM isn't always available; check if it's enabled before testing.
+    if config.llvm_from_ci {
+        let build = Build::new(config.clone());
+        let builder = Builder::new(&build);
+
+        let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+            .llvm_result()
+            .llvm_config
+            .clone();
+        let expected = builder
+            .out
+            .join(builder.config.build)
+            .join("ci-llvm/bin")
+            .join(exe("llvm-config", builder.config.build));
+        assert_eq!(expected, actual);
+    }
+}
+
+#[test]
+fn test_is_builder_target() {
+    let target1 = TargetSelection::from_user(TEST_TRIPLE_1);
+    let target2 = TargetSelection::from_user(TEST_TRIPLE_2);
+
+    for (target1, target2) in [(target1, target2), (target2, target1)] {
+        let mut config = configure("build", &[], &[]);
+        config.build = target1;
+        let build = Build::new(config);
+        let builder = Builder::new(&build);
+
+        assert!(builder.is_builder_target(target1));
+        assert!(!builder.is_builder_target(target2));
+    }
+}
+
+#[test]
+fn test_get_tool_rustc_compiler() {
+    let mut config = configure("build", &[], &[]);
+    config.download_rustc_commit = None;
+    let build = Build::new(config);
+    let builder = Builder::new(&build);
+
+    let target_triple_1 = TargetSelection::from_user(TEST_TRIPLE_1);
+
+    let compiler = Compiler { stage: 2, host: target_triple_1 };
+    let expected = Compiler { stage: 1, host: target_triple_1 };
+    let actual = tool::get_tool_rustc_compiler(&builder, compiler);
+    assert_eq!(expected, actual);
+
+    let compiler = Compiler { stage: 1, host: target_triple_1 };
+    let expected = Compiler { stage: 0, host: target_triple_1 };
+    let actual = tool::get_tool_rustc_compiler(&builder, compiler);
+    assert_eq!(expected, actual);
+
+    let mut config = configure("build", &[], &[]);
+    config.download_rustc_commit = Some("".to_owned());
+    let build = Build::new(config);
+    let builder = Builder::new(&build);
+
+    let compiler = Compiler { stage: 1, host: target_triple_1 };
+    let expected = Compiler { stage: 1, host: target_triple_1 };
+    let actual = tool::get_tool_rustc_compiler(&builder, compiler);
+    assert_eq!(expected, actual);
 }

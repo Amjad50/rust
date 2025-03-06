@@ -4,12 +4,10 @@ use std::ops::Range;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::{Span, SpanData};
 
-use crate::borrow_tracker::tree_borrows::{
-    perms::{PermTransition, Permission},
-    tree::LocationState,
-    unimap::UniIndex,
-};
 use crate::borrow_tracker::ProtectorKind;
+use crate::borrow_tracker::tree_borrows::perms::{PermTransition, Permission};
+use crate::borrow_tracker::tree_borrows::tree::LocationState;
+use crate::borrow_tracker::tree_borrows::unimap::UniIndex;
 use crate::*;
 
 /// Cause of an access: either a real access or one
@@ -19,7 +17,7 @@ pub enum AccessCause {
     Explicit(AccessKind),
     Reborrow,
     Dealloc,
-    FnExit,
+    FnExit(AccessKind),
 }
 
 impl fmt::Display for AccessCause {
@@ -28,7 +26,11 @@ impl fmt::Display for AccessCause {
             Self::Explicit(kind) => write!(f, "{kind}"),
             Self::Reborrow => write!(f, "reborrow"),
             Self::Dealloc => write!(f, "deallocation"),
-            Self::FnExit => write!(f, "protector release"),
+            // This is dead code, since the protector release access itself can never
+            // cause UB (while the protector is active, if some other access invalidates
+            // further use of the protected tag, that is immediate UB).
+            // Describing the cause of UB is the only time this function is called.
+            Self::FnExit(_) => unreachable!("protector accesses can never be the source of UB"),
         }
     }
 }
@@ -40,7 +42,7 @@ impl AccessCause {
             Self::Explicit(kind) => format!("{rel} {kind}"),
             Self::Reborrow => format!("reborrow (acting as a {rel} read access)"),
             Self::Dealloc => format!("deallocation (acting as a {rel} write access)"),
-            Self::FnExit => format!("protector release (acting as a {rel} read access)"),
+            Self::FnExit(kind) => format!("protector release (acting as a {rel} {kind})"),
         }
     }
 }
@@ -224,7 +226,7 @@ impl<'tcx> Tree {
         } else {
             eprintln!("Tag {tag:?} (to be named '{name}') not found!");
         }
-        Ok(())
+        interp_ok(())
     }
 
     /// Debug helper: determines if the tree contains a tag.
@@ -296,7 +298,7 @@ pub(super) struct TbError<'node> {
 
 impl TbError<'_> {
     /// Produce a UB error.
-    pub fn build<'tcx>(self) -> InterpError<'tcx> {
+    pub fn build<'tcx>(self) -> InterpErrorKind<'tcx> {
         use TransitionError::*;
         let cause = self.access_cause;
         let accessed = self.accessed_info;
@@ -390,7 +392,7 @@ struct DisplayFmtWrapper {
     warning_text: S,
 }
 
-/// Formating of the permissions on each range.
+/// Formatting of the permissions on each range.
 ///
 /// Example:
 /// ```rust,ignore (private type)
@@ -422,7 +424,7 @@ struct DisplayFmtPermission {
     range_sep: S,
 }
 
-/// Formating of the tree structure.
+/// Formatting of the tree structure.
 ///
 /// Example:
 /// ```rust,ignore (private type)
@@ -487,7 +489,7 @@ struct DisplayFmtAccess {
     meh: S,
 }
 
-/// All parameters to determine how the tree is formated.
+/// All parameters to determine how the tree is formatted.
 struct DisplayFmt {
     wrapper: DisplayFmtWrapper,
     perm: DisplayFmtPermission,
@@ -796,6 +798,6 @@ impl<'tcx> Tree {
                 /* print warning message about tags not shown */ !show_unnamed,
             );
         }
-        Ok(())
+        interp_ok(())
     }
 }

@@ -1,13 +1,13 @@
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use rustc_abi::{Float, Integer, Primitive};
 use rustc_index::IndexVec;
+use rustc_middle::ty::TypeFoldable;
 use rustc_middle::ty::layout::{
     self, FnAbiError, FnAbiOfHelpers, FnAbiRequest, LayoutError, LayoutOfHelpers,
 };
-use rustc_middle::ty::TypeFoldable;
 use rustc_span::source_map::Spanned;
-use rustc_target::abi::call::FnAbi;
-use rustc_target::abi::{Integer, Primitive};
+use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 
 use crate::constant::ConstantCx;
@@ -32,10 +32,12 @@ pub(crate) fn scalar_to_clif_type(tcx: TyCtxt<'_>, scalar: Scalar) -> Type {
             Integer::I64 => types::I64,
             Integer::I128 => types::I128,
         },
-        Primitive::F16 => unimplemented!("f16_f128"),
-        Primitive::F32 => types::F32,
-        Primitive::F64 => types::F64,
-        Primitive::F128 => unimplemented!("f16_f128"),
+        Primitive::Float(float) => match float {
+            Float::F16 => unimplemented!("f16_f128"),
+            Float::F32 => types::F32,
+            Float::F64 => types::F64,
+            Float::F128 => unimplemented!("f16_f128"),
+        },
         // FIXME(erikdesjardins): handle non-default addrspace ptr sizes
         Primitive::Pointer(_) => pointer_ty(tcx),
     }
@@ -67,7 +69,7 @@ fn clif_type_from_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<types::Typ
             FloatTy::F64 => types::F64,
             FloatTy::F128 => unimplemented!("f16_f128"),
         },
-        ty::FnPtr(_) => pointer_ty(tcx),
+        ty::FnPtr(..) => pointer_ty(tcx),
         ty::RawPtr(pointee_ty, _) | ty::Ref(_, pointee_ty, _) => {
             if has_ptr_meta(tcx, *pointee_ty) {
                 return None;
@@ -99,13 +101,13 @@ fn clif_pair_type_from_ty<'tcx>(
     })
 }
 
-/// Is a pointer to this type a fat ptr?
+/// Is a pointer to this type a wide ptr?
 pub(crate) fn has_ptr_meta<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
-    if ty.is_sized(tcx, ParamEnv::reveal_all()) {
+    if ty.is_sized(tcx, ty::TypingEnv::fully_monomorphized()) {
         return false;
     }
 
-    let tail = tcx.struct_tail_erasing_lifetimes(ty, ParamEnv::reveal_all());
+    let tail = tcx.struct_tail_for_codegen(ty, ty::TypingEnv::fully_monomorphized());
     match tail.kind() {
         ty::Foreign(..) => false,
         ty::Str | ty::Slice(..) | ty::Dynamic(..) => true,
@@ -160,8 +162,8 @@ pub(crate) fn codegen_icmp_imm(
 pub(crate) fn codegen_bitcast(fx: &mut FunctionCx<'_, '_, '_>, dst_ty: Type, val: Value) -> Value {
     let mut flags = MemFlags::new();
     flags.set_endianness(match fx.tcx.data_layout.endian {
-        rustc_target::abi::Endian::Big => cranelift_codegen::ir::Endianness::Big,
-        rustc_target::abi::Endian::Little => cranelift_codegen::ir::Endianness::Little,
+        rustc_abi::Endian::Big => cranelift_codegen::ir::Endianness::Big,
+        rustc_abi::Endian::Little => cranelift_codegen::ir::Endianness::Little,
     });
     fx.bcx.ins().bitcast(dst_ty, flags, val)
 }
@@ -245,7 +247,6 @@ pub(crate) fn type_sign(ty: Ty<'_>) -> bool {
 
 pub(crate) fn create_wrapper_function(
     module: &mut dyn Module,
-    unwind_context: &mut UnwindContext,
     sig: Signature,
     wrapper_name: &str,
     callee_name: &str,
@@ -278,7 +279,6 @@ pub(crate) fn create_wrapper_function(
         bcx.finalize();
     }
     module.define_function(wrapper_func_id, &mut ctx).unwrap();
-    unwind_context.add_function(wrapper_func_id, &ctx, module.isa());
 }
 
 pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
@@ -309,17 +309,13 @@ pub(crate) struct FunctionCx<'m, 'clif, 'tcx: 'm> {
 }
 
 impl<'tcx> LayoutOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
-    type LayoutOfResult = TyAndLayout<'tcx>;
-
     #[inline]
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
-        RevealAllLayoutCx(self.tcx).handle_layout_err(err, span, ty)
+        FullyMonomorphizedLayoutCx(self.tcx).handle_layout_err(err, span, ty)
     }
 }
 
 impl<'tcx> FnAbiOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
-    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
-
     #[inline]
     fn handle_fn_abi_err(
         &self,
@@ -327,7 +323,7 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for FunctionCx<'_, '_, 'tcx> {
         span: Span,
         fn_abi_request: FnAbiRequest<'tcx>,
     ) -> ! {
-        RevealAllLayoutCx(self.tcx).handle_fn_abi_err(err, span, fn_abi_request)
+        FullyMonomorphizedLayoutCx(self.tcx).handle_fn_abi_err(err, span, fn_abi_request)
     }
 }
 
@@ -337,15 +333,15 @@ impl<'tcx> layout::HasTyCtxt<'tcx> for FunctionCx<'_, '_, 'tcx> {
     }
 }
 
-impl<'tcx> rustc_target::abi::HasDataLayout for FunctionCx<'_, '_, 'tcx> {
-    fn data_layout(&self) -> &rustc_target::abi::TargetDataLayout {
+impl<'tcx> rustc_abi::HasDataLayout for FunctionCx<'_, '_, 'tcx> {
+    fn data_layout(&self) -> &rustc_abi::TargetDataLayout {
         &self.tcx.data_layout
     }
 }
 
-impl<'tcx> layout::HasParamEnv<'tcx> for FunctionCx<'_, '_, 'tcx> {
-    fn param_env(&self) -> ParamEnv<'tcx> {
-        ParamEnv::reveal_all()
+impl<'tcx> layout::HasTypingEnv<'tcx> for FunctionCx<'_, '_, 'tcx> {
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        ty::TypingEnv::fully_monomorphized()
     }
 }
 
@@ -362,7 +358,7 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
     {
         self.instance.instantiate_mir_and_normalize_erasing_regions(
             self.tcx,
-            ty::ParamEnv::reveal_all(),
+            ty::TypingEnv::fully_monomorphized(),
             ty::EarlyBinder::bind(value),
         )
     }
@@ -386,6 +382,11 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
     }
 
     pub(crate) fn create_stack_slot(&mut self, size: u32, align: u32) -> Pointer {
+        assert!(
+            size % align == 0,
+            "size must be a multiple of alignment (size={size}, align={align})"
+        );
+
         let abi_align = if self.tcx.sess.target.arch == "s390x" { 8 } else { 16 };
         if align <= abi_align {
             let stack_slot = self.bcx.create_sized_stack_slot(StackSlotData {
@@ -393,6 +394,7 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
                 // FIXME Don't force the size to a multiple of <abi_align> bytes once Cranelift gets
                 // a way to specify stack slot alignment.
                 size: (size + abi_align - 1) / abi_align * abi_align,
+                align_shift: 4,
             });
             Pointer::stack_slot(stack_slot)
         } else {
@@ -403,9 +405,10 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
                 // FIXME Don't force the size to a multiple of <abi_align> bytes once Cranelift gets
                 // a way to specify stack slot alignment.
                 size: (size + align) / abi_align * abi_align,
+                align_shift: 4,
             });
             let base_ptr = self.bcx.ins().stack_addr(self.pointer_type, stack_slot, 0);
-            let misalign_offset = self.bcx.ins().urem_imm(base_ptr, i64::from(align));
+            let misalign_offset = self.bcx.ins().band_imm(base_ptr, i64::from(align - 1));
             let realign_offset = self.bcx.ins().irsub_imm(misalign_offset, i64::from(align));
             Pointer::new(self.bcx.ins().iadd(base_ptr, realign_offset))
         }
@@ -445,11 +448,9 @@ impl<'tcx> FunctionCx<'_, '_, 'tcx> {
     }
 }
 
-pub(crate) struct RevealAllLayoutCx<'tcx>(pub(crate) TyCtxt<'tcx>);
+pub(crate) struct FullyMonomorphizedLayoutCx<'tcx>(pub(crate) TyCtxt<'tcx>);
 
-impl<'tcx> LayoutOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
-    type LayoutOfResult = TyAndLayout<'tcx>;
-
+impl<'tcx> LayoutOfHelpers<'tcx> for FullyMonomorphizedLayoutCx<'tcx> {
     #[inline]
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
         if let LayoutError::SizeOverflow(_) | LayoutError::ReferencesError(_) = err {
@@ -463,9 +464,7 @@ impl<'tcx> LayoutOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
     }
 }
 
-impl<'tcx> FnAbiOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
-    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
-
+impl<'tcx> FnAbiOfHelpers<'tcx> for FullyMonomorphizedLayoutCx<'tcx> {
     #[inline]
     fn handle_fn_abi_err(
         &self,
@@ -491,25 +490,25 @@ impl<'tcx> FnAbiOfHelpers<'tcx> for RevealAllLayoutCx<'tcx> {
     }
 }
 
-impl<'tcx> layout::HasTyCtxt<'tcx> for RevealAllLayoutCx<'tcx> {
+impl<'tcx> layout::HasTyCtxt<'tcx> for FullyMonomorphizedLayoutCx<'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'tcx> {
         self.0
     }
 }
 
-impl<'tcx> rustc_target::abi::HasDataLayout for RevealAllLayoutCx<'tcx> {
-    fn data_layout(&self) -> &rustc_target::abi::TargetDataLayout {
+impl<'tcx> rustc_abi::HasDataLayout for FullyMonomorphizedLayoutCx<'tcx> {
+    fn data_layout(&self) -> &rustc_abi::TargetDataLayout {
         &self.0.data_layout
     }
 }
 
-impl<'tcx> layout::HasParamEnv<'tcx> for RevealAllLayoutCx<'tcx> {
-    fn param_env(&self) -> ParamEnv<'tcx> {
-        ParamEnv::reveal_all()
+impl<'tcx> layout::HasTypingEnv<'tcx> for FullyMonomorphizedLayoutCx<'tcx> {
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        ty::TypingEnv::fully_monomorphized()
     }
 }
 
-impl<'tcx> HasTargetSpec for RevealAllLayoutCx<'tcx> {
+impl<'tcx> HasTargetSpec for FullyMonomorphizedLayoutCx<'tcx> {
     fn target_spec(&self) -> &Target {
         &self.0.sess.target
     }

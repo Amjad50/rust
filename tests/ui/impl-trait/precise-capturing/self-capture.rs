@@ -1,10 +1,9 @@
 //@ check-pass
 
-#![feature(precise_capturing)]
-//~^ WARN the feature `precise_capturing` is incomplete
+#![feature(precise_capturing_in_traits)]
 
 trait Foo {
-    fn bar<'a>() -> impl use<Self> Sized;
+    fn bar<'a>() -> impl Sized + use<Self>;
 }
 
 fn main() {}

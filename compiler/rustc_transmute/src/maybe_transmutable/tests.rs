@@ -1,12 +1,12 @@
-use super::query_context::test::{Def, UltraMinimal};
-use crate::maybe_transmutable::MaybeTransmutableQuery;
-use crate::{layout, Reason};
 use itertools::Itertools;
 
-mod safety {
-    use crate::Answer;
+use super::query_context::test::{Def, UltraMinimal};
+use crate::maybe_transmutable::MaybeTransmutableQuery;
+use crate::{Reason, layout};
 
+mod safety {
     use super::*;
+    use crate::Answer;
 
     type Tree = layout::Tree<Def, !>;
 
@@ -63,9 +63,8 @@ mod safety {
 }
 
 mod bool {
-    use crate::Answer;
-
     use super::*;
+    use crate::Answer;
 
     #[test]
     fn should_permit_identity_transmutation_tree() {
@@ -93,7 +92,6 @@ mod bool {
 
     #[test]
     fn should_permit_validity_expansion_and_reject_contraction() {
-        let un = layout::Tree::<Def, !>::uninhabited();
         let b0 = layout::Tree::<Def, !>::from_bits(0);
         let b1 = layout::Tree::<Def, !>::from_bits(1);
         let b2 = layout::Tree::<Def, !>::from_bits(2);

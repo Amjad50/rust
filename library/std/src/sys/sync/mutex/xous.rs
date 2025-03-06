@@ -1,9 +1,7 @@
 use crate::os::xous::ffi::{blocking_scalar, do_yield};
-use crate::os::xous::services::{ticktimer_server, TicktimerScalar};
-use crate::sync::atomic::{
-    AtomicBool, AtomicUsize,
-    Ordering::{Acquire, Relaxed, Release},
-};
+use crate::os::xous::services::{TicktimerScalar, ticktimer_server};
+use crate::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use crate::sync::atomic::{AtomicBool, AtomicUsize};
 
 pub struct Mutex {
     /// The "locked" value indicates how many threads are waiting on this
@@ -26,7 +24,6 @@ pub struct Mutex {
 
 impl Mutex {
     #[inline]
-    #[rustc_const_stable(feature = "const_locks", since = "1.63.0")]
     pub const fn new() -> Mutex {
         Mutex { locked: AtomicUsize::new(0), contended: AtomicBool::new(false) }
     }

@@ -1,7 +1,9 @@
 use quote::quote;
 use syn::parse_quote;
 
-pub fn type_visitable_derive(mut s: synstructure::Structure<'_>) -> proc_macro2::TokenStream {
+pub(super) fn type_visitable_derive(
+    mut s: synstructure::Structure<'_>,
+) -> proc_macro2::TokenStream {
     if let syn::Data::Union(_) = s.ast().data {
         panic!("cannot derive on union")
     }
@@ -34,12 +36,12 @@ pub fn type_visitable_derive(mut s: synstructure::Structure<'_>) -> proc_macro2:
     s.add_bounds(synstructure::AddBounds::Generics);
     let body_visit = s.each(|bind| {
         quote! {
-            match ::rustc_ast_ir::visit::VisitorResult::branch(
+            match ::rustc_middle::ty::visit::VisitorResult::branch(
                 ::rustc_middle::ty::visit::TypeVisitable::visit_with(#bind, __visitor)
             ) {
                 ::core::ops::ControlFlow::Continue(()) => {},
                 ::core::ops::ControlFlow::Break(r) => {
-                    return ::rustc_ast_ir::visit::VisitorResult::from_residual(r);
+                    return ::rustc_middle::ty::visit::VisitorResult::from_residual(r);
                 },
             }
         }
@@ -54,7 +56,7 @@ pub fn type_visitable_derive(mut s: synstructure::Structure<'_>) -> proc_macro2:
                 __visitor: &mut __V
             ) -> __V::Result {
                 match *self { #body_visit }
-                <__V::Result as ::rustc_ast_ir::visit::VisitorResult>::output()
+                <__V::Result as ::rustc_middle::ty::visit::VisitorResult>::output()
             }
         },
     )

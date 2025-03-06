@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use rustc_macros::{Diagnostic, Subdiagnostic};
 
 #[derive(Diagnostic)]
@@ -31,6 +33,12 @@ pub(crate) struct RLinkRustcVersionMismatch<'a> {
 #[derive(Diagnostic)]
 #[diag(driver_impl_rlink_no_a_file)]
 pub(crate) struct RlinkNotAFile;
+
+#[derive(Diagnostic)]
+#[diag(driver_impl_rlink_corrupt_file)]
+pub(crate) struct RlinkCorruptFile<'a> {
+    pub file: &'a std::path::Path,
+}
 
 #[derive(Diagnostic)]
 #[diag(driver_impl_ice)]
@@ -87,3 +95,9 @@ pub(crate) struct IceFlags {
 #[derive(Diagnostic)]
 #[diag(driver_impl_ice_exclude_cargo_defaults)]
 pub(crate) struct IceExcludeCargoDefaults;
+
+#[derive(Diagnostic)]
+#[diag(driver_impl_unstable_feature_usage)]
+pub(crate) struct UnstableFeatureUsage {
+    pub error: Box<dyn Error>,
+}

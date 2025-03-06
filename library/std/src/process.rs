@@ -90,15 +90,15 @@
 //!
 //! # Windows argument splitting
 //!
-//! On Unix systems arguments are passed to a new process as an array of strings
-//! but on Windows arguments are passed as a single commandline string and it's
+//! On Unix systems arguments are passed to a new process as an array of strings,
+//! but on Windows arguments are passed as a single commandline string and it is
 //! up to the child process to parse it into an array. Therefore the parent and
 //! child processes must agree on how the commandline string is encoded.
 //!
 //! Most programs use the standard C run-time `argv`, which in practice results
-//! in consistent argument handling. However some programs have their own way of
+//! in consistent argument handling. However, some programs have their own way of
 //! parsing the commandline string. In these cases using [`arg`] or [`args`] may
-//! result in the child process seeing a different array of arguments then the
+//! result in the child process seeing a different array of arguments than the
 //! parent process intended.
 //!
 //! Two ways of mitigating this are:
@@ -107,26 +107,26 @@
 //! * Use [`raw_arg`] to build a custom commandline. This bypasses the escaping
 //!   rules used by [`arg`] so should be used with due caution.
 //!
-//! `cmd.exe` and `.bat` use non-standard argument parsing and are especially
+//! `cmd.exe` and `.bat` files use non-standard argument parsing and are especially
 //! vulnerable to malicious input as they may be used to run arbitrary shell
 //! commands. Untrusted arguments should be restricted as much as possible.
 //! For examples on handling this see [`raw_arg`].
 //!
-//! ### Bat file special handling
+//! ### Batch file special handling
 //!
 //! On Windows, `Command` uses the Windows API function [`CreateProcessW`] to
-//! spawn new processes. An undocumented feature of this function is that,
+//! spawn new processes. An undocumented feature of this function is that
 //! when given a `.bat` file as the application to run, it will automatically
-//! convert that into running `cmd.exe /c` with the bat file as the next argument.
+//! convert that into running `cmd.exe /c` with the batch file as the next argument.
 //!
-//! For historical reasons Rust currently preserves this behaviour when using
+//! For historical reasons Rust currently preserves this behavior when using
 //! [`Command::new`], and escapes the arguments according to `cmd.exe` rules.
 //! Due to the complexity of `cmd.exe` argument handling, it might not be
-//! possible to safely escape some special chars, and using them will result
+//! possible to safely escape some special characters, and using them will result
 //! in an error being returned at process spawn. The set of unescapeable
-//! special chars might change between releases.
+//! special characters might change between releases.
 //!
-//! Also note that running `.bat` scripts in this way may be removed in the
+//! Also note that running batch scripts in this way may be removed in the
 //! future and so should not be relied upon.
 //!
 //! [`spawn`]: Command::spawn
@@ -148,24 +148,29 @@
 #![stable(feature = "process", since = "1.0.0")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(all(test, not(any(target_os = "emscripten", target_env = "sgx", target_os = "xous"))))]
+#[cfg(all(
+    test,
+    not(any(
+        target_os = "emscripten",
+        target_os = "wasi",
+        target_env = "sgx",
+        target_os = "xous"
+    ))
+))]
 mod tests;
-
-use crate::io::prelude::*;
 
 use crate::convert::Infallible;
 use crate::ffi::OsStr;
-use crate::fmt;
-use crate::fs;
+use crate::io::prelude::*;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::num::NonZero;
 use crate::path::Path;
-use crate::str;
-use crate::sys::pipe::{read2, AnonPipe};
+use crate::sys::pipe::{AnonPipe, read2};
 use crate::sys::process as imp;
 #[stable(feature = "command_access", since = "1.57.0")]
 pub use crate::sys_common::process::CommandEnvs;
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
+use crate::{fmt, fs, str};
 
 /// Representation of a running or exited child process.
 ///
@@ -212,6 +217,7 @@ use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 ///
 /// [`wait`]: Child::wait
 #[stable(feature = "process", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Child")]
 pub struct Child {
     pub(crate) handle: imp::Process,
 
@@ -219,7 +225,7 @@ pub struct Child {
     /// has been captured. You might find it helpful to do
     ///
     /// ```ignore (incomplete)
-    /// let stdin = child.stdin.take().unwrap();
+    /// let stdin = child.stdin.take().expect("handle present");
     /// ```
     ///
     /// to avoid partially moving the `child` and thus blocking yourself from calling
@@ -231,7 +237,7 @@ pub struct Child {
     /// has been captured. You might find it helpful to do
     ///
     /// ```ignore (incomplete)
-    /// let stdout = child.stdout.take().unwrap();
+    /// let stdout = child.stdout.take().expect("handle present");
     /// ```
     ///
     /// to avoid partially moving the `child` and thus blocking yourself from calling
@@ -243,7 +249,7 @@ pub struct Child {
     /// has been captured. You might find it helpful to do
     ///
     /// ```ignore (incomplete)
-    /// let stderr = child.stderr.take().unwrap();
+    /// let stderr = child.stderr.take().expect("handle present");
     /// ```
     ///
     /// to avoid partially moving the `child` and thus blocking yourself from calling
@@ -620,8 +626,6 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::Command;
     ///
@@ -629,6 +633,25 @@ impl Command {
     ///     .spawn()
     ///     .expect("sh command failed to start");
     /// ```
+    ///
+    /// # Caveats
+    ///
+    /// [`Command::new`] is only intended to accept the path of the program. If you pass a program
+    /// path along with arguments like `Command::new("ls -l").spawn()`, it will try to search for
+    /// `ls -l` literally. The arguments need to be passed separately, such as via [`arg`] or
+    /// [`args`].
+    ///
+    /// ```no_run
+    /// use std::process::Command;
+    ///
+    /// Command::new("ls")
+    ///     .arg("-l") // arg passed separately
+    ///     .spawn()
+    ///     .expect("ls command failed to start");
+    /// ```
+    ///
+    /// [`arg`]: Self::arg
+    /// [`args`]: Self::args
     #[stable(feature = "process", since = "1.0.0")]
     pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
         Command { inner: imp::Command::new(program.as_ref()) }
@@ -659,16 +682,19 @@ impl Command {
     ///
     /// Note that the argument is not passed through a shell, but given
     /// literally to the program. This means that shell syntax like quotes,
-    /// escaped characters, word splitting, glob patterns, variable substitution, etc.
-    /// have no effect.
+    /// escaped characters, word splitting, glob patterns, variable substitution,
+    /// etc. have no effect.
     ///
     /// <div class="warning">
     ///
-    /// On Windows use caution with untrusted inputs. Most applications use the
-    /// standard convention for decoding arguments passed to them. These are safe to use with `arg`.
-    /// However some applications, such as `cmd.exe` and `.bat` files, use a non-standard way of decoding arguments
-    /// and are therefore vulnerable to malicious input.
-    /// In the case of `cmd.exe` this is especially important because a malicious argument can potentially run arbitrary shell commands.
+    /// On Windows, use caution with untrusted inputs. Most applications use the
+    /// standard convention for decoding arguments passed to them. These are safe to
+    /// use with `arg`. However, some applications such as `cmd.exe` and `.bat` files
+    /// use a non-standard way of decoding arguments. They are therefore vulnerable
+    /// to malicious input.
+    ///
+    /// In the case of `cmd.exe` this is especially important because a malicious
+    /// argument can potentially run arbitrary shell commands.
     ///
     /// See [Windows argument splitting][windows-args] for more details
     /// or [`raw_arg`] for manually implementing non-standard argument encoding.
@@ -679,8 +705,6 @@ impl Command {
     /// </div>
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -710,11 +734,14 @@ impl Command {
     ///
     /// <div class="warning">
     ///
-    /// On Windows use caution with untrusted inputs. Most applications use the
-    /// standard convention for decoding arguments passed to them. These are safe to use with `args`.
-    /// However some applications, such as `cmd.exe` and `.bat` files, use a non-standard way of decoding arguments
-    /// and are therefore vulnerable to malicious input.
-    /// In the case of `cmd.exe` this is especially important because a malicious argument can potentially run arbitrary shell commands.
+    /// On Windows, use caution with untrusted inputs. Most applications use the
+    /// standard convention for decoding arguments passed to them. These are safe to
+    /// use with `arg`. However, some applications such as `cmd.exe` and `.bat` files
+    /// use a non-standard way of decoding arguments. They are therefore vulnerable
+    /// to malicious input.
+    ///
+    /// In the case of `cmd.exe` this is especially important because a malicious
+    /// argument can potentially run arbitrary shell commands.
     ///
     /// See [Windows argument splitting][windows-args] for more details
     /// or [`raw_arg`] for manually implementing non-standard argument encoding.
@@ -725,8 +752,6 @@ impl Command {
     /// </div>
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -764,8 +789,6 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::Command;
     ///
@@ -799,8 +822,6 @@ impl Command {
     /// and case-sensitive on all other platforms.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::{Command, Stdio};
@@ -848,15 +869,17 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
+    /// Prevent any inherited `GIT_DIR` variable from changing the target of the `git` command,
+    /// while allowing all other variables, like `GIT_AUTHOR_NAME`.
     ///
     /// ```no_run
     /// use std::process::Command;
     ///
-    /// Command::new("ls")
-    ///     .env_remove("PATH")
-    ///     .spawn()
-    ///     .expect("ls command failed to start");
+    /// Command::new("git")
+    ///     .arg("commit")
+    ///     .env_remove("GIT_DIR")
+    ///     .spawn()?;
+    /// # std::io::Result::Ok(())
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Command {
@@ -878,15 +901,17 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
+    /// The behavior of `sort` is affected by `LANG` and `LC_*` environment variables.
+    /// Clearing the environment makes `sort`'s behavior independent of the parent processes' language.
     ///
     /// ```no_run
     /// use std::process::Command;
     ///
-    /// Command::new("ls")
+    /// Command::new("sort")
+    ///     .arg("file.txt")
     ///     .env_clear()
-    ///     .spawn()
-    ///     .expect("ls command failed to start");
+    ///     .spawn()?;
+    /// # std::io::Result::Ok(())
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn env_clear(&mut self) -> &mut Command {
@@ -905,8 +930,6 @@ impl Command {
     /// [`canonicalize`] to get an absolute program path instead.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -937,8 +960,6 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::{Command, Stdio};
     ///
@@ -965,8 +986,6 @@ impl Command {
     /// [`output`]: Self::output
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::{Command, Stdio};
@@ -995,8 +1014,6 @@ impl Command {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::{Command, Stdio};
     ///
@@ -1016,8 +1033,6 @@ impl Command {
     /// By default, stdin, stdout and stderr are inherited from the parent.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -1046,14 +1061,14 @@ impl Command {
     /// use std::io::{self, Write};
     /// let output = Command::new("/bin/cat")
     ///     .arg("file.txt")
-    ///     .output()
-    ///     .expect("failed to execute process");
+    ///     .output()?;
     ///
     /// println!("status: {}", output.status);
-    /// io::stdout().write_all(&output.stdout).unwrap();
-    /// io::stderr().write_all(&output.stderr).unwrap();
+    /// io::stdout().write_all(&output.stdout)?;
+    /// io::stderr().write_all(&output.stderr)?;
     ///
     /// assert!(output.status.success());
+    /// # io::Result::Ok(())
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn output(&mut self) -> io::Result<Output> {
@@ -1277,13 +1292,13 @@ impl fmt::Debug for Output {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let stdout_utf8 = str::from_utf8(&self.stdout);
         let stdout_debug: &dyn fmt::Debug = match stdout_utf8 {
-            Ok(ref str) => str,
+            Ok(ref s) => s,
             Err(_) => &self.stdout,
         };
 
         let stderr_utf8 = str::from_utf8(&self.stderr);
         let stderr_debug: &dyn fmt::Debug = match stderr_utf8 {
-            Ok(ref str) => str,
+            Ok(ref s) => s,
             Err(_) => &self.stderr,
         };
 
@@ -1385,11 +1400,11 @@ impl Stdio {
     /// let output = Command::new("rev")
     ///     .stdin(Stdio::inherit())
     ///     .stdout(Stdio::piped())
-    ///     .output()
-    ///     .expect("Failed to execute command");
+    ///     .output()?;
     ///
     /// print!("You piped in the reverse of: ");
-    /// io::stdout().write_all(&output.stdout).unwrap();
+    /// io::stdout().write_all(&output.stdout)?;
+    /// # io::Result::Ok(())
     /// ```
     #[must_use]
     #[stable(feature = "process", since = "1.0.0")]
@@ -1569,14 +1584,14 @@ impl From<fs::File> for Stdio {
     /// use std::process::Command;
     ///
     /// // With the `foo.txt` file containing "Hello, world!"
-    /// let file = File::open("foo.txt").unwrap();
+    /// let file = File::open("foo.txt")?;
     ///
     /// let reverse = Command::new("rev")
     ///     .stdin(file)  // Implicit File conversion into a Stdio
-    ///     .output()
-    ///     .expect("failed reverse command");
+    ///     .output()?;
     ///
     /// assert_eq!(reverse.stdout, b"!dlrow ,olleH");
+    /// # std::io::Result::Ok(())
     /// ```
     fn from(file: fs::File) -> Stdio {
         Stdio::from_inner(file.into_inner().into())
@@ -1912,10 +1927,14 @@ impl crate::error::Error for ExitStatusError {}
 /// to its parent under normal termination.
 ///
 /// `ExitCode` is intended to be consumed only by the standard library (via
-/// [`Termination::report()`]), and intentionally does not provide accessors like
-/// `PartialEq`, `Eq`, or `Hash`. Instead the standard library provides the
-/// canonical `SUCCESS` and `FAILURE` exit codes as well as `From<u8> for
-/// ExitCode` for constructing other arbitrary exit codes.
+/// [`Termination::report()`]). For forwards compatibility with potentially
+/// unusual targets, this type currently does not provide `Eq`, `Hash`, or
+/// access to the raw value. This type does provide `PartialEq` for
+/// comparison, but note that there may potentially be multiple failure
+/// codes, some of which will _not_ compare equal to `ExitCode::FAILURE`.
+/// The standard library provides the canonical `SUCCESS` and `FAILURE`
+/// exit codes as well as `From<u8> for ExitCode` for constructing other
+/// arbitrary exit codes.
 ///
 /// # Portability
 ///
@@ -1954,7 +1973,7 @@ impl crate::error::Error for ExitStatusError {}
 ///     ExitCode::SUCCESS
 /// }
 /// ```
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[stable(feature = "process_exitcode", since = "1.61.0")]
 pub struct ExitCode(imp::ExitCode);
 
@@ -2031,7 +2050,7 @@ impl ExitCode {
     // representation of an ExitCode
     //
     // More info: https://internals.rust-lang.org/t/mini-pre-rfc-redesigning-process-exitstatus/5426
-    /// Convert an `ExitCode` into an i32
+    /// Converts an `ExitCode` into an i32
     #[unstable(
         feature = "process_exitcode_internals",
         reason = "exposed only for libstd",
@@ -2054,7 +2073,7 @@ impl Default for ExitCode {
 
 #[stable(feature = "process_exitcode", since = "1.61.0")]
 impl From<u8> for ExitCode {
-    /// Construct an `ExitCode` from an arbitrary u8 value.
+    /// Constructs an `ExitCode` from an arbitrary u8 value.
     fn from(code: u8) -> Self {
         ExitCode(imp::ExitCode::from(code))
     }
@@ -2083,8 +2102,6 @@ impl Child {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::Command;
     ///
@@ -2099,6 +2116,7 @@ impl Child {
     /// [`ErrorKind`]: io::ErrorKind
     /// [`InvalidInput`]: io::ErrorKind::InvalidInput
     #[stable(feature = "process", since = "1.0.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "child_kill")]
     pub fn kill(&mut self) -> io::Result<()> {
         self.handle.kill()
     }
@@ -2106,8 +2124,6 @@ impl Child {
     /// Returns the OS-assigned process identifier associated with this child.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -2121,6 +2137,7 @@ impl Child {
     /// ```
     #[must_use]
     #[stable(feature = "process_id", since = "1.3.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "child_id")]
     pub fn id(&self) -> u32 {
         self.handle.id()
     }
@@ -2135,8 +2152,6 @@ impl Child {
     /// the parent waits for the child to exit.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```no_run
     /// use std::process::Command;
@@ -2172,12 +2187,10 @@ impl Child {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```no_run
     /// use std::process::Command;
     ///
-    /// let mut child = Command::new("ls").spawn().unwrap();
+    /// let mut child = Command::new("ls").spawn()?;
     ///
     /// match child.try_wait() {
     ///     Ok(Some(status)) => println!("exited with: {status}"),
@@ -2188,6 +2201,7 @@ impl Child {
     ///     }
     ///     Err(e) => println!("error attempting to wait: {e}"),
     /// }
+    /// # std::io::Result::Ok(())
     /// ```
     #[stable(feature = "process_try_wait", since = "1.18.0")]
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
@@ -2274,6 +2288,15 @@ impl Child {
 /// }
 /// ```
 ///
+/// In its current implementation, this function will execute exit handlers registered with `atexit`
+/// as well as other platform-specific exit handlers (e.g. `fini` sections of ELF shared objects).
+/// This means that Rust requires that all exit handlers are safe to execute at any time. In
+/// particular, if an exit handler cleans up some state that might be concurrently accessed by other
+/// threads, it is required that the exit handler performs suitable synchronization with those
+/// threads. (The alternative to this requirement would be to not run exit handlers at all, which is
+/// considered undesirable. Note that returning from `main` also calls `exit`, so making `exit` an
+/// unsafe operation is not an option.)
+///
 /// ## Platform-specific behavior
 ///
 /// **Unix**: On Unix-like platforms, it is unlikely that all 32 bits of `exit`
@@ -2298,16 +2321,12 @@ pub fn exit(code: i32) -> ! {
 /// Terminates the process in an abnormal fashion.
 ///
 /// The function will never return and will immediately terminate the current
-/// process in a platform specific "abnormal" manner.
+/// process in a platform specific "abnormal" manner. As a consequence,
+/// no destructors on the current stack or any other thread's stack
+/// will be run, Rust IO buffers (eg, from `BufWriter`) will not be flushed,
+/// and C stdio buffers will (on most platforms) not be flushed.
 ///
-/// Note that because this function never returns, and that it terminates the
-/// process, no destructors on the current stack or any other thread's stack
-/// will be run.
-///
-/// Rust IO buffers (eg, from `BufWriter`) will not be flushed.
-/// Likewise, C stdio buffers will (on most platforms) not be flushed.
-///
-/// This is in contrast to the default behaviour of [`panic!`] which unwinds
+/// This is in contrast to the default behavior of [`panic!`] which unwinds
 /// the current thread's stack and calls all destructors.
 /// When `panic="abort"` is set, either as an argument to `rustc` or in a
 /// crate's Cargo.toml, [`panic!`] and `abort` are similar. However,
@@ -2359,6 +2378,7 @@ pub fn exit(code: i32) -> ! {
 /// [panic hook]: crate::panic::set_hook
 #[stable(feature = "process_abort", since = "1.17.0")]
 #[cold]
+#[cfg_attr(not(test), rustc_diagnostic_item = "process_abort")]
 pub fn abort() -> ! {
     crate::sys::abort_internal();
 }
@@ -2367,15 +2387,11 @@ pub fn abort() -> ! {
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```no_run
 /// use std::process;
 ///
 /// println!("My pid is {}", process::id());
 /// ```
-///
-///
 #[must_use]
 #[stable(feature = "getpid", since = "1.26.0")]
 pub fn id() -> u32 {

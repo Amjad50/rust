@@ -2,7 +2,6 @@
 #![deny(improper_ctypes)]
 #![feature(ptr_internals)]
 #![feature(transparent_unions)]
-#![feature(result_ffi_guarantees)]
 
 use std::num;
 
@@ -95,6 +94,7 @@ extern "C" {
     fn option_transparent_union(x: Option<TransparentUnion<num::NonZero<u8>>>);
     //~^ ERROR `extern` block uses type
     fn option_repr_rust(x: Option<Rust<num::NonZero<u8>>>); //~ ERROR `extern` block uses type
+    fn option_u8(x: Option<u8>); //~ ERROR `extern` block uses type
 
     fn result_ref_t(x: Result<&'static u8, ()>);
     fn result_fn_t(x: Result<extern "C" fn(), ()>);

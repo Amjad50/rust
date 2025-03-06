@@ -6,11 +6,11 @@ use hir::{
 };
 use ide_db::{
     base_db::{
-        salsa::{
+        ra_salsa::{
             debug::{DebugQueryTable, TableEntry},
             Query, QueryTable,
         },
-        CompressedFileTextQuery, CrateData, FileId, ParseQuery, SourceDatabase, SourceRootId,
+        CompressedFileTextQuery, CrateData, ParseQuery, SourceDatabase, SourceRootId,
     },
     symbol_index::ModuleSymbolsQuery,
 };
@@ -20,7 +20,7 @@ use ide_db::{
 };
 use itertools::Itertools;
 use profile::{memory_usage, Bytes};
-use std::env;
+use span::{EditionedFileId, FileId};
 use stdx::format_to;
 use syntax::{ast, Parse, SyntaxNode};
 use triomphe::Arc;
@@ -29,12 +29,11 @@ use triomphe::Arc;
 //
 // Shows internal statistic about memory usage of rust-analyzer.
 //
-// |===
-// | Editor  | Action Name
+// | Editor  | Action Name |
+// |---------|-------------|
+// | VS Code | **rust-analyzer: Status** |
 //
-// | VS Code | **rust-analyzer: Status**
-// |===
-// image::https://user-images.githubusercontent.com/48062697/113065584-05f34500-91b1-11eb-98cc-5c196f76be7f.gif[]
+// ![Status](https://user-images.githubusercontent.com/48062697/113065584-05f34500-91b1-11eb-98cc-5c196f76be7f.gif)
 pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
     let mut buf = String::new();
 
@@ -44,9 +43,6 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
     format_to!(buf, "{}\n", collect_query(LibrarySymbolsQuery.in_db(db)));
     format_to!(buf, "{}\n", collect_query(ModuleSymbolsQuery.in_db(db)));
     format_to!(buf, "{} in total\n", memory_usage());
-    if env::var("RA_COUNT").is_ok() {
-        format_to!(buf, "\nCounts:\n{}", profile::countme::get_all());
-    }
 
     format_to!(buf, "\nDebug info:\n");
     format_to!(buf, "{}\n", collect_query(AttrsQuery.in_db(db)));
@@ -72,6 +68,7 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
                 dependencies,
                 origin,
                 is_proc_macro,
+                proc_macro_cwd,
             } = &crate_graph[crate_id];
             format_to!(
                 buf,
@@ -89,6 +86,7 @@ pub(crate) fn status(db: &RootDatabase, file_id: Option<FileId>) -> String {
             format_to!(buf, "    Env: {:?}\n", env);
             format_to!(buf, "    Origin: {:?}\n", origin);
             format_to!(buf, "    Is a proc macro crate: {}\n", is_proc_macro);
+            format_to!(buf, "    Proc macro cwd: {:?}\n", proc_macro_cwd);
             let deps = dependencies
                 .iter()
                 .map(|dep| format!("{}={}", dep.name, dep.crate_id.into_raw()))
@@ -213,8 +211,8 @@ impl<const MACROS: bool> fmt::Display for SyntaxTreeStats<MACROS> {
     }
 }
 
-impl StatCollect<FileId, Parse<ast::SourceFile>> for SyntaxTreeStats<false> {
-    fn collect_entry(&mut self, _: FileId, value: Option<Parse<ast::SourceFile>>) {
+impl StatCollect<EditionedFileId, Parse<ast::SourceFile>> for SyntaxTreeStats<false> {
+    fn collect_entry(&mut self, _: EditionedFileId, value: Option<Parse<ast::SourceFile>>) {
         self.total += 1;
         self.retained += value.is_some() as usize;
     }

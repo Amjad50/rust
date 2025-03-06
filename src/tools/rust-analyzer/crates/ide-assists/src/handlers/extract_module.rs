@@ -4,10 +4,9 @@ use either::Either;
 use hir::{HasSource, HirFileIdExt, ModuleSource};
 use ide_db::{
     assists::{AssistId, AssistKind},
-    base_db::FileId,
     defs::{Definition, NameClass, NameRefClass},
     search::{FileReference, SearchScope},
-    FxHashMap, FxHashSet,
+    FileId, FxHashMap, FxHashSet,
 };
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -364,7 +363,7 @@ impl Module {
 
                 None
             });
-            refs_in_files.entry(file_id).or_default().extend(usages);
+            refs_in_files.entry(file_id.file_id()).or_default().extend(usages);
         }
     }
 
@@ -426,7 +425,9 @@ impl Module {
                         })
                     } else if let Some(name_ref) = ast::NameRef::cast(x) {
                         NameRefClass::classify(&ctx.sema, &name_ref).and_then(|nc| match nc {
-                            NameRefClass::Definition(def) => Some((name_ref.syntax().clone(), def)),
+                            NameRefClass::Definition(def, _) => {
+                                Some((name_ref.syntax().clone(), def))
+                            }
                             _ => None,
                         })
                     } else {
@@ -477,8 +478,13 @@ impl Module {
             }
         }
 
-        let (def_in_mod, def_out_sel) =
-            check_def_in_mod_and_out_sel(def, ctx, curr_parent_module, selection_range, file_id);
+        let (def_in_mod, def_out_sel) = check_def_in_mod_and_out_sel(
+            def,
+            ctx,
+            curr_parent_module,
+            selection_range,
+            file_id.file_id(),
+        );
 
         // Find use stmt that use def in current file
         let use_stmt: Option<ast::Use> = usage_res

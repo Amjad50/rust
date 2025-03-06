@@ -1,13 +1,15 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::sugg::Sugg;
 use clippy_utils::{
-    can_move_expr_to_closure, eager_or_lazy, higher, in_constant, is_else_clause, is_res_lang_ctor, peel_blocks,
-    peel_hir_expr_while, CaptureKind,
+    CaptureKind, can_move_expr_to_closure, eager_or_lazy, higher, is_else_clause, is_in_const_context,
+    is_res_lang_ctor, peel_blocks, peel_hir_expr_while,
 };
 use rustc_errors::Applicability;
-use rustc_hir::def::Res;
 use rustc_hir::LangItem::{OptionNone, OptionSome, ResultErr, ResultOk};
-use rustc_hir::{Arm, BindingMode, Expr, ExprKind, MatchSource, Mutability, Pat, PatKind, Path, QPath, UnOp};
+use rustc_hir::def::Res;
+use rustc_hir::{
+    Arm, BindingMode, Expr, ExprKind, MatchSource, Mutability, Pat, PatExpr, PatExprKind, PatKind, Path, QPath, UnOp,
+};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
 use rustc_span::SyntaxContext;
@@ -281,7 +283,11 @@ fn try_convert_match<'tcx>(
 
 fn is_none_or_err_arm(cx: &LateContext<'_>, arm: &Arm<'_>) -> bool {
     match arm.pat.kind {
-        PatKind::Path(ref qpath) => is_res_lang_ctor(cx, cx.qpath_res(qpath, arm.pat.hir_id), OptionNone),
+        PatKind::Expr(PatExpr {
+            kind: PatExprKind::Path(qpath),
+            hir_id,
+            ..
+        }) => is_res_lang_ctor(cx, cx.qpath_res(qpath, *hir_id), OptionNone),
         PatKind::TupleStruct(ref qpath, [first_pat], _) => {
             is_res_lang_ctor(cx, cx.qpath_res(qpath, arm.pat.hir_id), ResultErr)
                 && matches!(first_pat.kind, PatKind::Wild)
@@ -294,7 +300,7 @@ fn is_none_or_err_arm(cx: &LateContext<'_>, arm: &Arm<'_>) -> bool {
 impl<'tcx> LateLintPass<'tcx> for OptionIfLetElse {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &Expr<'tcx>) {
         // Don't lint macros and constants
-        if expr.span.from_expansion() || in_constant(cx, expr.hir_id) {
+        if expr.span.from_expansion() || is_in_const_context(cx) {
             return;
         }
 

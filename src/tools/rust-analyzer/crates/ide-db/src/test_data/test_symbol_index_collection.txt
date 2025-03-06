@@ -18,8 +18,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: TYPE_ALIAS,
@@ -46,8 +49,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: CONST,
@@ -74,8 +80,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: CONST,
@@ -104,8 +113,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: ENUM,
@@ -134,8 +146,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
@@ -164,8 +179,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: MACRO_DEF,
@@ -192,8 +210,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STATIC,
@@ -222,8 +243,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -282,8 +306,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -314,8 +341,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -346,8 +376,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -376,8 +409,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -404,8 +440,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: TRAIT,
@@ -434,8 +473,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
@@ -464,8 +506,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: UNION,
@@ -494,8 +539,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: MODULE,
@@ -524,8 +572,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: MODULE,
@@ -554,8 +605,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: MACRO_RULES,
@@ -577,13 +631,16 @@
                 def: Function(
                     Function {
                         id: FunctionId(
-                            3,
+                            2,
                         ),
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: FN,
@@ -607,13 +664,16 @@
                 def: Function(
                     Function {
                         id: FunctionId(
-                            2,
+                            1,
                         ),
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: FN,
@@ -644,8 +704,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: MACRO_RULES,
@@ -672,8 +735,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: FN,
@@ -702,8 +768,11 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
@@ -725,13 +794,16 @@
                 def: Function(
                     Function {
                         id: FunctionId(
-                            1,
+                            3,
                         ),
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: FN,
@@ -773,8 +845,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        0,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            0,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -804,6 +879,37 @@
         [
             FileSymbol {
                 name: "IsThisJustATrait",
+                def: Trait(
+                    Trait {
+                        id: TraitId(
+                            0,
+                        ),
+                    },
+                ),
+                loc: DeclarationLocation {
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            1,
+                        ),
+                        Edition2021,
+                    ),
+                    ptr: SyntaxNodePtr {
+                        kind: USE_TREE,
+                        range: 141..173,
+                    },
+                    name_ptr: AstPtr(
+                        SyntaxNodePtr {
+                            kind: NAME,
+                            range: 157..173,
+                        },
+                    ),
+                },
+                container_name: None,
+                is_alias: false,
+                is_assoc: false,
+            },
+            FileSymbol {
+                name: "IsThisJustATrait",
                 def: Macro(
                     Macro {
                         id: Macro2Id(
@@ -814,17 +920,20 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        1,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            1,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
-                        range: 111..143,
+                        range: 141..173,
                     },
                     name_ptr: AstPtr(
                         SyntaxNodePtr {
                             kind: NAME,
-                            range: 127..143,
+                            range: 157..173,
                         },
                     ),
                 },
@@ -844,8 +953,11 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        1,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            1,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: STRUCT,
@@ -874,17 +986,20 @@
                     },
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        1,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            1,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
-                        range: 25..59,
+                        range: 35..69,
                     },
                     name_ptr: AstPtr(
                         SyntaxNodePtr {
                             kind: NAME,
-                            range: 41..59,
+                            range: 51..69,
                         },
                     ),
                 },
@@ -904,47 +1019,20 @@
                     ),
                 ),
                 loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        1,
+                    hir_file_id: EditionedFileId(
+                        FileId(
+                            1,
+                        ),
+                        Edition2021,
                     ),
                     ptr: SyntaxNodePtr {
                         kind: USE_TREE,
-                        range: 65..105,
+                        range: 85..125,
                     },
                     name_ptr: AstPtr(
                         SyntaxNodePtr {
                             kind: NAME,
-                            range: 95..105,
-                        },
-                    ),
-                },
-                container_name: None,
-                is_alias: false,
-                is_assoc: false,
-            },
-            FileSymbol {
-                name: "ThisStruct",
-                def: Adt(
-                    Struct(
-                        Struct {
-                            id: StructId(
-                                4,
-                            ),
-                        },
-                    ),
-                ),
-                loc: DeclarationLocation {
-                    hir_file_id: FileId(
-                        1,
-                    ),
-                    ptr: SyntaxNodePtr {
-                        kind: USE_TREE,
-                        range: 65..105,
-                    },
-                    name_ptr: AstPtr(
-                        SyntaxNodePtr {
-                            kind: NAME,
-                            range: 95..105,
+                            range: 115..125,
                         },
                     ),
                 },

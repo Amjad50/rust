@@ -6,7 +6,6 @@ use crate::prelude::*;
 pub(crate) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     intrinsic: &str,
-    _args: GenericArgsRef<'tcx>,
     args: &[Spanned<mir::Operand<'tcx>>],
     ret: CPlace<'tcx>,
     target: Option<BasicBlock>,
@@ -16,6 +15,14 @@ pub(crate) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
     match intrinsic {
         "llvm.aarch64.isb" => {
             fx.bcx.ins().fence();
+        }
+
+        "llvm.aarch64.neon.ld1x4.v16i8.p0i8" => {
+            intrinsic_args!(fx, args => (ptr); intrinsic);
+
+            let ptr = ptr.load_scalar(fx);
+            let val = CPlace::for_ptr(Pointer::new(ptr), ret.layout()).to_cvalue(fx);
+            ret.write_cvalue(fx, val);
         }
 
         _ if intrinsic.starts_with("llvm.aarch64.neon.abs.v") => {
@@ -90,6 +97,60 @@ pub(crate) fn codegen_aarch64_llvm_intrinsic_call<'tcx>(
                     fx.bcx.ins().select(gt, x_lane, y_lane)
                 },
             );
+        }
+
+        _ if intrinsic.starts_with("llvm.aarch64.neon.fmax.v") => {
+            intrinsic_args!(fx, args => (x, y); intrinsic);
+
+            simd_pair_for_each_lane(
+                fx,
+                x,
+                y,
+                ret,
+                &|fx, _lane_ty, _res_lane_ty, x_lane, y_lane| fx.bcx.ins().fmax(x_lane, y_lane),
+            );
+        }
+
+        _ if intrinsic.starts_with("llvm.aarch64.neon.fmin.v") => {
+            intrinsic_args!(fx, args => (x, y); intrinsic);
+
+            simd_pair_for_each_lane(
+                fx,
+                x,
+                y,
+                ret,
+                &|fx, _lane_ty, _res_lane_ty, x_lane, y_lane| fx.bcx.ins().fmin(x_lane, y_lane),
+            );
+        }
+
+        "llvm.aarch64.neon.uaddlv.i32.v16i8" => {
+            intrinsic_args!(fx, args => (v); intrinsic);
+
+            let mut res_val = fx.bcx.ins().iconst(types::I16, 0);
+            for lane_idx in 0..16 {
+                let lane = v.value_lane(fx, lane_idx).load_scalar(fx);
+                let lane = fx.bcx.ins().uextend(types::I16, lane);
+                res_val = fx.bcx.ins().iadd(res_val, lane);
+            }
+            let res = CValue::by_val(
+                fx.bcx.ins().uextend(types::I32, res_val),
+                fx.layout_of(fx.tcx.types.u32),
+            );
+            ret.write_cvalue(fx, res);
+        }
+
+        _ if intrinsic.starts_with("llvm.aarch64.neon.faddv.f32.v") => {
+            intrinsic_args!(fx, args => (v); intrinsic);
+
+            simd_reduce(fx, v, None, ret, &|fx, _ty, a, b| fx.bcx.ins().fadd(a, b));
+        }
+
+        _ if intrinsic.starts_with("llvm.aarch64.neon.frintn.v") => {
+            intrinsic_args!(fx, args => (v); intrinsic);
+
+            simd_for_each_lane(fx, v, ret, &|fx, _lane_ty, _res_lane_ty, lane| {
+                fx.bcx.ins().nearest(lane)
+            });
         }
 
         _ if intrinsic.starts_with("llvm.aarch64.neon.smaxv.i") => {

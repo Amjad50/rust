@@ -1,6 +1,6 @@
 use super::{
-    AdtExpr, Arm, Block, ClosureExpr, Expr, ExprKind, InlineAsmExpr, InlineAsmOperand, Pat,
-    PatKind, Stmt, StmtKind, Thir,
+    AdtExpr, AdtExprBase, Arm, Block, ClosureExpr, Expr, ExprKind, InlineAsmExpr, InlineAsmOperand,
+    Pat, PatKind, Stmt, StmtKind, Thir,
 };
 
 pub trait Visitor<'thir, 'tcx: 'thir>: Sized {
@@ -68,7 +68,9 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
         Cast { source } => visitor.visit_expr(&visitor.thir()[source]),
         Use { source } => visitor.visit_expr(&visitor.thir()[source]),
         NeverToAny { source } => visitor.visit_expr(&visitor.thir()[source]),
-        PointerCoercion { source, cast: _ } => visitor.visit_expr(&visitor.thir()[source]),
+        PointerCoercion { source, cast: _, is_from_as_cast: _ } => {
+            visitor.visit_expr(&visitor.thir()[source])
+        }
         Let { expr, ref pat } => {
             visitor.visit_expr(&visitor.thir()[expr]);
             visitor.visit_pat(pat);
@@ -92,7 +94,7 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
         }
         VarRef { id: _ } | UpvarRef { closure_def_id: _, var_hir_id: _ } => {}
         Borrow { arg, borrow_kind: _ } => visitor.visit_expr(&visitor.thir()[arg]),
-        AddressOf { arg, mutability: _ } => visitor.visit_expr(&visitor.thir()[arg]),
+        RawBorrow { arg, mutability: _ } => visitor.visit_expr(&visitor.thir()[arg]),
         Break { value, label: _ } => {
             if let Some(value) = value {
                 visitor.visit_expr(&visitor.thir()[value])
@@ -125,13 +127,17 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
             for field in &**fields {
                 visitor.visit_expr(&visitor.thir()[field.expr]);
             }
-            if let Some(base) = base {
+            if let AdtExprBase::Base(base) = base {
                 visitor.visit_expr(&visitor.thir()[base.base]);
             }
         }
-        PlaceTypeAscription { source, user_ty: _ } | ValueTypeAscription { source, user_ty: _ } => {
+        PlaceTypeAscription { source, user_ty: _, user_ty_span: _ }
+        | ValueTypeAscription { source, user_ty: _, user_ty_span: _ } => {
             visitor.visit_expr(&visitor.thir()[source])
         }
+        PlaceUnwrapUnsafeBinder { source }
+        | ValueUnwrapUnsafeBinder { source }
+        | WrapUnsafeBinder { source } => visitor.visit_expr(&visitor.thir()[source]),
         Closure(box ClosureExpr {
             closure_id: _,
             args: _,
@@ -145,7 +151,13 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
         NamedConst { def_id: _, args: _, user_ty: _ } => {}
         ConstParam { param: _, def_id: _ } => {}
         StaticRef { alloc_id: _, ty: _, def_id: _ } => {}
-        InlineAsm(box InlineAsmExpr { ref operands, template: _, options: _, line_spans: _ }) => {
+        InlineAsm(box InlineAsmExpr {
+            asm_macro: _,
+            ref operands,
+            template: _,
+            options: _,
+            line_spans: _,
+        }) => {
             for op in &**operands {
                 use InlineAsmOperand::*;
                 match op {
@@ -160,7 +172,7 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
                     }
                     Out { expr: None, reg: _, late: _ }
                     | Const { value: _, span: _ }
-                    | SymFn { value: _, span: _ }
+                    | SymFn { value: _ }
                     | SymStatic { def_id: _ } => {}
                     Label { block } => visitor.visit_block(&visitor.thir()[*block]),
                 }
@@ -182,7 +194,7 @@ pub fn walk_stmt<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
             initializer,
             remainder_scope: _,
             init_scope: _,
-            ref pattern,
+            pattern,
             lint_level: _,
             else_block,
             span: _,
@@ -238,7 +250,7 @@ pub fn walk_pat<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
             }
         }
         Constant { value: _ } => {}
-        InlineConstant { def: _, subpattern } => visitor.visit_pat(subpattern),
+        ExpandedConstant { def_id: _, is_inline: _, subpattern } => visitor.visit_pat(subpattern),
         Range(_) => {}
         Slice { prefix, slice, suffix } | Array { prefix, slice, suffix } => {
             for subpattern in prefix.iter() {

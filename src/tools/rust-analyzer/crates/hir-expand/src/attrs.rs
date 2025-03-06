@@ -4,25 +4,29 @@ use std::{borrow::Cow, fmt, ops};
 use base_db::CrateId;
 use cfg::CfgExpr;
 use either::Either;
-use intern::Interned;
-use mbe::{syntax_node_to_token_tree, DelimiterKind, Punct};
+use intern::{sym, Interned, Symbol};
+
+use mbe::{DelimiterKind, Punct};
 use smallvec::{smallvec, SmallVec};
 use span::{Span, SyntaxContextId};
 use syntax::unescape;
-use syntax::{ast, format_smolstr, match_ast, AstNode, AstToken, SmolStr, SyntaxNode};
+use syntax::{ast, match_ast, AstNode, AstToken, SyntaxNode};
+use syntax_bridge::{desugar_doc_comment_text, syntax_node_to_token_tree, DocCommentDesugarMode};
 use triomphe::ThinArc;
 
+use crate::name::Name;
 use crate::{
     db::ExpandDatabase,
     mod_path::ModPath,
     span_map::SpanMapRef,
-    tt::{self, Subtree},
+    tt::{self, token_to_literal, TopSubtree},
     InFile,
 };
 
 /// Syntactical attributes, without filtering of `cfg_attr`s.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RawAttrs {
+    // FIXME: This can become `Box<[Attr]>` if https://internals.rust-lang.org/t/layout-of-dst-box/21728?u=chrefr is accepted.
     entries: Option<ThinArc<(), Attr>>,
 }
 
@@ -52,13 +56,20 @@ impl RawAttrs {
                 }
                 Either::Right(comment) => comment.doc_comment().map(|doc| {
                     let span = span_map.span_for_range(comment.syntax().text_range());
+                    let (text, kind) =
+                        desugar_doc_comment_text(doc, DocCommentDesugarMode::ProcMacro);
                     Attr {
                         id,
-                        input: Some(Interned::new(AttrInput::Literal(tt::Literal {
-                            text: SmolStr::new(format_smolstr!("\"{}\"", Self::escape_chars(doc))),
+                        input: Some(Box::new(AttrInput::Literal(tt::Literal {
+                            symbol: text,
                             span,
+                            kind,
+                            suffix: None,
                         }))),
-                        path: Interned::new(ModPath::from(crate::name!(doc))),
+                        path: Interned::new(ModPath::from(Name::new_symbol(
+                            sym::doc.clone(),
+                            span.ctx,
+                        ))),
                         ctxt: span.ctx,
                     }
                 }),
@@ -72,10 +83,6 @@ impl RawAttrs {
         };
 
         RawAttrs { entries }
-    }
-
-    fn escape_chars(s: &str) -> String {
-        s.replace('\\', r#"\\"#).replace('"', r#"\""#)
     }
 
     pub fn from_attrs_owner(
@@ -100,8 +107,8 @@ impl RawAttrs {
                     .chain(b.slice.iter().map(|it| {
                         let mut it = it.clone();
                         it.id.id = (it.id.ast_index() as u32 + last_ast_index)
-                            | (it.id.cfg_attr_index().unwrap_or(0) as u32)
-                                << AttrId::AST_INDEX_BITS;
+                            | ((it.id.cfg_attr_index().unwrap_or(0) as u32)
+                                << AttrId::AST_INDEX_BITS);
                         it
                     }))
                     .collect::<Vec<_>>();
@@ -115,7 +122,7 @@ impl RawAttrs {
     pub fn filter(self, db: &dyn ExpandDatabase, krate: CrateId) -> RawAttrs {
         let has_cfg_attrs = self
             .iter()
-            .any(|attr| attr.path.as_ident().map_or(false, |name| *name == crate::name![cfg_attr]));
+            .any(|attr| attr.path.as_ident().is_some_and(|name| *name == sym::cfg_attr.clone()));
         if !has_cfg_attrs {
             return self;
         }
@@ -125,7 +132,7 @@ impl RawAttrs {
             self.iter()
                 .flat_map(|attr| -> SmallVec<[_; 1]> {
                     let is_cfg_attr =
-                        attr.path.as_ident().map_or(false, |name| *name == crate::name![cfg_attr]);
+                        attr.path.as_ident().is_some_and(|name| *name == sym::cfg_attr.clone());
                     if !is_cfg_attr {
                         return smallvec![attr.clone()];
                     }
@@ -145,7 +152,7 @@ impl RawAttrs {
                     );
 
                     let cfg_options = &crate_graph[krate].cfg_options;
-                    let cfg = Subtree { delimiter: subtree.delimiter, token_trees: Box::from(cfg) };
+                    let cfg = TopSubtree::from_token_trees(subtree.top_subtree().delimiter, cfg);
                     let cfg = CfgExpr::parse(&cfg);
                     if cfg_options.check(&cfg) == Some(false) {
                         smallvec![]
@@ -162,6 +169,10 @@ impl RawAttrs {
             Some(ThinArc::from_header_and_iter((), new_attrs.into_iter()))
         };
         RawAttrs { entries }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_none()
     }
 }
 
@@ -191,7 +202,7 @@ impl AttrId {
     }
 
     pub fn with_cfg_attr(self, idx: usize) -> AttrId {
-        AttrId { id: self.id | (idx as u32) << Self::AST_INDEX_BITS | Self::CFG_ATTR_SET_BITS }
+        AttrId { id: self.id | ((idx as u32) << Self::AST_INDEX_BITS) | Self::CFG_ATTR_SET_BITS }
     }
 }
 
@@ -199,7 +210,7 @@ impl AttrId {
 pub struct Attr {
     pub id: AttrId,
     pub path: Interned<ModPath>,
-    pub input: Option<Interned<AttrInput>>,
+    pub input: Option<Box<AttrInput>>,
     pub ctxt: SyntaxContextId,
 }
 
@@ -208,7 +219,7 @@ pub enum AttrInput {
     /// `#[attr = "string"]`
     Literal(tt::Literal),
     /// `#[attr(subtree)]`
-    TokenTree(Box<tt::Subtree>),
+    TokenTree(tt::TopSubtree),
 }
 
 impl fmt::Display for AttrInput {
@@ -234,44 +245,70 @@ impl Attr {
         })?);
         let span = span_map.span_for_range(range);
         let input = if let Some(ast::Expr::Literal(lit)) = ast.expr() {
-            Some(Interned::new(AttrInput::Literal(tt::Literal {
-                text: lit.token().text().into(),
-                span,
-            })))
+            let token = lit.token();
+            Some(Box::new(AttrInput::Literal(token_to_literal(token.text(), span))))
         } else if let Some(tt) = ast.token_tree() {
-            let tree = syntax_node_to_token_tree(tt.syntax(), span_map, span);
-            Some(Interned::new(AttrInput::TokenTree(Box::new(tree))))
+            let tree = syntax_node_to_token_tree(
+                tt.syntax(),
+                span_map,
+                span,
+                DocCommentDesugarMode::ProcMacro,
+            );
+            Some(Box::new(AttrInput::TokenTree(tree)))
         } else {
             None
         };
         Some(Attr { id, path, input, ctxt: span.ctx })
     }
 
-    fn from_tt(db: &dyn ExpandDatabase, tt: &[tt::TokenTree], id: AttrId) -> Option<Attr> {
-        let ctxt = tt.first()?.first_span().ctx;
-        let path_end = tt
-            .iter()
-            .position(|tt| {
-                !matches!(
+    fn from_tt(
+        db: &dyn ExpandDatabase,
+        mut tt: tt::TokenTreesView<'_>,
+        id: AttrId,
+    ) -> Option<Attr> {
+        if matches!(tt.flat_tokens(),
+            [tt::TokenTree::Leaf(tt::Leaf::Ident(tt::Ident { sym, .. })), ..]
+            if *sym == sym::unsafe_
+        ) {
+            match tt.iter().nth(1) {
+                Some(tt::TtElement::Subtree(_, iter)) => tt = iter.remaining(),
+                _ => return None,
+            }
+        }
+        let first = tt.flat_tokens().first()?;
+        let ctxt = first.first_span().ctx;
+        let (path, input) = {
+            let mut iter = tt.iter();
+            let start = iter.savepoint();
+            let mut input = tt::TokenTreesView::new(&[]);
+            let mut path = iter.from_savepoint(start);
+            let mut path_split_savepoint = iter.savepoint();
+            while let Some(tt) = iter.next() {
+                path = iter.from_savepoint(start);
+                if !matches!(
                     tt,
-                    tt::TokenTree::Leaf(
+                    tt::TtElement::Leaf(
                         tt::Leaf::Punct(tt::Punct { char: ':' | '$', .. }) | tt::Leaf::Ident(_),
                     )
-                )
-            })
-            .unwrap_or(tt.len());
+                ) {
+                    input = path_split_savepoint.remaining();
+                    break;
+                }
+                path_split_savepoint = iter.savepoint();
+            }
+            (path, input)
+        };
 
-        let (path, input) = tt.split_at(path_end);
         let path = Interned::new(ModPath::from_tt(db, path)?);
 
-        let input = match input.first() {
-            Some(tt::TokenTree::Subtree(tree)) => {
-                Some(Interned::new(AttrInput::TokenTree(Box::new(tree.clone()))))
+        let input = match (input.flat_tokens().first(), input.try_into_subtree()) {
+            (_, Some(tree)) => {
+                Some(Box::new(AttrInput::TokenTree(tt::TopSubtree::from_subtree(tree))))
             }
-            Some(tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct { char: '=', .. }))) => {
-                let input = match input.get(1) {
+            (Some(tt::TokenTree::Leaf(tt::Leaf::Punct(tt::Punct { char: '=', .. }))), _) => {
+                let input = match input.flat_tokens().get(1) {
                     Some(tt::TokenTree::Leaf(tt::Leaf::Literal(lit))) => {
-                        Some(Interned::new(AttrInput::Literal(lit.clone())))
+                        Some(Box::new(AttrInput::Literal(lit.clone())))
                     }
                     _ => None,
                 };
@@ -289,26 +326,38 @@ impl Attr {
 
 impl Attr {
     /// #[path = "string"]
-    pub fn string_value(&self) -> Option<&str> {
+    pub fn string_value(&self) -> Option<&Symbol> {
         match self.input.as_deref()? {
-            AttrInput::Literal(it) => match it.text.strip_prefix('r') {
-                Some(it) => it.trim_matches('#'),
-                None => it.text.as_str(),
-            }
-            .strip_prefix('"')?
-            .strip_suffix('"'),
+            AttrInput::Literal(tt::Literal {
+                symbol: text,
+                kind: tt::LitKind::Str | tt::LitKind::StrRaw(_),
+                ..
+            }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// #[path = "string"]
+    pub fn string_value_with_span(&self) -> Option<(&Symbol, span::Span)> {
+        match self.input.as_deref()? {
+            AttrInput::Literal(tt::Literal {
+                symbol: text,
+                kind: tt::LitKind::Str | tt::LitKind::StrRaw(_),
+                span,
+                suffix: _,
+            }) => Some((text, *span)),
             _ => None,
         }
     }
 
     pub fn string_value_unescape(&self) -> Option<Cow<'_, str>> {
         match self.input.as_deref()? {
-            AttrInput::Literal(it) => match it.text.strip_prefix('r') {
-                Some(it) => {
-                    it.trim_matches('#').strip_prefix('"')?.strip_suffix('"').map(Cow::Borrowed)
-                }
-                None => it.text.strip_prefix('"')?.strip_suffix('"').and_then(unescape),
-            },
+            AttrInput::Literal(tt::Literal {
+                symbol: text, kind: tt::LitKind::StrRaw(_), ..
+            }) => Some(Cow::Borrowed(text.as_str())),
+            AttrInput::Literal(tt::Literal { symbol: text, kind: tt::LitKind::Str, .. }) => {
+                unescape(text.as_str())
+            }
             _ => None,
         }
     }
@@ -316,7 +365,7 @@ impl Attr {
     /// #[path(ident)]
     pub fn single_ident_value(&self) -> Option<&tt::Ident> {
         match self.input.as_deref()? {
-            AttrInput::TokenTree(tt) => match &*tt.token_trees {
+            AttrInput::TokenTree(tt) => match tt.token_trees().flat_tokens() {
                 [tt::TokenTree::Leaf(tt::Leaf::Ident(ident))] => Some(ident),
                 _ => None,
             },
@@ -325,7 +374,7 @@ impl Attr {
     }
 
     /// #[path TokenTree]
-    pub fn token_tree_value(&self) -> Option<&Subtree> {
+    pub fn token_tree_value(&self) -> Option<&TopSubtree> {
         match self.input.as_deref()? {
             AttrInput::TokenTree(tt) => Some(tt),
             _ => None,
@@ -339,14 +388,14 @@ impl Attr {
     ) -> Option<impl Iterator<Item = (ModPath, Span)> + 'a> {
         let args = self.token_tree_value()?;
 
-        if args.delimiter.kind != DelimiterKind::Parenthesis {
+        if args.top_subtree().delimiter.kind != DelimiterKind::Parenthesis {
             return None;
         }
         let paths = args
-            .token_trees
-            .split(|tt| matches!(tt, tt::TokenTree::Leaf(tt::Leaf::Punct(Punct { char: ',', .. }))))
+            .token_trees()
+            .split(|tt| matches!(tt, tt::TtElement::Leaf(tt::Leaf::Punct(Punct { char: ',', .. }))))
             .filter_map(move |tts| {
-                let span = tts.first()?.first_span();
+                let span = tts.flat_tokens().first()?.first_span();
                 Some((ModPath::from_tt(db, tts)?, span))
             });
 
@@ -354,7 +403,7 @@ impl Attr {
     }
 
     pub fn cfg(&self) -> Option<CfgExpr> {
-        if *self.path.as_ident()? == crate::name![cfg] {
+        if *self.path.as_ident()? == sym::cfg.clone() {
             self.token_tree_value().map(CfgExpr::parse)
         } else {
             None
@@ -430,12 +479,12 @@ fn inner_attributes(
 
 // Input subtree is: `(cfg, $(attr),+)`
 // Split it up into a `cfg` subtree and the `attr` subtrees.
-pub fn parse_cfg_attr_input(
-    subtree: &Subtree,
-) -> Option<(&[tt::TokenTree], impl Iterator<Item = &[tt::TokenTree]>)> {
+fn parse_cfg_attr_input(
+    subtree: &TopSubtree,
+) -> Option<(tt::TokenTreesView<'_>, impl Iterator<Item = tt::TokenTreesView<'_>>)> {
     let mut parts = subtree
-        .token_trees
-        .split(|tt| matches!(tt, tt::TokenTree::Leaf(tt::Leaf::Punct(Punct { char: ',', .. }))));
+        .token_trees()
+        .split(|tt| matches!(tt, tt::TtElement::Leaf(tt::Leaf::Punct(Punct { char: ',', .. }))));
     let cfg = parts.next()?;
     Some((cfg, parts.filter(|it| !it.is_empty())))
 }

@@ -3,10 +3,9 @@ use std::iter;
 use expect_test::{expect, Expect};
 use hir::Semantics;
 use ide_db::{
-    base_db::{FilePosition, FileRange},
     defs::Definition,
     documentation::{Documentation, HasDocs},
-    RootDatabase,
+    FilePosition, FileRange, RootDatabase,
 };
 use itertools::Itertools;
 use syntax::{ast, match_ast, AstNode, SyntaxNode};
@@ -17,7 +16,7 @@ use crate::{
 };
 
 fn check_external_docs(
-    ra_fixture: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
     target_dir: Option<&str>,
     expect_web_url: Option<Expect>,
     expect_local_url: Option<Expect>,
@@ -42,7 +41,7 @@ fn check_external_docs(
     }
 }
 
-fn check_rewrite(ra_fixture: &str, expect: Expect) {
+fn check_rewrite(#[rust_analyzer::rust_fixture] ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let sema = &Semantics::new(&*analysis.db);
     let (cursor_def, docs) = def_under_cursor(sema, &position);
@@ -50,7 +49,7 @@ fn check_rewrite(ra_fixture: &str, expect: Expect) {
     expect.assert_eq(&res)
 }
 
-fn check_doc_links(ra_fixture: &str) {
+fn check_doc_links(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
     let key_fn = |&(FileRange { file_id, range }, _): &_| (file_id, range.start());
 
     let (analysis, position, mut expected) = fixture::annotations(ra_fixture);
@@ -80,7 +79,7 @@ fn def_under_cursor(
     position: &FilePosition,
 ) -> (Definition, Documentation) {
     let (docs, def) = sema
-        .parse(position.file_id)
+        .parse_guess_edition(position.file_id)
         .syntax()
         .token_at_offset(position.offset)
         .left_biased()
@@ -685,5 +684,97 @@ fn rewrite_intra_doc_link_with_anchor() {
         fn main() {}
         "#,
         expect!["[PartialEq#derivable](https://doc.rust-lang.org/stable/core/cmp/trait.PartialEq.html#derivable)"],
+    );
+}
+
+#[test]
+fn rewrite_intra_doc_link_to_associated_item() {
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::bar]
+pub struct $0Foo;
+
+impl Foo {
+    fn bar() {}
+}
+"#,
+        expect![[r#"[Foo::bar](https://docs.rs/foo/*/foo/struct.Foo.html#method.bar)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::bar]
+pub struct $0Foo {
+    bar: ()
+}
+"#,
+        expect![[r#"[Foo::bar](https://docs.rs/foo/*/foo/struct.Foo.html#structfield.bar)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::Bar]
+pub enum $0Foo {
+    Bar
+}
+"#,
+        expect![[r#"[Foo::Bar](https://docs.rs/foo/*/foo/enum.Foo.html#variant.Bar)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::BAR]
+pub struct $0Foo;
+
+impl Foo {
+    const BAR: () = ();
+}
+"#,
+        expect![[
+            r#"[Foo::BAR](https://docs.rs/foo/*/foo/struct.Foo.html#associatedconstant.BAR)"#
+        ]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::bar]
+pub trait $0Foo {
+    fn bar();
+}
+"#,
+        expect![[r#"[Foo::bar](https://docs.rs/foo/*/foo/trait.Foo.html#tymethod.bar)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::Bar]
+pub trait $0Foo {
+    type Bar;
+}
+"#,
+        expect![[r#"[Foo::Bar](https://docs.rs/foo/*/foo/trait.Foo.html#associatedtype.Bar)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [Foo::bar#anchor]
+pub struct $0Foo {
+    bar: (),
+}
+"#,
+        expect![[r#"[Foo::bar#anchor](https://docs.rs/foo/*/foo/struct.Foo.html#anchor)"#]],
+    );
+    check_rewrite(
+        r#"
+//- /main.rs crate:foo
+/// [method](Foo::bar)
+pub struct $0Foo;
+
+impl Foo {
+    fn bar() {}
+}
+"#,
+        expect![[r#"[method](https://docs.rs/foo/*/foo/struct.Foo.html#method.bar)"#]],
     );
 }

@@ -1,5 +1,4 @@
-use super::make_command_line;
-use super::Arg;
+use super::{Arg, make_command_line};
 use crate::env;
 use crate::ffi::{OsStr, OsString};
 use crate::process::Command;
@@ -34,7 +33,7 @@ fn test_thread_handle() {
     assert!(p.is_ok());
     let mut p = p.unwrap();
 
-    extern "system" {
+    unsafe extern "system" {
         fn ResumeThread(_: BorrowedHandle<'_>) -> u32;
     }
     unsafe {
@@ -139,8 +138,10 @@ fn windows_env_unicode_case() {
         let mut cmd = Command::new("cmd");
         cmd.env(a, "1");
         cmd.env(b, "2");
-        env::set_var(a, "1");
-        env::set_var(b, "2");
+        unsafe {
+            env::set_var(a, "1");
+            env::set_var(b, "2");
+        }
 
         for (key, value) in cmd.get_envs() {
             assert_eq!(
@@ -159,7 +160,7 @@ fn windows_exe_resolver() {
     use super::resolve_exe;
     use crate::io;
     use crate::sys::fs::symlink;
-    use crate::sys_common::io::test::tmpdir;
+    use crate::test_helpers::tmpdir;
 
     let env_paths = || env::var_os("PATH");
 
@@ -192,7 +193,7 @@ fn windows_exe_resolver() {
 
     /*
     Some of the following tests may need to be changed if you are deliberately
-    changing the behaviour of `resolve_exe`.
+    changing the behavior of `resolve_exe`.
     */
 
     let empty_paths = || None;

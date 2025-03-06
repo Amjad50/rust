@@ -1,10 +1,13 @@
-#![feature(let_chains)]
-#![feature(lazy_cell)]
-#![feature(option_get_or_insert_default)]
-#![feature(rustc_attrs)]
-#![feature(map_many_mut)]
-#![feature(iter_intersperse)]
+// tidy-alphabetical-start
 #![allow(internal_features)]
+#![feature(iter_intersperse)]
+#![feature(let_chains)]
+#![feature(rustc_attrs)]
+// To generate CodegenOptionsTargetModifiers and UnstableOptionsTargetModifiers enums
+// with macro_rules, it is necessary to use recursive mechanic ("Incremental TT Munchers").
+#![recursion_limit = "256"]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 pub mod errors;
 
@@ -27,9 +30,6 @@ pub use session::*;
 pub mod output;
 
 pub use getopts;
-
-mod version;
-pub use version::RustcVersion;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 

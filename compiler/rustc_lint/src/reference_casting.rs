@@ -1,11 +1,12 @@
 use rustc_ast::Mutability;
 use rustc_hir::{Expr, ExprKind, UnOp};
-use rustc_middle::ty::layout::LayoutOf as _;
-use rustc_middle::ty::{self, layout::TyAndLayout};
+use rustc_middle::ty::layout::{LayoutOf as _, TyAndLayout};
+use rustc_middle::ty::{self};
 use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::sym;
 
-use crate::{lints::InvalidReferenceCastingDiag, LateContext, LateLintPass, LintContext};
+use crate::lints::InvalidReferenceCastingDiag;
+use crate::{LateContext, LateLintPass, LintContext};
 
 declare_lint! {
     /// The `invalid_reference_casting` lint checks for casts of `&T` to `&mut T`
@@ -53,8 +54,6 @@ impl<'tcx> LateLintPass<'tcx> for InvalidReferenceCasting {
                 && let Some(ty_has_interior_mutability) =
                     is_cast_from_ref_to_mut_ptr(cx, init, &mut peel_casts)
             {
-                let ty_has_interior_mutability = ty_has_interior_mutability.then_some(());
-
                 cx.emit_span_lint(
                     INVALID_REFERENCE_CASTING,
                     expr.span,
@@ -169,7 +168,7 @@ fn is_cast_from_ref_to_mut_ptr<'tcx>(
         // Except on the presence of non concrete skeleton types (ie generics)
         // since there is no way to make it safe for arbitrary types.
         let inner_ty_has_interior_mutability =
-            !inner_ty.is_freeze(cx.tcx, cx.param_env) && inner_ty.has_concrete_skeleton();
+            !inner_ty.is_freeze(cx.tcx, cx.typing_env()) && inner_ty.has_concrete_skeleton();
         (!need_check_freeze || !inner_ty_has_interior_mutability)
             .then_some(inner_ty_has_interior_mutability)
     } else {
@@ -202,8 +201,10 @@ fn is_cast_to_bigger_memory_layout<'tcx>(
 
     // if the current expr looks like this `&mut expr[index]` then just looking
     // at `expr[index]` won't give us the underlying allocation, so we just skip it
-    // the same logic applies field access like `&mut expr.field`
-    if let ExprKind::Index(..) | ExprKind::Field(..) = e_alloc.kind {
+    // the same logic applies field access `&mut expr.field` and reborrows `&mut *expr`.
+    if let ExprKind::Index(..) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, ..) =
+        e_alloc.kind
+    {
         return None;
     }
 

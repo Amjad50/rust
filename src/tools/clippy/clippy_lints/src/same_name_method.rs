@@ -5,16 +5,16 @@ use rustc_hir::{HirId, Impl, ItemKind, Node, Path, QPath, TraitRef, TyKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::AssocKind;
 use rustc_session::declare_lint_pass;
-use rustc_span::symbol::Symbol;
 use rustc_span::Span;
+use rustc_span::symbol::Symbol;
 use std::collections::{BTreeMap, BTreeSet};
 
 declare_clippy_lint! {
     /// ### What it does
     /// It lints if a struct has two methods with the same name:
-    /// one from a trait, another not from trait.
+    /// one from a trait, another not from a trait.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Confusing.
     ///
     /// ### Example
@@ -50,9 +50,9 @@ impl<'tcx> LateLintPass<'tcx> for SameNameMethod {
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
         let mut map = FxHashMap::<Res, ExistingName>::default();
 
-        for id in cx.tcx.hir().items() {
+        for id in cx.tcx.hir_free_items() {
             if matches!(cx.tcx.def_kind(id.owner_id), DefKind::Impl { .. })
-                && let item = cx.tcx.hir().item(id)
+                && let item = cx.tcx.hir_item(id)
                 && let ItemKind::Impl(Impl {
                     items,
                     of_trait,

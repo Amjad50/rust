@@ -1,14 +1,13 @@
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet;
 use hir::def::{DefKind, Res};
-use rustc_ast::ast;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
-use rustc_hir as hir;
+use rustc_hir::{self as hir, AmbigArg};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_session::impl_lint_pass;
 use rustc_span::edition::Edition;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 use std::collections::BTreeMap;
 
 declare_clippy_lint! {
@@ -22,7 +21,21 @@ declare_clippy_lint! {
     /// ### Example
     /// ```rust,ignore
     /// #[macro_use]
-    /// use some_macro;
+    /// extern crate some_crate;
+    ///
+    /// fn main() {
+    ///     some_macro!();
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// use some_crate::some_macro;
+    ///
+    /// fn main() {
+    ///     some_macro!();
+    /// }
     /// ```
     #[clippy::version = "1.44.0"]
     pub MACRO_USE_IMPORTS,
@@ -43,7 +56,6 @@ impl MacroRefData {
 }
 
 #[derive(Default)]
-#[expect(clippy::module_name_repetitions)]
 pub struct MacroUseImports {
     /// the actual import path used and the span of the attribute above it. The value is
     /// the location, where the lint should be emitted.
@@ -81,7 +93,7 @@ impl MacroUseImports {
     }
 }
 
-impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
+impl LateLintPass<'_> for MacroUseImports {
     fn check_item(&mut self, cx: &LateContext<'_>, item: &hir::Item<'_>) {
         if cx.sess().opts.edition >= Edition::Edition2018
             && let hir::ItemKind::Use(path, _kind) = &item.kind
@@ -96,18 +108,13 @@ impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
         {
             for kid in cx.tcx.module_children(id) {
                 if let Res::Def(DefKind::Macro(_mac_type), mac_id) = kid.res {
-                    let span = mac_attr.span;
+                    let span = mac_attr.span();
                     let def_path = cx.tcx.def_path_str(mac_id);
                     self.imports.push((def_path, span, hir_id));
                 }
             }
         } else if item.span.from_expansion() {
             self.push_unique_macro_pat_ty(cx, item.span);
-        }
-    }
-    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &ast::Attribute) {
-        if attr.span.from_expansion() {
-            self.push_unique_macro(cx, attr.span);
         }
     }
     fn check_expr(&mut self, cx: &LateContext<'_>, expr: &hir::Expr<'_>) {
@@ -125,7 +132,7 @@ impl<'tcx> LateLintPass<'tcx> for MacroUseImports {
             self.push_unique_macro_pat_ty(cx, pat.span);
         }
     }
-    fn check_ty(&mut self, cx: &LateContext<'_>, ty: &hir::Ty<'_>) {
+    fn check_ty(&mut self, cx: &LateContext<'_>, ty: &hir::Ty<'_, AmbigArg>) {
         if ty.span.from_expansion() {
             self.push_unique_macro_pat_ty(cx, ty.span);
         }

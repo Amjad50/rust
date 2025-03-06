@@ -2,6 +2,7 @@
 
 use std::assert_matches::assert_matches;
 use std::borrow::Cow;
+use std::char::MAX_LEN_UTF8;
 use std::cmp::Ordering::{Equal, Greater, Less};
 use std::str::{from_utf8, from_utf8_unchecked};
 
@@ -165,7 +166,8 @@ fn test_join_for_different_lengths_with_long_separator() {
 
 #[test]
 fn test_join_issue_80335() {
-    use core::{borrow::Borrow, cell::Cell};
+    use core::borrow::Borrow;
+    use core::cell::Cell;
 
     struct WeirdBorrow {
         state: Cell<bool>,
@@ -1230,7 +1232,7 @@ fn test_to_uppercase_rev_iterator() {
 #[test]
 #[cfg_attr(miri, ignore)] // Miri is too slow
 fn test_chars_decoding() {
-    let mut bytes = [0; 4];
+    let mut bytes = [0; MAX_LEN_UTF8];
     for c in (0..0x110000).filter_map(std::char::from_u32) {
         let s = c.encode_utf8(&mut bytes);
         if Some(c) != s.chars().next() {
@@ -1242,7 +1244,7 @@ fn test_chars_decoding() {
 #[test]
 #[cfg_attr(miri, ignore)] // Miri is too slow
 fn test_chars_rev_decoding() {
-    let mut bytes = [0; 4];
+    let mut bytes = [0; MAX_LEN_UTF8];
     for c in (0..0x110000).filter_map(std::char::from_u32) {
         let s = c.encode_utf8(&mut bytes);
         if Some(c) != s.chars().rev().next() {
@@ -1849,7 +1851,10 @@ fn to_lowercase() {
     assert_eq!("ΑΣ''Α".to_lowercase(), "ασ''α");
 
     // https://github.com/rust-lang/rust/issues/124714
+    // input lengths around the boundary of the chunk size used by the ascii prefix optimization
+    assert_eq!("abcdefghijklmnoΣ".to_lowercase(), "abcdefghijklmnoς");
     assert_eq!("abcdefghijklmnopΣ".to_lowercase(), "abcdefghijklmnopς");
+    assert_eq!("abcdefghijklmnopqΣ".to_lowercase(), "abcdefghijklmnopqς");
 
     // a really long string that has it's lowercase form
     // even longer. this tests that implementations don't assume
@@ -1927,12 +1932,10 @@ mod pattern {
         }
     }
 
-    fn cmp_search_to_vec<'a>(
-        rev: bool,
-        pat: impl Pattern<'a, Searcher: ReverseSearcher<'a>>,
-        haystack: &'a str,
-        right: Vec<SearchStep>,
-    ) {
+    fn cmp_search_to_vec<P>(rev: bool, pat: P, haystack: &str, right: Vec<SearchStep>)
+    where
+        P: for<'a> Pattern<Searcher<'a>: ReverseSearcher<'a>>,
+    {
         let mut searcher = pat.into_searcher(haystack);
         let mut v = vec![];
         loop {
@@ -2191,9 +2194,9 @@ generate_iterator_test! {
 fn different_str_pattern_forwarding_lifetimes() {
     use std::str::pattern::Pattern;
 
-    fn foo<'a, P>(p: P)
+    fn foo<P>(p: P)
     where
-        for<'b> &'b P: Pattern<'a>,
+        for<'b> &'b P: Pattern,
     {
         for _ in 0..3 {
             "asdf".find(&p);
@@ -2306,21 +2309,21 @@ fn utf8_chars() {
     assert_eq!(schs.len(), 4);
     assert_eq!(schs.iter().cloned().collect::<String>(), s);
 
-    assert!((from_utf8(s.as_bytes()).is_ok()));
+    assert!(from_utf8(s.as_bytes()).is_ok());
     // invalid prefix
-    assert!((!from_utf8(&[0x80]).is_ok()));
+    assert!(!from_utf8(&[0x80]).is_ok());
     // invalid 2 byte prefix
-    assert!((!from_utf8(&[0xc0]).is_ok()));
-    assert!((!from_utf8(&[0xc0, 0x10]).is_ok()));
+    assert!(!from_utf8(&[0xc0]).is_ok());
+    assert!(!from_utf8(&[0xc0, 0x10]).is_ok());
     // invalid 3 byte prefix
-    assert!((!from_utf8(&[0xe0]).is_ok()));
-    assert!((!from_utf8(&[0xe0, 0x10]).is_ok()));
-    assert!((!from_utf8(&[0xe0, 0xff, 0x10]).is_ok()));
+    assert!(!from_utf8(&[0xe0]).is_ok());
+    assert!(!from_utf8(&[0xe0, 0x10]).is_ok());
+    assert!(!from_utf8(&[0xe0, 0xff, 0x10]).is_ok());
     // invalid 4 byte prefix
-    assert!((!from_utf8(&[0xf0]).is_ok()));
-    assert!((!from_utf8(&[0xf0, 0x10]).is_ok()));
-    assert!((!from_utf8(&[0xf0, 0xff, 0x10]).is_ok()));
-    assert!((!from_utf8(&[0xf0, 0xff, 0xff, 0x10]).is_ok()));
+    assert!(!from_utf8(&[0xf0]).is_ok());
+    assert!(!from_utf8(&[0xf0, 0x10]).is_ok());
+    assert!(!from_utf8(&[0xf0, 0xff, 0x10]).is_ok());
+    assert!(!from_utf8(&[0xf0, 0xff, 0xff, 0x10]).is_ok());
 }
 
 #[test]

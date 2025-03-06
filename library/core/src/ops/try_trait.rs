@@ -338,6 +338,7 @@ pub trait FromResidual<R = <Self as Try>::Residual> {
 #[inline]
 #[track_caller] // because `Result::from_residual` has it
 #[lang = "from_yeet"]
+#[allow(unreachable_pub)] // not-exposed but still used via lang-item
 pub fn from_yeet<T, Y>(yeeted: Y) -> T
 where
     T: FromResidual<Yeet<Y>>,
@@ -363,7 +364,9 @@ pub trait Residual<O> {
 }
 
 #[unstable(feature = "pub_crate_should_not_need_unstable_attr", issue = "none")]
-pub(crate) type ChangeOutputType<T, V> = <<T as Try>::Residual as Residual<V>>::TryType;
+#[allow(type_alias_bounds)]
+pub(crate) type ChangeOutputType<T: Try<Residual: Residual<V>>, V> =
+    <T::Residual as Residual<V>>::TryType;
 
 /// An adapter for implementing non-try methods via the `Try` implementation.
 ///
@@ -381,12 +384,14 @@ impl<T> NeverShortCircuit<T> {
     /// This is useful for implementing infallible functions in terms of the `try_` ones,
     /// without accidentally capturing extra generic parameters in a closure.
     #[inline]
-    pub fn wrap_mut_1<A>(mut f: impl FnMut(A) -> T) -> impl FnMut(A) -> NeverShortCircuit<T> {
+    pub(crate) fn wrap_mut_1<A>(
+        mut f: impl FnMut(A) -> T,
+    ) -> impl FnMut(A) -> NeverShortCircuit<T> {
         move |a| NeverShortCircuit(f(a))
     }
 
     #[inline]
-    pub fn wrap_mut_2<A, B>(mut f: impl FnMut(A, B) -> T) -> impl FnMut(A, B) -> Self {
+    pub(crate) fn wrap_mut_2<A, B>(mut f: impl FnMut(A, B) -> T) -> impl FnMut(A, B) -> Self {
         move |a, b| NeverShortCircuit(f(a, b))
     }
 }

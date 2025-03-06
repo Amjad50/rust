@@ -1222,10 +1222,30 @@ use self::foo::{self, Bar, Foo};
     );
 }
 
+#[test]
+fn insert_with_double_colon_prefixed_import_merge() {
+    check_with_config(
+        "use ::ext::foo::Foo",
+        r#"
+use ::ext::foo::Foo as _;
+"#,
+        r#"
+use ::ext::foo::Foo;
+"#,
+        &InsertUseConfig {
+            granularity: ImportGranularity::Crate,
+            prefix_kind: hir::PrefixKind::BySelf,
+            enforce_granularity: true,
+            group: true,
+            skip_glob_imports: true,
+        },
+    );
+}
+
 fn check_with_config(
     path: &str,
-    ra_fixture_before: &str,
-    ra_fixture_after: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
     config: &InsertUseConfig,
 ) {
     let (db, file_id, pos) = if ra_fixture_before.contains(CURSOR_MARKER) {
@@ -1257,8 +1277,8 @@ fn check_with_config(
 
 fn check(
     path: &str,
-    ra_fixture_before: &str,
-    ra_fixture_after: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
     granularity: ImportGranularity,
 ) {
     check_with_config(
@@ -1275,19 +1295,35 @@ fn check(
     )
 }
 
-fn check_crate(path: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
+fn check_crate(
+    path: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
+) {
     check(path, ra_fixture_before, ra_fixture_after, ImportGranularity::Crate)
 }
 
-fn check_module(path: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
+fn check_module(
+    path: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
+) {
     check(path, ra_fixture_before, ra_fixture_after, ImportGranularity::Module)
 }
 
-fn check_none(path: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
+fn check_none(
+    path: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
+) {
     check(path, ra_fixture_before, ra_fixture_after, ImportGranularity::Item)
 }
 
-fn check_one(path: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
+fn check_one(
+    path: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_before: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_after: &str,
+) {
     check(path, ra_fixture_before, ra_fixture_after, ImportGranularity::One)
 }
 
@@ -1310,7 +1346,7 @@ fn check_merge_only_fail(ra_fixture0: &str, ra_fixture1: &str, mb: MergeBehavior
     assert_eq!(result.map(|u| u.to_string()), None);
 }
 
-fn check_guess(ra_fixture: &str, expected: ImportGranularityGuess) {
+fn check_guess(#[rust_analyzer::rust_fixture] ra_fixture: &str, expected: ImportGranularityGuess) {
     let syntax = ast::SourceFile::parse(ra_fixture, span::Edition::CURRENT).tree().syntax().clone();
     let file = ImportScope::from(syntax).unwrap();
     assert_eq!(super::guess_granularity_from_scope(&file), expected);

@@ -1,22 +1,32 @@
-use crate::base::ExtCtxt;
+use std::mem;
+use std::sync::Arc;
+
+use rustc_ast::mut_visit::{self, MutVisitor};
+use rustc_ast::token::{
+    self, Delimiter, IdentIsRaw, InvisibleOrigin, Lit, LitKind, MetaVarKind, Nonterminal, Token,
+    TokenKind,
+};
+use rustc_ast::tokenstream::{DelimSpacing, DelimSpan, Spacing, TokenStream, TokenTree};
+use rustc_ast::{ExprKind, TyKind};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_errors::{Diag, DiagCtxtHandle, PResult, pluralize};
+use rustc_parse::lexer::nfc_normalize;
+use rustc_parse::parser::ParseNtResult;
+use rustc_session::parse::{ParseSess, SymbolGallery};
+use rustc_span::hygiene::{LocalExpnId, Transparency};
+use rustc_span::{
+    Ident, MacroRulesNormalizedIdent, Span, Symbol, SyntaxContext, sym, with_metavar_spans,
+};
+use smallvec::{SmallVec, smallvec};
+
 use crate::errors::{
     CountRepetitionMisplaced, MetaVarExprUnrecognizedVar, MetaVarsDifSeqMatchers, MustRepeatOnce,
     NoSyntaxVarsExprRepeat, VarStillRepeating,
 };
-use crate::mbe::macro_parser::{NamedMatch, NamedMatch::*};
+use crate::mbe::macro_parser::NamedMatch;
+use crate::mbe::macro_parser::NamedMatch::*;
+use crate::mbe::metavar_expr::{MetaVarExprConcatElem, RAW_IDENT_ERR};
 use crate::mbe::{self, KleeneOp, MetaVarExpr};
-use rustc_ast::mut_visit::{self, MutVisitor};
-use rustc_ast::token::{self, Delimiter, Token, TokenKind};
-use rustc_ast::tokenstream::{DelimSpacing, DelimSpan, Spacing, TokenStream, TokenTree};
-use rustc_data_structures::fx::FxHashMap;
-use rustc_errors::{pluralize, Diag, PResult};
-use rustc_parse::parser::ParseNtResult;
-use rustc_span::hygiene::{LocalExpnId, Transparency};
-use rustc_span::symbol::{sym, Ident, MacroRulesNormalizedIdent};
-use rustc_span::{with_metavar_spans, Span, SyntaxContext};
-
-use smallvec::{smallvec, SmallVec};
-use std::mem;
 
 // A Marker adds the given mark to the syntax context.
 struct Marker(LocalExpnId, Transparency, FxHashMap<SyntaxContext, SyntaxContext>);
@@ -30,11 +40,11 @@ impl MutVisitor for Marker {
         // it's some advanced case with macro-generated macros. So if we cache the marked version
         // of that context once, we'll typically have a 100% cache hit rate after that.
         let Marker(expn_id, transparency, ref mut cache) = *self;
-        let data = span.data();
-        let marked_ctxt = *cache
-            .entry(data.ctxt)
-            .or_insert_with(|| data.ctxt.apply_mark(expn_id.to_expn_id(), transparency));
-        *span = data.with_ctxt(marked_ctxt);
+        *span = span.map_ctxt(|ctxt| {
+            *cache
+                .entry(ctxt)
+                .or_insert_with(|| ctxt.apply_mark(expn_id.to_expn_id(), transparency))
+        });
     }
 }
 
@@ -99,11 +109,12 @@ impl<'a> Iterator for Frame<'a> {
 ///
 /// Along the way, we do some additional error checking.
 pub(super) fn transcribe<'a>(
-    cx: &ExtCtxt<'a>,
+    psess: &'a ParseSess,
     interp: &FxHashMap<MacroRulesNormalizedIdent, NamedMatch>,
     src: &mbe::Delimited,
     src_span: DelimSpan,
     transparency: Transparency,
+    expand_id: LocalExpnId,
 ) -> PResult<'a, TokenStream> {
     // Nothing for us to transcribe...
     if src.tts.is_empty() {
@@ -137,8 +148,9 @@ pub(super) fn transcribe<'a>(
     // again, and we are done transcribing.
     let mut result: Vec<TokenTree> = Vec::new();
     let mut result_stack = Vec::new();
-    let mut marker = Marker(cx.current_expansion.id, transparency, Default::default());
+    let mut marker = Marker(expand_id, transparency, Default::default());
 
+    let dcx = psess.dcx();
     loop {
         // Look at the last frame on the stack.
         // If it still has a TokenTree we have not looked at yet, use that tree.
@@ -201,9 +213,7 @@ pub(super) fn transcribe<'a>(
             seq @ mbe::TokenTree::Sequence(_, seq_rep) => {
                 match lockstep_iter_size(seq, interp, &repeats) {
                     LockstepIterSize::Unconstrained => {
-                        return Err(cx
-                            .dcx()
-                            .create_err(NoSyntaxVarsExprRepeat { span: seq.span() }));
+                        return Err(dcx.create_err(NoSyntaxVarsExprRepeat { span: seq.span() }));
                     }
 
                     LockstepIterSize::Contradiction(msg) => {
@@ -211,9 +221,9 @@ pub(super) fn transcribe<'a>(
                         // happens when two meta-variables are used in the same repetition in a
                         // sequence, but they come from different sequence matchers and repeat
                         // different amounts.
-                        return Err(cx
-                            .dcx()
-                            .create_err(MetaVarsDifSeqMatchers { span: seq.span(), msg }));
+                        return Err(
+                            dcx.create_err(MetaVarsDifSeqMatchers { span: seq.span(), msg })
+                        );
                     }
 
                     LockstepIterSize::Constraint(len, _) => {
@@ -227,9 +237,7 @@ pub(super) fn transcribe<'a>(
                                 // FIXME: this really ought to be caught at macro definition
                                 // time... It happens when the Kleene operator in the matcher and
                                 // the body for the same meta-variable do not match.
-                                return Err(cx
-                                    .dcx()
-                                    .create_err(MustRepeatOnce { span: sp.entire() }));
+                                return Err(dcx.create_err(MustRepeatOnce { span: sp.entire() }));
                             }
                         } else {
                             // 0 is the initial counter (we have done 0 repetitions so far). `len`
@@ -250,27 +258,110 @@ pub(super) fn transcribe<'a>(
             }
 
             // Replace the meta-var with the matched token tree from the invocation.
-            mbe::TokenTree::MetaVar(mut sp, mut original_ident) => {
+            &mbe::TokenTree::MetaVar(mut sp, mut original_ident) => {
                 // Find the matched nonterminal from the macro invocation, and use it to replace
                 // the meta-var.
+                //
+                // We use `Spacing::Alone` everywhere here, because that's the conservative choice
+                // and spacing of declarative macros is tricky. E.g. in this macro:
+                // ```
+                // macro_rules! idents {
+                //     ($($a:ident,)*) => { stringify!($($a)*) }
+                // }
+                // ```
+                // `$a` has no whitespace after it and will be marked `JointHidden`. If you then
+                // call `idents!(x,y,z,)`, each of `x`, `y`, and `z` will be marked as `Joint`. So
+                // if you choose to use `$x`'s spacing or the identifier's spacing, you'll end up
+                // producing "xyz", which is bad because it effectively merges tokens.
+                // `Spacing::Alone` is the safer option. Fortunately, `space_between` will avoid
+                // some of the unnecessary whitespace.
                 let ident = MacroRulesNormalizedIdent::new(original_ident);
                 if let Some(cur_matched) = lookup_cur_matched(ident, interp, &repeats) {
+                    // We wrap the tokens in invisible delimiters, unless they are already wrapped
+                    // in invisible delimiters with the same `MetaVarKind`. Because some proc
+                    // macros can't handle multiple layers of invisible delimiters of the same
+                    // `MetaVarKind`. This loses some span info, though it hopefully won't matter.
+                    let mut mk_delimited = |mk_span, mv_kind, mut stream: TokenStream| {
+                        if stream.len() == 1 {
+                            let tree = stream.iter().next().unwrap();
+                            if let TokenTree::Delimited(_, _, delim, inner) = tree
+                                && let Delimiter::Invisible(InvisibleOrigin::MetaVar(mvk)) = delim
+                                && mv_kind == *mvk
+                            {
+                                stream = inner.clone();
+                            }
+                        }
+
+                        // Emit as a token stream within `Delimiter::Invisible` to maintain
+                        // parsing priorities.
+                        marker.visit_span(&mut sp);
+                        with_metavar_spans(|mspans| mspans.insert(mk_span, sp));
+                        // Both the open delim and close delim get the same span, which covers the
+                        // `$foo` in the decl macro RHS.
+                        TokenTree::Delimited(
+                            DelimSpan::from_single(sp),
+                            DelimSpacing::new(Spacing::Alone, Spacing::Alone),
+                            Delimiter::Invisible(InvisibleOrigin::MetaVar(mv_kind)),
+                            stream,
+                        )
+                    };
                     let tt = match cur_matched {
                         MatchedSingle(ParseNtResult::Tt(tt)) => {
                             // `tt`s are emitted into the output stream directly as "raw tokens",
                             // without wrapping them into groups.
-                            maybe_use_metavar_location(cx, &stack, sp, tt, &mut marker)
+                            maybe_use_metavar_location(psess, &stack, sp, tt, &mut marker)
+                        }
+                        MatchedSingle(ParseNtResult::Ident(ident, is_raw)) => {
+                            marker.visit_span(&mut sp);
+                            with_metavar_spans(|mspans| mspans.insert(ident.span, sp));
+                            let kind = token::NtIdent(*ident, *is_raw);
+                            TokenTree::token_alone(kind, sp)
+                        }
+                        MatchedSingle(ParseNtResult::Lifetime(ident, is_raw)) => {
+                            marker.visit_span(&mut sp);
+                            with_metavar_spans(|mspans| mspans.insert(ident.span, sp));
+                            let kind = token::NtLifetime(*ident, *is_raw);
+                            TokenTree::token_alone(kind, sp)
+                        }
+                        MatchedSingle(ParseNtResult::Pat(pat, pat_kind)) => mk_delimited(
+                            pat.span,
+                            MetaVarKind::Pat(*pat_kind),
+                            TokenStream::from_ast(pat),
+                        ),
+                        MatchedSingle(ParseNtResult::Ty(ty)) => {
+                            let is_path = matches!(&ty.kind, TyKind::Path(None, _path));
+                            mk_delimited(
+                                ty.span,
+                                MetaVarKind::Ty { is_path },
+                                TokenStream::from_ast(ty),
+                            )
+                        }
+                        MatchedSingle(ParseNtResult::Meta(attr_item)) => {
+                            let has_meta_form = attr_item.meta_kind().is_some();
+                            mk_delimited(
+                                attr_item.span(),
+                                MetaVarKind::Meta { has_meta_form },
+                                TokenStream::from_ast(attr_item),
+                            )
+                        }
+                        MatchedSingle(ParseNtResult::Path(path)) => {
+                            mk_delimited(path.span, MetaVarKind::Path, TokenStream::from_ast(path))
+                        }
+                        MatchedSingle(ParseNtResult::Vis(vis)) => {
+                            mk_delimited(vis.span, MetaVarKind::Vis, TokenStream::from_ast(vis))
                         }
                         MatchedSingle(ParseNtResult::Nt(nt)) => {
                             // Other variables are emitted into the output stream as groups with
                             // `Delimiter::Invisible` to maintain parsing priorities.
                             // `Interpolated` is currently used for such groups in rustc parser.
                             marker.visit_span(&mut sp);
-                            TokenTree::token_alone(token::Interpolated(nt.clone()), sp)
+                            let use_span = nt.use_span();
+                            with_metavar_spans(|mspans| mspans.insert(use_span, sp));
+                            TokenTree::token_alone(token::Interpolated(Arc::clone(nt)), sp)
                         }
                         MatchedSeq(..) => {
                             // We were unable to descend far enough. This is an error.
-                            return Err(cx.dcx().create_err(VarStillRepeating { span: sp, ident }));
+                            return Err(dcx.create_err(VarStillRepeating { span: sp, ident }));
                         }
                     };
                     result.push(tt)
@@ -289,7 +380,16 @@ pub(super) fn transcribe<'a>(
 
             // Replace meta-variable expressions with the result of their expansion.
             mbe::TokenTree::MetaVarExpr(sp, expr) => {
-                transcribe_metavar_expr(cx, expr, interp, &mut marker, &repeats, &mut result, sp)?;
+                transcribe_metavar_expr(
+                    dcx,
+                    expr,
+                    interp,
+                    &mut marker,
+                    &repeats,
+                    &mut result,
+                    sp,
+                    &psess.symbol_gallery,
+                )?;
             }
 
             // If we are entering a new delimiter, we push its contents to the `stack` to be
@@ -297,8 +397,8 @@ pub(super) fn transcribe<'a>(
             // We will produce all of the results of the inside of the `Delimited` and then we will
             // jump back out of the Delimited, pop the result_stack and add the new results back to
             // the previous results (from outside the Delimited).
-            mbe::TokenTree::Delimited(mut span, spacing, delimited) => {
-                mut_visit::visit_delim_span(&mut span, &mut marker);
+            &mbe::TokenTree::Delimited(mut span, ref spacing, ref delimited) => {
+                mut_visit::visit_delim_span(&mut marker, &mut span);
                 stack.push(Frame::new_delimited(delimited, span, *spacing));
                 result_stack.push(mem::take(&mut result));
             }
@@ -307,7 +407,7 @@ pub(super) fn transcribe<'a>(
             // preserve syntax context.
             mbe::TokenTree::Token(token) => {
                 let mut token = token.clone();
-                mut_visit::visit_token(&mut token, &mut marker);
+                mut_visit::visit_token(&mut marker, &mut token);
                 let tt = TokenTree::Token(token, Spacing::Alone);
                 result.push(tt);
             }
@@ -349,7 +449,7 @@ pub(super) fn transcribe<'a>(
 ///   combine with each other and not with tokens outside of the sequence.
 /// - The metavariable span comes from a different crate, then we prefer the more local span.
 fn maybe_use_metavar_location(
-    cx: &ExtCtxt<'_>,
+    psess: &ParseSess,
     stack: &[Frame<'_>],
     mut metavar_span: Span,
     orig_tt: &TokenTree,
@@ -372,22 +472,18 @@ fn maybe_use_metavar_location(
         return orig_tt.clone();
     }
 
-    let insert = |mspans: &mut FxHashMap<_, _>, s, ms| match mspans.try_insert(s, ms) {
-        Ok(_) => true,
-        Err(err) => *err.entry.get() == ms, // Tried to insert the same span, still success
-    };
     marker.visit_span(&mut metavar_span);
     let no_collision = match orig_tt {
         TokenTree::Token(token, ..) => {
-            with_metavar_spans(|mspans| insert(mspans, token.span, metavar_span))
+            with_metavar_spans(|mspans| mspans.insert(token.span, metavar_span))
         }
         TokenTree::Delimited(dspan, ..) => with_metavar_spans(|mspans| {
-            insert(mspans, dspan.open, metavar_span)
-                && insert(mspans, dspan.close, metavar_span)
-                && insert(mspans, dspan.entire(), metavar_span)
+            mspans.insert(dspan.open, metavar_span)
+                && mspans.insert(dspan.close, metavar_span)
+                && mspans.insert(dspan.entire(), metavar_span)
         }),
     };
-    if no_collision || cx.source_map().is_imported(metavar_span) {
+    if no_collision || psess.source_map().is_imported(metavar_span) {
         return orig_tt.clone();
     }
 
@@ -396,14 +492,14 @@ fn maybe_use_metavar_location(
     match orig_tt {
         TokenTree::Token(Token { kind, span }, spacing) => {
             let span = metavar_span.with_ctxt(span.ctxt());
-            with_metavar_spans(|mspans| insert(mspans, span, metavar_span));
+            with_metavar_spans(|mspans| mspans.insert(span, metavar_span));
             TokenTree::Token(Token { kind: kind.clone(), span }, *spacing)
         }
         TokenTree::Delimited(dspan, dspacing, delimiter, tts) => {
             let open = metavar_span.with_ctxt(dspan.open.ctxt());
             let close = metavar_span.with_ctxt(dspan.close.ctxt());
             with_metavar_spans(|mspans| {
-                insert(mspans, open, metavar_span) && insert(mspans, close, metavar_span)
+                mspans.insert(open, metavar_span) && mspans.insert(close, metavar_span)
             });
             let dspan = DelimSpan::from_pair(open, close);
             TokenTree::Delimited(dspan, *dspacing, *delimiter, tts.clone())
@@ -522,23 +618,19 @@ fn lockstep_iter_size(
             }
         }
         TokenTree::MetaVarExpr(_, expr) => {
-            let default_rslt = LockstepIterSize::Unconstrained;
-            let Some(ident) = expr.ident() else {
-                return default_rslt;
-            };
-            let name = MacroRulesNormalizedIdent::new(ident);
-            match lookup_cur_matched(name, interpolations, repeats) {
-                Some(MatchedSeq(ads)) => {
-                    default_rslt.with(LockstepIterSize::Constraint(ads.len(), name))
-                }
-                _ => default_rslt,
-            }
+            expr.for_each_metavar(LockstepIterSize::Unconstrained, |lis, ident| {
+                lis.with(lockstep_iter_size(
+                    &TokenTree::MetaVar(ident.span, *ident),
+                    interpolations,
+                    repeats,
+                ))
+            })
         }
         TokenTree::Token(..) => LockstepIterSize::Unconstrained,
     }
 }
 
-/// Used solely by the `count` meta-variable expression, counts the outer-most repetitions at a
+/// Used solely by the `count` meta-variable expression, counts the outermost repetitions at a
 /// given optional nested depth.
 ///
 /// For example, a macro parameter of `$( { $( $foo:ident ),* } )*` called with `{ a, b } { c }`:
@@ -548,7 +640,7 @@ fn lockstep_iter_size(
 /// * `[ $( ${count(foo, 1)} ),* ]` will return an error because `${count(foo, 1)}` is
 ///   declared inside a single repetition and the index `1` implies two nested repetitions.
 fn count_repetitions<'a>(
-    cx: &ExtCtxt<'a>,
+    dcx: DiagCtxtHandle<'a>,
     depth_user: usize,
     mut matched: &NamedMatch,
     repeats: &[(usize, usize)],
@@ -585,7 +677,7 @@ fn count_repetitions<'a>(
         .and_then(|el| el.checked_sub(repeats.len()))
         .unwrap_or_default();
     if depth_user > depth_max {
-        return Err(out_of_bounds_err(cx, depth_max + 1, sp.entire(), "count"));
+        return Err(out_of_bounds_err(dcx, depth_max + 1, sp.entire(), "count"));
     }
 
     // `repeats` records all of the nested levels at which we are currently
@@ -601,7 +693,7 @@ fn count_repetitions<'a>(
     }
 
     if let MatchedSingle(_) = matched {
-        return Err(cx.dcx().create_err(CountRepetitionMisplaced { span: sp.entire() }));
+        return Err(dcx.create_err(CountRepetitionMisplaced { span: sp.entire() }));
     }
 
     count(depth_user, depth_max, matched)
@@ -609,7 +701,7 @@ fn count_repetitions<'a>(
 
 /// Returns a `NamedMatch` item declared on the LHS given an arbitrary [Ident]
 fn matched_from_ident<'ctx, 'interp, 'rslt>(
-    cx: &ExtCtxt<'ctx>,
+    dcx: DiagCtxtHandle<'ctx>,
     ident: Ident,
     interp: &'interp FxHashMap<MacroRulesNormalizedIdent, NamedMatch>,
 ) -> PResult<'ctx, &'rslt NamedMatch>
@@ -618,12 +710,12 @@ where
 {
     let span = ident.span;
     let key = MacroRulesNormalizedIdent::new(ident);
-    interp.get(&key).ok_or_else(|| cx.dcx().create_err(MetaVarExprUnrecognizedVar { span, key }))
+    interp.get(&key).ok_or_else(|| dcx.create_err(MetaVarExprUnrecognizedVar { span, key }))
 }
 
 /// Used by meta-variable expressions when an user input is out of the actual declared bounds. For
 /// example, index(999999) in an repetition of only three elements.
-fn out_of_bounds_err<'a>(cx: &ExtCtxt<'a>, max: usize, span: Span, ty: &str) -> Diag<'a> {
+fn out_of_bounds_err<'a>(dcx: DiagCtxtHandle<'a>, max: usize, span: Span, ty: &str) -> Diag<'a> {
     let msg = if max == 0 {
         format!(
             "meta-variable expression `{ty}` with depth parameter \
@@ -635,17 +727,18 @@ fn out_of_bounds_err<'a>(cx: &ExtCtxt<'a>, max: usize, span: Span, ty: &str) -> 
              must be less than {max}"
         )
     };
-    cx.dcx().struct_span_err(span, msg)
+    dcx.struct_span_err(span, msg)
 }
 
 fn transcribe_metavar_expr<'a>(
-    cx: &ExtCtxt<'a>,
+    dcx: DiagCtxtHandle<'a>,
     expr: &MetaVarExpr,
     interp: &FxHashMap<MacroRulesNormalizedIdent, NamedMatch>,
     marker: &mut Marker,
     repeats: &[(usize, usize)],
     result: &mut Vec<TokenTree>,
     sp: &DelimSpan,
+    symbol_gallery: &SymbolGallery,
 ) -> PResult<'a, ()> {
     let mut visited_span = || {
         let mut span = sp.entire();
@@ -653,9 +746,54 @@ fn transcribe_metavar_expr<'a>(
         span
     };
     match *expr {
+        MetaVarExpr::Concat(ref elements) => {
+            let mut concatenated = String::new();
+            for element in elements.into_iter() {
+                let symbol = match element {
+                    MetaVarExprConcatElem::Ident(elem) => elem.name,
+                    MetaVarExprConcatElem::Literal(elem) => *elem,
+                    MetaVarExprConcatElem::Var(ident) => {
+                        match matched_from_ident(dcx, *ident, interp)? {
+                            NamedMatch::MatchedSeq(named_matches) => {
+                                let Some((curr_idx, _)) = repeats.last() else {
+                                    return Err(dcx.struct_span_err(sp.entire(), "invalid syntax"));
+                                };
+                                match &named_matches[*curr_idx] {
+                                    // FIXME(c410-f3r) Nested repetitions are unimplemented
+                                    MatchedSeq(_) => unimplemented!(),
+                                    MatchedSingle(pnr) => {
+                                        extract_symbol_from_pnr(dcx, pnr, ident.span)?
+                                    }
+                                }
+                            }
+                            NamedMatch::MatchedSingle(pnr) => {
+                                extract_symbol_from_pnr(dcx, pnr, ident.span)?
+                            }
+                        }
+                    }
+                };
+                concatenated.push_str(symbol.as_str());
+            }
+            let symbol = nfc_normalize(&concatenated);
+            let concatenated_span = visited_span();
+            if !rustc_lexer::is_ident(symbol.as_str()) {
+                return Err(dcx.struct_span_err(
+                    concatenated_span,
+                    "`${concat(..)}` is not generating a valid identifier",
+                ));
+            }
+            symbol_gallery.insert(symbol, concatenated_span);
+            // The current implementation marks the span as coming from the macro regardless of
+            // contexts of the concatenated identifiers but this behavior may change in the
+            // future.
+            result.push(TokenTree::Token(
+                Token::from_ast_ident(Ident::new(symbol, concatenated_span)),
+                Spacing::Alone,
+            ));
+        }
         MetaVarExpr::Count(original_ident, depth) => {
-            let matched = matched_from_ident(cx, original_ident, interp)?;
-            let count = count_repetitions(cx, depth, matched, repeats, sp)?;
+            let matched = matched_from_ident(dcx, original_ident, interp)?;
+            let count = count_repetitions(dcx, depth, matched, repeats, sp)?;
             let tt = TokenTree::token_alone(
                 TokenKind::lit(token::Integer, sym::integer(count), None),
                 visited_span(),
@@ -664,7 +802,7 @@ fn transcribe_metavar_expr<'a>(
         }
         MetaVarExpr::Ignore(original_ident) => {
             // Used to ensure that `original_ident` is present in the LHS
-            let _ = matched_from_ident(cx, original_ident, interp)?;
+            let _ = matched_from_ident(dcx, original_ident, interp)?;
         }
         MetaVarExpr::Index(depth) => match repeats.iter().nth_back(depth) {
             Some((index, _)) => {
@@ -673,17 +811,64 @@ fn transcribe_metavar_expr<'a>(
                     visited_span(),
                 ));
             }
-            None => return Err(out_of_bounds_err(cx, repeats.len(), sp.entire(), "index")),
+            None => return Err(out_of_bounds_err(dcx, repeats.len(), sp.entire(), "index")),
         },
-        MetaVarExpr::Length(depth) => match repeats.iter().nth_back(depth) {
+        MetaVarExpr::Len(depth) => match repeats.iter().nth_back(depth) {
             Some((_, length)) => {
                 result.push(TokenTree::token_alone(
                     TokenKind::lit(token::Integer, sym::integer(*length), None),
                     visited_span(),
                 ));
             }
-            None => return Err(out_of_bounds_err(cx, repeats.len(), sp.entire(), "length")),
+            None => return Err(out_of_bounds_err(dcx, repeats.len(), sp.entire(), "len")),
         },
     }
     Ok(())
+}
+
+/// Extracts an metavariable symbol that can be an identifier, a token tree or a literal.
+fn extract_symbol_from_pnr<'a>(
+    dcx: DiagCtxtHandle<'a>,
+    pnr: &ParseNtResult,
+    span_err: Span,
+) -> PResult<'a, Symbol> {
+    match pnr {
+        ParseNtResult::Ident(nt_ident, is_raw) => {
+            if let IdentIsRaw::Yes = is_raw {
+                Err(dcx.struct_span_err(span_err, RAW_IDENT_ERR))
+            } else {
+                Ok(nt_ident.name)
+            }
+        }
+        ParseNtResult::Tt(TokenTree::Token(
+            Token { kind: TokenKind::Ident(symbol, is_raw), .. },
+            _,
+        )) => {
+            if let IdentIsRaw::Yes = is_raw {
+                Err(dcx.struct_span_err(span_err, RAW_IDENT_ERR))
+            } else {
+                Ok(*symbol)
+            }
+        }
+        ParseNtResult::Tt(TokenTree::Token(
+            Token {
+                kind: TokenKind::Literal(Lit { kind: LitKind::Str, symbol, suffix: None }),
+                ..
+            },
+            _,
+        )) => Ok(*symbol),
+        ParseNtResult::Nt(nt)
+            if let Nonterminal::NtLiteral(expr) = &**nt
+                && let ExprKind::Lit(Lit { kind: LitKind::Str, symbol, suffix: None }) =
+                    &expr.kind =>
+        {
+            Ok(*symbol)
+        }
+        _ => Err(dcx
+            .struct_err(
+                "metavariables of `${concat(..)}` must be of type `ident`, `literal` or `tt`",
+            )
+            .with_note("currently only string literals are supported")
+            .with_span(span_err)),
+    }
 }

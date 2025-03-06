@@ -87,16 +87,18 @@
 //! virtually impossible. Thus, symbol hash generation exclusively relies on
 //! DefPaths which are much more robust in the face of changes to the code base.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
-#![feature(rustdoc_internals)]
 #![feature(let_chains)]
-#![allow(internal_features)]
+#![feature(rustdoc_internals)]
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
+use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::mir::mono::{InstantiationMode, MonoItem};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Instance, TyCtxt};
@@ -133,7 +135,7 @@ fn symbol_name_provider<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> ty
         // This closure determines the instantiating crate for instances that
         // need an instantiating-crate-suffix for their symbol name, in order
         // to differentiate between local copies.
-        if is_generic(instance, tcx) {
+        if is_generic(instance) {
             // For generics we might find re-usable upstream instances. If there
             // is one, we rely on the symbol being instantiated locally.
             instance.upstream_monomorphization(tcx).unwrap_or(LOCAL_CRATE)
@@ -149,7 +151,7 @@ fn symbol_name_provider<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> ty
 
 pub fn typeid_for_trait_ref<'tcx>(
     tcx: TyCtxt<'tcx>,
-    trait_ref: ty::PolyExistentialTraitRef<'tcx>,
+    trait_ref: ty::ExistentialTraitRef<'tcx>,
 ) -> String {
     v0::mangle_typeid_for_trait_ref(tcx, trait_ref)
 }
@@ -225,7 +227,11 @@ fn compute_symbol_name<'tcx>(
     // and we want to be sure to avoid any symbol conflicts here.
     let is_globally_shared_function = matches!(
         tcx.def_kind(instance.def_id()),
-        DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::Ctor(..)
+        DefKind::Fn
+            | DefKind::AssocFn
+            | DefKind::Closure
+            | DefKind::SyntheticCoroutineBody
+            | DefKind::Ctor(..)
     ) && matches!(
         MonoItem::Fn(instance).instantiation_mode(tcx),
         InstantiationMode::GloballyShared { may_conflict: true }
@@ -235,7 +241,7 @@ fn compute_symbol_name<'tcx>(
     // the ID of the instantiating crate. This avoids symbol conflicts
     // in case the same instances is emitted in two crates of the same
     // project.
-    let avoid_cross_crate_conflicts = is_generic(instance, tcx) || is_globally_shared_function;
+    let avoid_cross_crate_conflicts = is_generic(instance) || is_globally_shared_function;
 
     let instantiating_crate = avoid_cross_crate_conflicts.then(compute_instantiating_crate);
 
@@ -270,6 +276,6 @@ fn compute_symbol_name<'tcx>(
     symbol
 }
 
-fn is_generic<'tcx>(instance: Instance<'tcx>, tcx: TyCtxt<'tcx>) -> bool {
-    instance.args.non_erasable_generics(tcx, instance.def_id()).next().is_some()
+fn is_generic<'tcx>(instance: Instance<'tcx>) -> bool {
+    instance.args.non_erasable_generics().next().is_some()
 }

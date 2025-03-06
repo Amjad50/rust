@@ -1,4 +1,3 @@
-use crate::intrinsics::{unchecked_add, unchecked_sub};
 use crate::iter::{FusedIterator, TrustedLen};
 use crate::num::NonZero;
 use crate::ub_checks;
@@ -19,7 +18,7 @@ impl IndexRange {
     /// # Safety
     /// - `start <= end`
     #[inline]
-    pub const unsafe fn new_unchecked(start: usize, end: usize) -> Self {
+    pub(crate) const unsafe fn new_unchecked(start: usize, end: usize) -> Self {
         ub_checks::assert_unsafe_precondition!(
             check_library_ub,
             "IndexRange::new_unchecked requires `start <= end`",
@@ -29,24 +28,25 @@ impl IndexRange {
     }
 
     #[inline]
-    pub const fn zero_to(end: usize) -> Self {
+    pub(crate) const fn zero_to(end: usize) -> Self {
         IndexRange { start: 0, end }
     }
 
     #[inline]
-    pub const fn start(&self) -> usize {
+    pub(crate) const fn start(&self) -> usize {
         self.start
     }
 
     #[inline]
-    pub const fn end(&self) -> usize {
+    pub(crate) const fn end(&self) -> usize {
         self.end
     }
 
     #[inline]
-    pub const fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         // SAFETY: By invariant, this cannot wrap
-        unsafe { unchecked_sub(self.end, self.start) }
+        // Using the intrinsic because a UB check here impedes LLVM optimization. (#131563)
+        unsafe { crate::intrinsics::unchecked_sub(self.end, self.start) }
     }
 
     /// # Safety
@@ -57,7 +57,7 @@ impl IndexRange {
 
         let value = self.start;
         // SAFETY: The range isn't empty, so this cannot overflow
-        self.start = unsafe { unchecked_add(value, 1) };
+        self.start = unsafe { value.unchecked_add(1) };
         value
     }
 
@@ -68,7 +68,7 @@ impl IndexRange {
         debug_assert!(self.start < self.end);
 
         // SAFETY: The range isn't empty, so this cannot overflow
-        let value = unsafe { unchecked_sub(self.end, 1) };
+        let value = unsafe { self.end.unchecked_sub(1) };
         self.end = value;
         value
     }
@@ -79,11 +79,12 @@ impl IndexRange {
     ///
     /// This is designed to help implement `Iterator::advance_by`.
     #[inline]
-    pub fn take_prefix(&mut self, n: usize) -> Self {
+    pub(crate) fn take_prefix(&mut self, n: usize) -> Self {
         let mid = if n <= self.len() {
             // SAFETY: We just checked that this will be between start and end,
             // and thus the addition cannot overflow.
-            unsafe { unchecked_add(self.start, n) }
+            // Using the intrinsic avoids a superfluous UB check.
+            unsafe { crate::intrinsics::unchecked_add(self.start, n) }
         } else {
             self.end
         };
@@ -98,11 +99,12 @@ impl IndexRange {
     ///
     /// This is designed to help implement `Iterator::advance_back_by`.
     #[inline]
-    pub fn take_suffix(&mut self, n: usize) -> Self {
+    pub(crate) fn take_suffix(&mut self, n: usize) -> Self {
         let mid = if n <= self.len() {
             // SAFETY: We just checked that this will be between start and end,
-            // and thus the addition cannot overflow.
-            unsafe { unchecked_sub(self.end, n) }
+            // and thus the subtraction cannot overflow.
+            // Using the intrinsic avoids a superfluous UB check.
+            unsafe { crate::intrinsics::unchecked_sub(self.end, n) }
         } else {
             self.start
         };

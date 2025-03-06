@@ -2,10 +2,9 @@ mod sync_bitset;
 
 use self::sync_bitset::*;
 use crate::cell::Cell;
-use crate::mem;
 use crate::num::NonZero;
-use crate::ptr;
 use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::{mem, ptr};
 
 #[cfg(target_pointer_width = "64")]
 const USIZE_BITS: usize = 64;
@@ -13,17 +12,17 @@ const TLS_KEYS: usize = 128; // Same as POSIX minimum
 const TLS_KEYS_BITSET_SIZE: usize = (TLS_KEYS + (USIZE_BITS - 1)) / USIZE_BITS;
 
 #[cfg_attr(test, linkage = "available_externally")]
-#[export_name = "_ZN16__rust_internals3std3sys3sgx3abi3tls14TLS_KEY_IN_USEE"]
+#[unsafe(export_name = "_ZN16__rust_internals3std3sys3sgx3abi3tls14TLS_KEY_IN_USEE")]
 static TLS_KEY_IN_USE: SyncBitset = SYNC_BITSET_INIT;
 macro_rules! dup {
     ((* $($exp:tt)*) $($val:tt)*) => (dup!( ($($exp)*) $($val)* $($val)* ));
     (() $($val:tt)*) => ([$($val),*])
 }
 #[cfg_attr(test, linkage = "available_externally")]
-#[export_name = "_ZN16__rust_internals3std3sys3sgx3abi3tls14TLS_DESTRUCTORE"]
+#[unsafe(export_name = "_ZN16__rust_internals3std3sys3sgx3abi3tls14TLS_DESTRUCTORE")]
 static TLS_DESTRUCTOR: [AtomicUsize; TLS_KEYS] = dup!((* * * * * * *) (AtomicUsize::new(0)));
 
-extern "C" {
+unsafe extern "C" {
     fn get_tls_ptr() -> *const u8;
     fn set_tls_ptr(tls: *const u8);
 }
@@ -95,8 +94,8 @@ impl Tls {
     #[allow(unused)]
     pub unsafe fn activate_persistent(self: Box<Self>) {
         // FIXME: Needs safety information. See entry.S for `set_tls_ptr` definition.
-        unsafe { set_tls_ptr(core::ptr::addr_of!(*self) as _) };
-        mem::forget(self);
+        let ptr = Box::into_raw(self).cast_const().cast::<u8>();
+        unsafe { set_tls_ptr(ptr) };
     }
 
     unsafe fn current<'a>() -> &'a Tls {

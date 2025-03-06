@@ -1,22 +1,11 @@
-use crate::sync::atomic::{
-    self,
-    Ordering::{Acquire, Relaxed, Release},
-};
-use crate::sys::futex::{futex_wait, futex_wake};
+use crate::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use crate::sys::futex::{self, futex_wait, futex_wake};
 
-cfg_if::cfg_if! {
-if #[cfg(windows)] {
-    // On Windows we can have a smol futex
-    type Atomic = atomic::AtomicU8;
-    type State = u8;
-} else {
-    type Atomic = atomic::AtomicU32;
-    type State = u32;
-}
-}
+type Futex = futex::SmallFutex;
+type State = futex::SmallPrimitive;
 
 pub struct Mutex {
-    futex: Atomic,
+    futex: Futex,
 }
 
 const UNLOCKED: State = 0;
@@ -26,7 +15,7 @@ const CONTENDED: State = 2; // locked, and other threads waiting (contended)
 impl Mutex {
     #[inline]
     pub const fn new() -> Self {
-        Self { futex: Atomic::new(UNLOCKED) }
+        Self { futex: Futex::new(UNLOCKED) }
     }
 
     #[inline]

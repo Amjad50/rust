@@ -7,17 +7,9 @@ updatable, and performant.
 
 ## Target maintainers
 
-The [Fuchsia team]:
+See [`fuchsia.toml`] in the `team` repository for current target maintainers.
 
-- Tyler Mandry ([@tmandry](https://github.com/tmandry))
-- Dan Johnson ([@computerdruid](https://github.com/computerdruid))
-- David Koloski ([@djkoloski](https://github.com/djkoloski))
-- Joseph Ryan ([@P1n3appl3](https://github.com/P1n3appl3))
-
-As the team evolves over time, the specific members listed here may differ from
-the members reported by the API. The API should be considered to be
-authoritative if this occurs. Instead of pinging individual members, use
-`@rustbot ping fuchsia` to contact the team on GitHub.
+[`fuchsia.toml`]: https://github.com/rust-lang/team/blob/master/teams/fuchsia.toml
 
 ## Table of contents
 
@@ -387,7 +379,7 @@ meta/hello_fuchsia.cm=pkg/meta/hello_fuchsia.cm
 ```
 
 *Note: Relative manifest paths are resolved starting from the working directory
-of `pm`. Make sure to fill out `<SDK_PATH>` with the path to the downloaded
+of `ffx`. Make sure to fill out `<SDK_PATH>` with the path to the downloaded
 SDK.*
 
 The `.manifest` file will be used to describe the contents of the package by
@@ -459,12 +451,10 @@ hello_fuchsia/
 Next, we'll build a package manifest as defined by our manifest:
 
 ```sh
-${SDK_PATH}/tools/${ARCH}/pm \
-    -api-level $(${SDK_PATH}/tools/${ARCH}/ffx version -v | grep "api-level" | head -1 |  awk -F ' ' '{print $2}') \
-    -o pkg/hello_fuchsia_manifest \
-    -m pkg/hello_fuchsia.manifest \
-    build \
-    -output-package-manifest pkg/hello_fuchsia_package_manifest
+${SDK_PATH}/tools/${ARCH}/ffx package build \
+    --api-level $(${SDK_PATH}/tools/${ARCH}/ffx --machine json version | jq .tool_version.api_level) \
+    --out pkg/hello_fuchsia_manifest \
+    pkg/hello_fuchsia.manifest
 ```
 
 This will produce `pkg/hello_fuchsia_manifest/` which is a package manifest we can
@@ -498,8 +488,7 @@ to.
 We can set up our repository with:
 
 ```sh
-${SDK_PATH}/tools/${ARCH}/pm newrepo \
-    -repo pkg/repo
+${SDK_PATH}/tools/${ARCH}/ffx repository create pkg/repo
 ```
 
 **Current directory structure**
@@ -523,17 +512,9 @@ hello_fuchsia/
 We can publish our new package to that repository with:
 
 ```sh
-${SDK_PATH}/tools/${ARCH}/pm publish \
-    -repo pkg/repo \
-    -lp -f <(echo "pkg/hello_fuchsia_package_manifest")
-```
-
-Then we can add the repository to `ffx`'s package server as `hello-fuchsia` using:
-
-```sh
-${SDK_PATH}/tools/${ARCH}/ffx repository add-from-pm \
-    pkg/repo \
-    -r hello-fuchsia
+${SDK_PATH}/tools/${ARCH}/ffx repository publish \
+    --package pkg/hello_fuchsia_package_manifest \
+    pkg/repo
 ```
 
 ## Running a Fuchsia component on an emulator
@@ -593,7 +574,8 @@ Now, start a package repository server to serve our
 package to the emulator:
 
 ```sh
-${SDK_PATH}/tools/${ARCH}/ffx repository server start
+${SDK_PATH}/tools/${ARCH}/ffx repository server start \
+    --background --repository hello-fuchsia --repo-path pkg-repo
 ```
 
 Once the repository server is up and running, register it with the target Fuchsia system running in the emulator:

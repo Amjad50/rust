@@ -1,15 +1,10 @@
-#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
-pub mod alloc;
-#[path = "../unsupported/args.rs"]
 pub mod args;
 #[path = "../unsupported/env.rs"]
 pub mod env;
 #[path = "../unsupported/fs.rs"]
 pub mod fs;
-#[path = "../unsupported/io.rs"]
-pub mod io;
-pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
@@ -17,7 +12,6 @@ pub mod pipe;
 pub mod process;
 pub mod stdio;
 pub mod thread;
-pub mod thread_local_key;
 pub mod time;
 
 #[path = "../unsupported/common.rs"]

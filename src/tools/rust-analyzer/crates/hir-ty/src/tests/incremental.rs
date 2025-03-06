@@ -1,4 +1,5 @@
-use base_db::SourceDatabaseExt2 as _;
+use base_db::SourceDatabaseFileInputExt as _;
+use hir_def::ModuleDefId;
 use test_fixture::WithFixture;
 
 use crate::{db::HirDatabase, test_db::TestDB};
@@ -16,10 +17,12 @@ fn foo() -> i32 {
     );
     {
         let events = db.log_executed(|| {
-            let module = db.module_for_file(pos.file_id);
+            let module = db.module_for_file(pos.file_id.file_id());
             let crate_def_map = module.def_map(&db);
             visit_module(&db, &crate_def_map, module.local_id, &mut |def| {
-                db.infer(def);
+                if let ModuleDefId::FunctionId(it) = def {
+                    db.infer(it.into());
+                }
             });
         });
         assert!(format!("{events:?}").contains("infer"))
@@ -32,14 +35,16 @@ fn foo() -> i32 {
     1
 }";
 
-    db.set_file_text(pos.file_id, new_text);
+    db.set_file_text(pos.file_id.file_id(), new_text);
 
     {
         let events = db.log_executed(|| {
-            let module = db.module_for_file(pos.file_id);
+            let module = db.module_for_file(pos.file_id.file_id());
             let crate_def_map = module.def_map(&db);
             visit_module(&db, &crate_def_map, module.local_id, &mut |def| {
-                db.infer(def);
+                if let ModuleDefId::FunctionId(it) = def {
+                    db.infer(it.into());
+                }
             });
         });
         assert!(!format!("{events:?}").contains("infer"), "{events:#?}")
@@ -63,10 +68,12 @@ fn baz() -> i32 {
     );
     {
         let events = db.log_executed(|| {
-            let module = db.module_for_file(pos.file_id);
+            let module = db.module_for_file(pos.file_id.file_id());
             let crate_def_map = module.def_map(&db);
             visit_module(&db, &crate_def_map, module.local_id, &mut |def| {
-                db.infer(def);
+                if let ModuleDefId::FunctionId(it) = def {
+                    db.infer(it.into());
+                }
             });
         });
         assert!(format!("{events:?}").contains("infer"))
@@ -84,14 +91,16 @@ fn baz() -> i32 {
 }
 ";
 
-    db.set_file_text(pos.file_id, new_text);
+    db.set_file_text(pos.file_id.file_id(), new_text);
 
     {
         let events = db.log_executed(|| {
-            let module = db.module_for_file(pos.file_id);
+            let module = db.module_for_file(pos.file_id.file_id());
             let crate_def_map = module.def_map(&db);
             visit_module(&db, &crate_def_map, module.local_id, &mut |def| {
-                db.infer(def);
+                if let ModuleDefId::FunctionId(it) = def {
+                    db.infer(it.into());
+                }
             });
         });
         assert!(format!("{events:?}").matches("infer").count() == 1, "{events:#?}")

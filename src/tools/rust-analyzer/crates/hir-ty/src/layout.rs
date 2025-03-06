@@ -1,21 +1,22 @@
 //! Compute the binary representation of a type
 
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
-use base_db::salsa::Cycle;
+use base_db::ra_salsa::Cycle;
 use chalk_ir::{AdtId, FloatTy, IntTy, TyKind, UintTy};
 use hir_def::{
     layout::{
-        Abi, FieldsShape, Integer, LayoutCalculator, LayoutS, Primitive, ReprOptions, Scalar, Size,
-        StructKind, TargetDataLayout, WrappingRange,
+        BackendRepr, FieldsShape, Float, Integer, LayoutCalculator, LayoutCalculatorError,
+        LayoutData, Primitive, ReprOptions, Scalar, Size, StructKind, TargetDataLayout,
+        WrappingRange,
     },
     LocalFieldId, StructId,
 };
 use la_arena::{Idx, RawIdx};
 use rustc_abi::AddressSpace;
+use rustc_hashes::Hash64;
 use rustc_index::{IndexSlice, IndexVec};
 
-use stdx::never;
 use triomphe::Arc;
 
 use crate::{
@@ -67,19 +68,20 @@ impl rustc_index::Idx for RustcFieldIdx {
     }
 }
 
-pub type Layout = LayoutS<RustcFieldIdx, RustcEnumVariantIdx>;
+pub type Layout = LayoutData<RustcFieldIdx, RustcEnumVariantIdx>;
 pub type TagEncoding = hir_def::layout::TagEncoding<RustcEnumVariantIdx>;
 pub type Variants = hir_def::layout::Variants<RustcFieldIdx, RustcEnumVariantIdx>;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum LayoutError {
+    // FIXME: Remove more variants once they get added to LayoutCalculatorError
+    BadCalc(LayoutCalculatorError<()>),
     HasErrorConst,
     HasErrorType,
     HasPlaceholder,
     InvalidSimdType,
     NotImplemented,
     RecursiveTypeWithoutIndirection,
-    SizeOverflow,
     TargetLayoutNotAvailable,
     Unknown,
     UserReprTooSmall,
@@ -89,6 +91,7 @@ impl std::error::Error for LayoutError {}
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            LayoutError::BadCalc(err) => err.fallback_fmt(f),
             LayoutError::HasErrorConst => write!(f, "type contains an unevaluatable const"),
             LayoutError::HasErrorType => write!(f, "type contains an error"),
             LayoutError::HasPlaceholder => write!(f, "type contains placeholders"),
@@ -97,7 +100,6 @@ impl fmt::Display for LayoutError {
             LayoutError::RecursiveTypeWithoutIndirection => {
                 write!(f, "recursive type without indirection")
             }
-            LayoutError::SizeOverflow => write!(f, "size overflow"),
             LayoutError::TargetLayoutNotAvailable => write!(f, "target layout not available"),
             LayoutError::Unknown => write!(f, "unknown"),
             LayoutError::UserReprTooSmall => {
@@ -107,19 +109,19 @@ impl fmt::Display for LayoutError {
     }
 }
 
-struct LayoutCx<'a> {
-    target: &'a TargetDataLayout,
+impl<F> From<LayoutCalculatorError<F>> for LayoutError {
+    fn from(err: LayoutCalculatorError<F>) -> Self {
+        LayoutError::BadCalc(err.without_payload())
+    }
 }
 
-impl<'a> LayoutCalculator for LayoutCx<'a> {
-    type TargetDataLayoutRef = &'a TargetDataLayout;
+struct LayoutCx<'a> {
+    calc: LayoutCalculator<&'a TargetDataLayout>,
+}
 
-    fn delayed_bug(&self, txt: impl Into<Cow<'static, str>>) {
-        never!("{}", txt.into());
-    }
-
-    fn current_data_layout(&self) -> &'a TargetDataLayout {
-        self.target
+impl<'a> LayoutCx<'a> {
+    fn new(target: &'a TargetDataLayout) -> Self {
+        Self { calc: LayoutCalculator::new(target) }
     }
 }
 
@@ -131,68 +133,48 @@ fn layout_of_simd_ty(
     env: Arc<TraitEnvironment>,
     dl: &TargetDataLayout,
 ) -> Result<Arc<Layout>, LayoutError> {
-    let fields = db.field_types(id.into());
-
-    // Supported SIMD vectors are homogeneous ADTs with at least one field:
+    // Supported SIMD vectors are homogeneous ADTs with exactly one array field:
     //
-    // * #[repr(simd)] struct S(T, T, T, T);
-    // * #[repr(simd)] struct S { it: T, y: T, z: T, w: T }
     // * #[repr(simd)] struct S([T; 4])
     //
     // where T is a primitive scalar (integer/float/pointer).
-
-    let f0_ty = match fields.iter().next() {
-        Some(it) => it.1.clone().substitute(Interner, subst),
-        None => return Err(LayoutError::InvalidSimdType),
+    let fields = db.field_types(id.into());
+    let mut fields = fields.iter();
+    let Some(TyKind::Array(e_ty, e_len)) = fields
+        .next()
+        .filter(|_| fields.next().is_none())
+        .map(|f| f.1.clone().substitute(Interner, subst).kind(Interner).clone())
+    else {
+        return Err(LayoutError::InvalidSimdType);
     };
 
-    // The element type and number of elements of the SIMD vector
-    // are obtained from:
-    //
-    // * the element type and length of the single array field, if
-    // the first field is of array type, or
-    //
-    // * the homogeneous field type and the number of fields.
-    let (e_ty, e_len, is_array) = if let TyKind::Array(e_ty, _) = f0_ty.kind(Interner) {
-        // Extract the number of elements from the layout of the array field:
-        let FieldsShape::Array { count, .. } = db.layout_of_ty(f0_ty.clone(), env.clone())?.fields
-        else {
-            return Err(LayoutError::Unknown);
-        };
-
-        (e_ty.clone(), count, true)
-    } else {
-        // First ADT field is not an array:
-        (f0_ty, fields.iter().count() as u64, false)
-    };
+    let e_len = try_const_usize(db, &e_len).ok_or(LayoutError::HasErrorConst)? as u64;
 
     // Compute the ABI of the element type:
     let e_ly = db.layout_of_ty(e_ty, env)?;
-    let Abi::Scalar(e_abi) = e_ly.abi else {
+    let BackendRepr::Scalar(e_abi) = e_ly.backend_repr else {
         return Err(LayoutError::Unknown);
     };
 
     // Compute the size and alignment of the vector:
-    let size = e_ly.size.checked_mul(e_len, dl).ok_or(LayoutError::SizeOverflow)?;
-    let align = dl.vector_align(size);
+    let size = e_ly
+        .size
+        .checked_mul(e_len, dl)
+        .ok_or(LayoutError::BadCalc(LayoutCalculatorError::SizeOverflow))?;
+    let align = dl.llvmlike_vector_align(size);
     let size = size.align_to(align.abi);
-
-    // Compute the placement of the vector fields:
-    let fields = if is_array {
-        FieldsShape::Arbitrary { offsets: [Size::ZERO].into(), memory_index: [0].into() }
-    } else {
-        FieldsShape::Array { stride: e_ly.size, count: e_len }
-    };
 
     Ok(Arc::new(Layout {
         variants: Variants::Single { index: struct_variant_idx() },
-        fields,
-        abi: Abi::Vector { element: e_abi, count: e_len },
+        fields: FieldsShape::Arbitrary { offsets: [Size::ZERO].into(), memory_index: [0].into() },
+        backend_repr: BackendRepr::SimdVector { element: e_abi, count: e_len },
         largest_niche: e_ly.largest_niche,
+        uninhabited: false,
         size,
         align,
         max_repr_align: None,
         unadjusted_abi_align: align.abi,
+        randomization_seed: Hash64::ZERO,
     }))
 }
 
@@ -205,8 +187,8 @@ pub fn layout_of_ty_query(
     let Ok(target) = db.target_data_layout(krate) else {
         return Err(LayoutError::TargetLayoutNotAvailable);
     };
-    let cx = LayoutCx { target: &target };
-    let dl = cx.current_data_layout();
+    let dl = &*target;
+    let cx = LayoutCx::new(dl);
     let ty = normalize(db, trait_env.clone(), ty);
     let result = match ty.kind(Interner) {
         TyKind::Adt(AdtId(def), subst) => {
@@ -264,10 +246,12 @@ pub fn layout_of_ty_query(
             ),
             chalk_ir::Scalar::Float(f) => scalar(
                 dl,
-                match f {
-                    FloatTy::F32 => Primitive::F32,
-                    FloatTy::F64 => Primitive::F64,
-                },
+                Primitive::Float(match f {
+                    FloatTy::F16 => Float::F16,
+                    FloatTy::F32 => Float::F32,
+                    FloatTy::F64 => Float::F64,
+                    FloatTy::F128 => Float::F128,
+                }),
             ),
         },
         TyKind::Tuple(len, tys) => {
@@ -279,30 +263,32 @@ pub fn layout_of_ty_query(
                 .collect::<Result<Vec<_>, _>>()?;
             let fields = fields.iter().map(|it| &**it).collect::<Vec<_>>();
             let fields = fields.iter().collect::<IndexVec<_, _>>();
-            cx.univariant(dl, &fields, &ReprOptions::default(), kind).ok_or(LayoutError::Unknown)?
+            cx.calc.univariant(&fields, &ReprOptions::default(), kind)?
         }
         TyKind::Array(element, count) => {
             let count = try_const_usize(db, count).ok_or(LayoutError::HasErrorConst)? as u64;
             let element = db.layout_of_ty(element.clone(), trait_env)?;
-            let size = element.size.checked_mul(count, dl).ok_or(LayoutError::SizeOverflow)?;
+            let size = element
+                .size
+                .checked_mul(count, dl)
+                .ok_or(LayoutError::BadCalc(LayoutCalculatorError::SizeOverflow))?;
 
-            let abi = if count != 0 && matches!(element.abi, Abi::Uninhabited) {
-                Abi::Uninhabited
-            } else {
-                Abi::Aggregate { sized: true }
-            };
+            let backend_repr = BackendRepr::Memory { sized: true };
 
             let largest_niche = if count != 0 { element.largest_niche } else { None };
+            let uninhabited = if count != 0 { element.uninhabited } else { false };
 
             Layout {
                 variants: Variants::Single { index: struct_variant_idx() },
                 fields: FieldsShape::Array { stride: element.size, count },
-                abi,
+                backend_repr,
                 largest_niche,
+                uninhabited,
                 align: element.align,
                 size,
                 max_repr_align: None,
                 unadjusted_abi_align: element.align.abi,
+                randomization_seed: Hash64::ZERO,
             }
         }
         TyKind::Slice(element) => {
@@ -310,23 +296,27 @@ pub fn layout_of_ty_query(
             Layout {
                 variants: Variants::Single { index: struct_variant_idx() },
                 fields: FieldsShape::Array { stride: element.size, count: 0 },
-                abi: Abi::Aggregate { sized: false },
+                backend_repr: BackendRepr::Memory { sized: false },
                 largest_niche: None,
+                uninhabited: false,
                 align: element.align,
                 size: Size::ZERO,
                 max_repr_align: None,
                 unadjusted_abi_align: element.align.abi,
+                randomization_seed: Hash64::ZERO,
             }
         }
         TyKind::Str => Layout {
             variants: Variants::Single { index: struct_variant_idx() },
             fields: FieldsShape::Array { stride: Size::from_bytes(1), count: 0 },
-            abi: Abi::Aggregate { sized: false },
+            backend_repr: BackendRepr::Memory { sized: false },
             largest_niche: None,
+            uninhabited: false,
             align: dl.i8_align,
             size: Size::ZERO,
             max_repr_align: None,
             unadjusted_abi_align: dl.i8_align.abi,
+            randomization_seed: Hash64::ZERO,
         },
         // Potentially-wide pointers.
         TyKind::Ref(_, _, pointee) | TyKind::Raw(_, pointee) => {
@@ -365,14 +355,14 @@ pub fn layout_of_ty_query(
             };
 
             // Effectively a (ptr, meta) tuple.
-            cx.scalar_pair(data_ptr, metadata)
+            cx.calc.scalar_pair(data_ptr, metadata)
         }
-        TyKind::FnDef(_, _) => layout_of_unit(&cx, dl)?,
-        TyKind::Never => cx.layout_of_never_type(),
+        TyKind::FnDef(_, _) => layout_of_unit(&cx)?,
+        TyKind::Never => cx.calc.layout_of_never_type(),
         TyKind::Dyn(_) | TyKind::Foreign(_) => {
-            let mut unit = layout_of_unit(&cx, dl)?;
-            match &mut unit.abi {
-                Abi::Aggregate { sized } => *sized = false,
+            let mut unit = layout_of_unit(&cx)?;
+            match &mut unit.backend_repr {
+                BackendRepr::Memory { sized } => *sized = false,
                 _ => return Err(LayoutError::Unknown),
             }
             unit
@@ -389,7 +379,7 @@ pub fn layout_of_ty_query(
                     let infer = db.infer(func.into());
                     return db.layout_of_ty(infer.type_of_rpit[idx].clone(), trait_env);
                 }
-                crate::ImplTraitId::AssociatedTypeImplTrait(..) => {
+                crate::ImplTraitId::TypeAliasImplTrait(..) => {
                     return Err(LayoutError::NotImplemented);
                 }
                 crate::ImplTraitId::AsyncBlockTypeImplTrait(_, _) => {
@@ -412,8 +402,7 @@ pub fn layout_of_ty_query(
                 .collect::<Result<Vec<_>, _>>()?;
             let fields = fields.iter().map(|it| &**it).collect::<Vec<_>>();
             let fields = fields.iter().collect::<IndexVec<_, _>>();
-            cx.univariant(dl, &fields, &ReprOptions::default(), StructKind::AlwaysSized)
-                .ok_or(LayoutError::Unknown)?
+            cx.calc.univariant(&fields, &ReprOptions::default(), StructKind::AlwaysSized)?
         }
         TyKind::Coroutine(_, _) | TyKind::CoroutineWitness(_, _) => {
             return Err(LayoutError::NotImplemented)
@@ -445,14 +434,14 @@ pub fn layout_of_ty_recover(
     Err(LayoutError::RecursiveTypeWithoutIndirection)
 }
 
-fn layout_of_unit(cx: &LayoutCx<'_>, dl: &TargetDataLayout) -> Result<Layout, LayoutError> {
-    cx.univariant::<RustcFieldIdx, RustcEnumVariantIdx, &&Layout>(
-        dl,
-        IndexSlice::empty(),
-        &ReprOptions::default(),
-        StructKind::AlwaysSized,
-    )
-    .ok_or(LayoutError::Unknown)
+fn layout_of_unit(cx: &LayoutCx<'_>) -> Result<Layout, LayoutError> {
+    cx.calc
+        .univariant::<RustcFieldIdx, RustcEnumVariantIdx, &&Layout>(
+            IndexSlice::empty(),
+            &ReprOptions::default(),
+            StructKind::AlwaysSized,
+        )
+        .map_err(Into::into)
 }
 
 fn struct_tail_erasing_lifetimes(db: &dyn HirDatabase, pointee: Ty) -> Ty {

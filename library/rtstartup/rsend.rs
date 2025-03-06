@@ -6,6 +6,7 @@
 #![crate_type = "rlib"]
 #![no_core]
 #![allow(internal_features)]
+#![warn(unreachable_pub)]
 
 #[lang = "sized"]
 trait Sized {}
@@ -16,6 +17,8 @@ impl<T> Sync for T {}
 trait Copy {}
 #[lang = "freeze"]
 auto trait Freeze {}
+
+impl<T: ?Sized> Copy for *mut T {}
 
 #[lang = "drop_in_place"]
 #[inline]
@@ -29,6 +32,6 @@ pub mod eh_frames {
     // Terminate the frame unwind info section with a 0 as a sentinel;
     // this would be the 'length' field in a real FDE.
     #[no_mangle]
-    #[link_section = ".eh_frame"]
+    #[unsafe(link_section = ".eh_frame")]
     pub static __EH_FRAME_END__: u32 = 0;
 }

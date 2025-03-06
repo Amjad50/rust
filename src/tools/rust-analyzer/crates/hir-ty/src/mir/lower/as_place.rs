@@ -4,7 +4,7 @@ use crate::mir::MutBorrowKind;
 
 use super::*;
 use hir_def::FunctionId;
-use hir_expand::name;
+use intern::sym;
 
 macro_rules! not_supported {
     ($it: expr) => {
@@ -135,8 +135,13 @@ impl MirLowerCtx<'_> {
         };
         match &self.body.exprs[expr_id] {
             Expr::Path(p) => {
-                let resolver = resolver_for_expr(self.db.upcast(), self.owner, expr_id);
-                let Some(pr) = resolver.resolve_path_in_value_ns_fully(self.db.upcast(), p) else {
+                let resolver_guard =
+                    self.resolver.update_to_inner_scope(self.db.upcast(), self.owner, expr_id);
+                let hygiene = self.body.expr_path_hygiene(expr_id);
+                let resolved =
+                    self.resolver.resolve_path_in_value_ns_fully(self.db.upcast(), p, hygiene);
+                self.resolver.reset_to_guard(resolver_guard);
+                let Some(pr) = resolved else {
                     return try_rvalue(self);
                 };
                 match pr {
@@ -189,10 +194,10 @@ impl MirLowerCtx<'_> {
                                 if let Some(deref_trait) =
                                     self.resolve_lang_item(LangItem::DerefMut)?.as_trait()
                                 {
-                                    if let Some(deref_fn) = self
-                                        .db
-                                        .trait_data(deref_trait)
-                                        .method_by_name(&name![deref_mut])
+                                    if let Some(deref_fn) =
+                                        self.db.trait_data(deref_trait).method_by_name(
+                                            &Name::new_symbol_root(sym::deref_mut.clone()),
+                                        )
                                     {
                                         break 'b deref_fn == f;
                                     }
@@ -216,7 +221,7 @@ impl MirLowerCtx<'_> {
                 self.push_field_projection(&mut r, expr_id)?;
                 Ok(Some((r, current)))
             }
-            Expr::Index { base, index, is_assignee_expr: _ } => {
+            Expr::Index { base, index } => {
                 let base_ty = self.expr_ty_after_adjustments(*base);
                 let index_ty = self.expr_ty_after_adjustments(*index);
                 if index_ty != TyBuilder::usize()
@@ -324,12 +329,17 @@ impl MirLowerCtx<'_> {
         mutability: bool,
     ) -> Result<Option<(Place, BasicBlockId)>> {
         let (chalk_mut, trait_lang_item, trait_method_name, borrow_kind) = if !mutability {
-            (Mutability::Not, LangItem::Deref, name![deref], BorrowKind::Shared)
+            (
+                Mutability::Not,
+                LangItem::Deref,
+                Name::new_symbol_root(sym::deref.clone()),
+                BorrowKind::Shared,
+            )
         } else {
             (
                 Mutability::Mut,
                 LangItem::DerefMut,
-                name![deref_mut],
+                Name::new_symbol_root(sym::deref_mut.clone()),
                 BorrowKind::Mut { kind: MutBorrowKind::Default },
             )
         };

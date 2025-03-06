@@ -1,16 +1,17 @@
-use crate::compiler_interface::with;
-use crate::error;
-use crate::mir::FieldIdx;
-use crate::target::{MachineInfo, MachineSize as Size};
-use crate::ty::{Align, IndexedVal, Ty, VariantIdx};
-use crate::Error;
-use crate::Opaque;
 use std::fmt::{self, Debug};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
 
+use serde::Serialize;
+
+use crate::compiler_interface::with;
+use crate::mir::FieldIdx;
+use crate::target::{MachineInfo, MachineSize as Size};
+use crate::ty::{Align, IndexedVal, Ty, VariantIdx};
+use crate::{Error, Opaque, error};
+
 /// A function ABI definition.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct FnAbi {
     /// The types of each argument.
     pub args: Vec<ArgAbi>,
@@ -31,7 +32,7 @@ pub struct FnAbi {
 }
 
 /// Information about the ABI of a function's argument, or return value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct ArgAbi {
     pub ty: Ty,
     pub layout: Layout,
@@ -39,7 +40,7 @@ pub struct ArgAbi {
 }
 
 /// How a function argument should be passed in to the target function.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum PassMode {
     /// Ignore the argument.
     ///
@@ -60,16 +61,16 @@ pub enum PassMode {
 }
 
 /// The layout of a type, alongside the type itself.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct TyAndLayout {
     pub ty: Ty,
     pub layout: Layout,
 }
 
 /// The layout of a type in memory.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct LayoutShape {
-    /// The fields location withing the layout
+    /// The fields location within the layout
     pub fields: FieldsShape,
 
     /// Encodes information about multi-variant layouts.
@@ -108,7 +109,7 @@ impl LayoutShape {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Layout(usize);
 
 impl Layout {
@@ -127,7 +128,7 @@ impl IndexedVal for Layout {
 }
 
 /// Describes how the fields of a type are shaped in memory.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum FieldsShape {
     /// Scalar primitives and `!`, which never have fields.
     Primitive,
@@ -177,8 +178,11 @@ impl FieldsShape {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum VariantsShape {
+    /// A type with no valid variants. Must be uninhabited.
+    Empty,
+
     /// Single enum variants, structs/tuples, unions, and all non-ADTs.
     Single { index: VariantIdx },
 
@@ -196,7 +200,7 @@ pub enum VariantsShape {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum TagEncoding {
     /// The tag directly stores the discriminant, but possibly with a smaller layout
     /// (so converting the tag to the discriminant can require sign extension).
@@ -221,9 +225,8 @@ pub enum TagEncoding {
 
 /// Describes how values of the type are passed by target ABIs,
 /// in terms of categories of C types there are ABI rules for.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum ValueAbi {
-    Uninhabited,
     Scalar(Scalar),
     ScalarPair(Scalar, Scalar),
     Vector {
@@ -240,17 +243,14 @@ impl ValueAbi {
     /// Returns `true` if the layout corresponds to an unsized type.
     pub fn is_unsized(&self) -> bool {
         match *self {
-            ValueAbi::Uninhabited
-            | ValueAbi::Scalar(_)
-            | ValueAbi::ScalarPair(..)
-            | ValueAbi::Vector { .. } => false,
+            ValueAbi::Scalar(_) | ValueAbi::ScalarPair(..) | ValueAbi::Vector { .. } => false,
             ValueAbi::Aggregate { sized } => !sized,
         }
     }
 }
 
 /// Information about one scalar component of a Rust type.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize)]
 pub enum Scalar {
     Initialized {
         /// The primitive type used to represent this value.
@@ -280,7 +280,7 @@ impl Scalar {
 }
 
 /// Fundamental unit of memory access and layout.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize)]
 pub enum Primitive {
     /// The `bool` is the signedness of the `Integer` type.
     ///
@@ -310,7 +310,7 @@ impl Primitive {
 }
 
 /// Enum representing the existing integer lengths.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize)]
 pub enum IntegerLength {
     I8,
     I16,
@@ -320,7 +320,7 @@ pub enum IntegerLength {
 }
 
 /// Enum representing the existing float lengths.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize)]
 pub enum FloatLength {
     F16,
     F32,
@@ -354,7 +354,7 @@ impl FloatLength {
 /// An identifier that specifies the address space that some operation
 /// should operate on. Special address spaces have an effect on code generation,
 /// depending on the target and the address spaces it implements.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct AddressSpace(pub u32);
 
 impl AddressSpace {
@@ -369,7 +369,7 @@ impl AddressSpace {
 /// sequence:
 ///
 ///    254 (-2), 255 (-1), 0, 1, 2
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct WrappingRange {
     pub start: u128,
     pub end: u128,
@@ -420,7 +420,7 @@ impl Debug for WrappingRange {
 }
 
 /// General language calling conventions.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum CallConvention {
     C,
     Rust,
@@ -432,10 +432,13 @@ pub enum CallConvention {
     // Target-specific calling conventions.
     ArmAapcs,
     CCmseNonSecureCall,
+    CCmseNonSecureEntry,
 
     Msp430Intr,
 
     PtxKernel,
+
+    GpuKernel,
 
     X86Fastcall,
     X86Intr,

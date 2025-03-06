@@ -1,8 +1,9 @@
 pub(crate) mod aix;
 pub(crate) mod android;
 pub(crate) mod apple;
-pub(crate) mod avr_gnu;
+pub(crate) mod avr;
 pub(crate) mod bpf;
+pub(crate) mod cygwin;
 pub(crate) mod dragonfly;
 pub(crate) mod emerald;
 pub(crate) mod freebsd;
@@ -36,3 +37,4 @@ pub(crate) mod windows_gnullvm;
 pub(crate) mod windows_msvc;
 pub(crate) mod windows_uwp_gnu;
 pub(crate) mod windows_uwp_msvc;
+pub(crate) mod xtensa;

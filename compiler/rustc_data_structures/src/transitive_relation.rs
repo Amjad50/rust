@@ -1,10 +1,12 @@
-use crate::frozen::Frozen;
-use crate::fx::{FxHashSet, FxIndexSet};
-use rustc_index::bit_set::BitMatrix;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem;
 use std::ops::Deref;
+
+use rustc_index::bit_set::BitMatrix;
+
+use crate::frozen::Frozen;
+use crate::fx::{FxHashSet, FxIndexSet};
 
 #[cfg(test)]
 mod tests;
@@ -201,9 +203,9 @@ impl<T: Eq + Hash + Copy> TransitiveRelation<T> {
     /// exists). See `postdom_upper_bound` for details.
     pub fn mutual_immediate_postdominator(&self, mut mubs: Vec<T>) -> Option<T> {
         loop {
-            match mubs.len() {
-                0 => return None,
-                1 => return Some(mubs[0]),
+            match mubs[..] {
+                [] => return None,
+                [mub] => return Some(mub),
                 _ => {
                     let m = mubs.pop().unwrap();
                     let n = mubs.pop().unwrap();
@@ -361,7 +363,7 @@ impl<T: Eq + Hash + Copy> TransitiveRelation<T> {
 
     /// Lists all the base edges in the graph: the initial _non-transitive_ set of element
     /// relations, which will be later used as the basis for the transitive closure computation.
-    pub fn base_edges(&self) -> impl Iterator<Item = (T, T)> + '_ {
+    pub fn base_edges(&self) -> impl Iterator<Item = (T, T)> {
         self.edges
             .iter()
             .map(move |edge| (self.elements[edge.source.0], self.elements[edge.target.0]))

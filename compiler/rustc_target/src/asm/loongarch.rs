@@ -1,6 +1,8 @@
-use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
-use rustc_span::Symbol;
 use std::fmt;
+
+use rustc_span::Symbol;
+
+use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
 
 def_reg_class! {
     LoongArch LoongArchInlineAsmRegClass {
@@ -36,7 +38,7 @@ impl LoongArchInlineAsmRegClass {
     ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::reg => types! { _: I8, I16, I32, I64, F32, F64; },
-            Self::freg => types! { _: F32, F64; },
+            Self::freg => types! { f: F32; d: F64; },
         }
     }
 }

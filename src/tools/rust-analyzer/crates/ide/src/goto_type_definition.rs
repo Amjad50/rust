@@ -1,4 +1,4 @@
-use hir::{DescendPreference, GenericParam};
+use hir::GenericParam;
 use ide_db::{base_db::Upcast, defs::Definition, helpers::pick_best_token, RootDatabase};
 use syntax::{ast, match_ast, AstNode, SyntaxKind::*, SyntaxToken, T};
 
@@ -8,25 +8,24 @@ use crate::{FilePosition, NavigationTarget, RangeInfo, TryToNav};
 //
 // Navigates to the type of an identifier.
 //
-// |===
-// | Editor  | Action Name
+// | Editor  | Action Name |
+// |---------|-------------|
+// | VS Code | **Go to Type Definition** |
 //
-// | VS Code | **Go to Type Definition**
-// |===
-//
-// image::https://user-images.githubusercontent.com/48062697/113020657-b560f500-917a-11eb-9007-0f809733a338.gif[]
+// ![Go to Type Definition](https://user-images.githubusercontent.com/48062697/113020657-b560f500-917a-11eb-9007-0f809733a338.gif)
 pub(crate) fn goto_type_definition(
     db: &RootDatabase,
     FilePosition { file_id, offset }: FilePosition,
 ) -> Option<RangeInfo<Vec<NavigationTarget>>> {
     let sema = hir::Semantics::new(db);
 
-    let file: ast::SourceFile = sema.parse(file_id);
+    let file: ast::SourceFile = sema.parse_guess_edition(file_id);
     let token: SyntaxToken =
         pick_best_token(file.syntax().token_at_offset(offset), |kind| match kind {
-            IDENT | INT_NUMBER | T![self] => 2,
+            IDENT | INT_NUMBER | T![self] => 3,
             kind if kind.is_trivia() => 0,
-            _ => 1,
+            T![;] => 1,
+            _ => 2,
         })?;
 
     let mut res = Vec::new();
@@ -69,7 +68,7 @@ pub(crate) fn goto_type_definition(
     }
 
     let range = token.text_range();
-    sema.descend_into_macros(DescendPreference::None, token)
+    sema.descend_into_macros_no_opaque(token)
         .into_iter()
         .filter_map(|token| {
             let ty = sema
@@ -113,12 +112,12 @@ pub(crate) fn goto_type_definition(
 
 #[cfg(test)]
 mod tests {
-    use ide_db::base_db::FileRange;
+    use ide_db::FileRange;
     use itertools::Itertools;
 
     use crate::fixture;
 
-    fn check(ra_fixture: &str) {
+    fn check(#[rust_analyzer::rust_fixture] ra_fixture: &str) {
         let (analysis, position, expected) = fixture::annotations(ra_fixture);
         let navs = analysis.goto_type_definition(position).unwrap().unwrap().info;
         assert!(!navs.is_empty(), "navigation is empty");

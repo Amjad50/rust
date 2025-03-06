@@ -1,10 +1,12 @@
 // This test ensures that warnings are working as expected for "custom_code_classes_in_docs"
 // feature.
 
-#![feature(custom_code_classes_in_docs)]
 #![deny(warnings)]
-#![feature(no_core)]
+#![feature(no_core, lang_items)]
 #![no_core]
+
+#[lang = "sized"]
+trait Sized {}
 
 /// ```{class="}
 /// main;

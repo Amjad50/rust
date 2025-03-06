@@ -2,11 +2,9 @@ use std::assert_matches::assert_matches;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::TryReserveErrorKind::*;
-use std::ops::Bound;
 use std::ops::Bound::*;
-use std::ops::RangeBounds;
-use std::panic;
-use std::str;
+use std::ops::{Bound, RangeBounds};
+use std::{panic, str};
 
 pub trait IntoCow<'a, B: ?Sized>
 where
@@ -114,6 +112,43 @@ fn test_from_utf8_lossy() {
         String::from_utf8_lossy(xs),
         String::from("\u{FFFD}\u{FFFD}\u{FFFD}foo\u{FFFD}\u{FFFD}\u{FFFD}bar").into_cow()
     );
+}
+
+#[test]
+fn test_fromutf8error_into_lossy() {
+    fn func(input: &[u8]) -> String {
+        String::from_utf8(input.to_owned()).unwrap_or_else(|e| e.into_utf8_lossy())
+    }
+
+    let xs = b"hello";
+    let ys = "hello".to_owned();
+    assert_eq!(func(xs), ys);
+
+    let xs = "ศไทย中华Việt Nam".as_bytes();
+    let ys = "ศไทย中华Việt Nam".to_owned();
+    assert_eq!(func(xs), ys);
+
+    let xs = b"Hello\xC2 There\xFF Goodbye";
+    assert_eq!(func(xs), "Hello\u{FFFD} There\u{FFFD} Goodbye".to_owned());
+
+    let xs = b"Hello\xC0\x80 There\xE6\x83 Goodbye";
+    assert_eq!(func(xs), "Hello\u{FFFD}\u{FFFD} There\u{FFFD} Goodbye".to_owned());
+
+    let xs = b"\xF5foo\xF5\x80bar";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}\u{FFFD}bar".to_owned());
+
+    let xs = b"\xF1foo\xF1\x80bar\xF1\x80\x80baz";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}bar\u{FFFD}baz".to_owned());
+
+    let xs = b"\xF4foo\xF4\x80bar\xF4\xBFbaz";
+    assert_eq!(func(xs), "\u{FFFD}foo\u{FFFD}bar\u{FFFD}\u{FFFD}baz".to_owned());
+
+    let xs = b"\xF0\x80\x80\x80foo\xF0\x90\x80\x80bar";
+    assert_eq!(func(xs), "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}foo\u{10000}bar".to_owned());
+
+    // surrogates
+    let xs = b"\xED\xA0\x80foo\xED\xBF\xBFbar";
+    assert_eq!(func(xs), "\u{FFFD}\u{FFFD}\u{FFFD}foo\u{FFFD}\u{FFFD}\u{FFFD}bar".to_owned());
 }
 
 #[test]
@@ -725,7 +760,6 @@ fn test_reserve_exact() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
-#[cfg_attr(target_os = "android", ignore)] // Android used in CI has a broken dlmalloc
 fn test_try_with_capacity() {
     let string = String::try_with_capacity(1000).unwrap();
     assert_eq!(0, string.len());
@@ -736,7 +770,6 @@ fn test_try_with_capacity() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
-#[cfg_attr(target_os = "android", ignore)] // Android used in CI has a broken dlmalloc
 fn test_try_reserve() {
     // These are the interesting cases:
     // * exactly isize::MAX should never trigger a CapacityOverflow (can be OOM)
@@ -805,7 +838,6 @@ fn test_try_reserve() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri does not support signalling OOM
-#[cfg_attr(target_os = "android", ignore)] // Android used in CI has a broken dlmalloc
 fn test_try_reserve_exact() {
     // This is exactly the same as test_try_reserve with the method changed.
     // See that test for comments.

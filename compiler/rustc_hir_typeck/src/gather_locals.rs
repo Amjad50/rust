@@ -1,13 +1,13 @@
-use crate::FnCtxt;
 use rustc_hir as hir;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{HirId, PatKind};
-use rustc_infer::infer::type_variable::TypeVariableOrigin;
-use rustc_middle::ty::Ty;
-use rustc_middle::ty::UserType;
-use rustc_span::def_id::LocalDefId;
+use rustc_infer::traits::ObligationCauseCode;
+use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
-use rustc_trait_selection::traits;
+use rustc_span::def_id::LocalDefId;
+use tracing::debug;
+
+use crate::FnCtxt;
 
 /// Provides context for checking patterns in declarations. More specifically this
 /// allows us to infer array types if the pattern is irrefutable and allows us to infer
@@ -72,7 +72,7 @@ impl<'a, 'tcx> GatherLocalsVisitor<'a, 'tcx> {
         match ty_opt {
             None => {
                 // Infer the variable's type.
-                let var_ty = self.fcx.next_ty_var(TypeVariableOrigin { param_def_id: None, span });
+                let var_ty = self.fcx.next_ty_var(span);
                 self.fcx.locals.borrow_mut().insert(nid, var_ty);
                 var_ty
             }
@@ -92,7 +92,12 @@ impl<'a, 'tcx> GatherLocalsVisitor<'a, 'tcx> {
             Some(ref ty) => {
                 let o_ty = self.fcx.lower_ty(ty);
 
-                let c_ty = self.fcx.infcx.canonicalize_user_type_annotation(UserType::Ty(o_ty.raw));
+                let c_ty = self.fcx.infcx.canonicalize_user_type_annotation(
+                    ty::UserType::new_with_bounds(
+                        ty::UserTypeKind::Ty(o_ty.raw),
+                        self.fcx.collect_impl_trait_clauses_from_hir_ty(ty),
+                    ),
+                );
                 debug!("visit_local: ty.hir_id={:?} o_ty={:?} c_ty={:?}", ty.hir_id, o_ty, c_ty);
                 self.fcx
                     .typeck_results
@@ -141,13 +146,13 @@ impl<'a, 'tcx> Visitor<'tcx> for GatherLocalsVisitor<'a, 'tcx> {
             let var_ty = self.assign(p.span, p.hir_id, None);
 
             if let Some((ty_span, hir_id)) = self.outermost_fn_param_pat {
-                if !self.fcx.tcx.features().unsized_fn_params {
+                if !self.fcx.tcx.features().unsized_fn_params() {
                     self.fcx.require_type_is_sized(
                         var_ty,
-                        p.span,
+                        ty_span,
                         // ty_span == ident.span iff this is a closure parameter with no type
                         // ascription, or if it's an implicit `self` parameter
-                        traits::SizedArgumentType(
+                        ObligationCauseCode::SizedArgumentType(
                             if ty_span == ident.span
                                 && self.fcx.tcx.is_closure_like(self.fcx.body_id.into())
                             {
@@ -158,10 +163,12 @@ impl<'a, 'tcx> Visitor<'tcx> for GatherLocalsVisitor<'a, 'tcx> {
                         ),
                     );
                 }
-            } else {
-                if !self.fcx.tcx.features().unsized_locals {
-                    self.fcx.require_type_is_sized(var_ty, p.span, traits::VariableType(p.hir_id));
-                }
+            } else if !self.fcx.tcx.features().unsized_locals() {
+                self.fcx.require_type_is_sized(
+                    var_ty,
+                    p.span,
+                    ObligationCauseCode::VariableType(p.hir_id),
+                );
             }
 
             debug!(

@@ -1,19 +1,19 @@
 use std::ops::Range;
+use std::sync::Arc;
 use std::{io, thread};
 
 use crate::doc::{NEEDLESS_DOCTEST_MAIN, TEST_ATTR_IN_DOCTEST};
 use clippy_utils::diagnostics::span_lint;
 use rustc_ast::{CoroutineKind, Fn, FnRetTy, Item, ItemKind};
-use rustc_data_structures::sync::Lrc;
 use rustc_errors::emitter::HumanEmitter;
 use rustc_errors::{Diag, DiagCtxt};
 use rustc_lint::LateContext;
-use rustc_parse::maybe_new_parser_from_source_str;
+use rustc_parse::new_parser_from_source_str;
 use rustc_parse::parser::ForceCollect;
 use rustc_session::parse::ParseSess;
 use rustc_span::edition::Edition;
 use rustc_span::source_map::{FilePathMapping, SourceMap};
-use rustc_span::{sym, FileName, Pos};
+use rustc_span::{FileName, Pos, sym};
 
 use super::Fragments;
 
@@ -46,11 +46,11 @@ pub fn check(
                     rustc_errors::fallback_fluent_bundle(rustc_driver::DEFAULT_LOCALE_RESOURCES.to_vec(), false);
                 let emitter = HumanEmitter::new(Box::new(io::sink()), fallback_bundle);
                 let dcx = DiagCtxt::new(Box::new(emitter)).disable_warnings();
-                #[expect(clippy::arc_with_non_send_sync)] // `Lrc` is expected by with_dcx
-                let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
+                #[expect(clippy::arc_with_non_send_sync)] // `Arc` is expected by with_dcx
+                let sm = Arc::new(SourceMap::new(FilePathMapping::empty()));
                 let psess = ParseSess::with_dcx(dcx, sm);
 
-                let mut parser = match maybe_new_parser_from_source_str(&psess, filename, code) {
+                let mut parser = match new_parser_from_source_str(&psess, filename, code) {
                     Ok(p) => p,
                     Err(errs) => {
                         errs.into_iter().for_each(Diag::cancel);

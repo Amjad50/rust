@@ -1,4 +1,4 @@
-//! Command-line interface of the rustbuild build system.
+//! Command-line interface of the bootstrap build system.
 //!
 //! This module implements the command-line parsing of the build system which
 //! has various flags to configure how it's run.
@@ -6,10 +6,13 @@
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, ValueEnum};
+#[cfg(feature = "tracing")]
+use tracing::instrument;
 
+use crate::core::build_steps::perf::PerfArgs;
 use crate::core::build_steps::setup::Profile;
 use crate::core::builder::{Builder, Kind};
-use crate::core::config::{target_selection_list, Config, TargetSelectionList};
+use crate::core::config::{Config, TargetSelectionList, target_selection_list};
 use crate::{Build, DocTests};
 
 #[derive(Copy, Clone, Default, Debug, ValueEnum)]
@@ -110,11 +113,10 @@ pub struct Flags {
         short,
         long,
         value_hint = clap::ValueHint::Other,
-        default_value_t = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
         value_name = "JOBS"
     )]
     /// number of jobs to run in parallel
-    pub jobs: usize,
+    pub jobs: Option<u32>,
     // This overrides the deny-warnings configuration option,
     // which passes -Dwarnings to the compiler invocations.
     #[arg(global = true, long)]
@@ -143,9 +145,6 @@ pub struct Flags {
     /// Unless you know exactly what you are doing, you probably don't need this.
     pub bypass_bootstrap_lock: bool,
 
-    /// whether rebuilding llvm should be skipped, overriding `skip-rebuld` in config.toml
-    #[arg(global = true, long, value_name = "VALUE")]
-    pub llvm_skip_rebuild: Option<bool>,
     /// generate PGO profile with rustc build
     #[arg(global = true, value_hint = clap::ValueHint::FilePath, long, value_name = "PROFILE")]
     pub rust_profile_generate: Option<String>,
@@ -183,9 +182,9 @@ pub struct Flags {
 }
 
 impl Flags {
-    pub fn parse(args: &[String]) -> Self {
-        let first = String::from("x.py");
-        let it = std::iter::once(&first).chain(args.iter());
+    /// Check if `<cmd> -h -v` was passed.
+    /// If yes, print the available paths and return `true`.
+    pub fn try_parse_verbose_help(args: &[String]) -> bool {
         // We need to check for `<cmd> -h -v`, in which case we list the paths
         #[derive(Parser)]
         #[command(disable_help_flag(true))]
@@ -198,10 +197,10 @@ impl Flags {
             cmd: Kind,
         }
         if let Ok(HelpVerboseOnly { help: true, verbose: 1.., cmd: subcommand }) =
-            HelpVerboseOnly::try_parse_from(it.clone())
+            HelpVerboseOnly::try_parse_from(normalize_args(args))
         {
             println!("NOTE: updating submodules before printing available paths");
-            let config = Config::parse(&[String::from("build")]);
+            let config = Config::parse(Self::parse(&[String::from("build")]));
             let build = Build::new(config);
             let paths = Builder::get_help(&build, subcommand);
             if let Some(s) = paths {
@@ -209,11 +208,25 @@ impl Flags {
             } else {
                 panic!("No paths available for subcommand `{}`", subcommand.as_str());
             }
-            crate::exit!(0);
+            true
+        } else {
+            false
         }
-
-        Flags::parse_from(it)
     }
+
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(level = "trace", name = "Flags::parse", skip_all, fields(args = ?args))
+    )]
+    pub fn parse(args: &[String]) -> Self {
+        Flags::parse_from(normalize_args(args))
+    }
+}
+
+fn normalize_args(args: &[String]) -> Vec<String> {
+    let first = String::from("x.py");
+    let it = std::iter::once(first).chain(args.iter().cloned());
+    it.collect()
 }
 
 #[derive(Debug, Clone, Default, clap::Subcommand)]
@@ -284,8 +297,8 @@ pub enum Subcommand {
         name = "fmt",
         long_about = "\n
     Arguments:
-        This subcommand optionally accepts a `--check` flag which succeeds if formatting is correct and
-        fails if it is not. For example:
+        This subcommand optionally accepts a `--check` flag which succeeds if
+        formatting is correct and fails if it is not. For example:
             ./x.py fmt
             ./x.py fmt --check"
     )]
@@ -294,6 +307,10 @@ pub enum Subcommand {
         /// check formatting instead of applying
         #[arg(long)]
         check: bool,
+
+        /// apply to all appropriate files, not just those that have been modified
+        #[arg(long)]
+        all: bool,
     },
     #[command(aliases = ["d"], long_about = "\n
     Arguments:
@@ -343,9 +360,9 @@ pub enum Subcommand {
         /// extra arguments to be passed for the test tool being used
         /// (e.g. libtest, compiletest or rustdoc)
         test_args: Vec<String>,
-        /// extra options to pass the compiler when running tests
+        /// extra options to pass the compiler when running compiletest tests
         #[arg(long, value_name = "ARGS", allow_hyphen_values(true))]
-        rustc_args: Vec<String>,
+        compiletest_rustc_args: Vec<String>,
         #[arg(long)]
         /// do not run doc tests
         no_doc: bool,
@@ -378,6 +395,9 @@ pub enum Subcommand {
         /// enable this to generate a Rustfix coverage file, which is saved in
         /// `/<build_base>/rustfix_missing_coverage.txt`
         rustfix_coverage: bool,
+        #[arg(long)]
+        /// don't capture stdout/stderr of tests
+        no_capture: bool,
     },
     /// Build and run some test suites *in Miri*
     Miri {
@@ -388,9 +408,6 @@ pub enum Subcommand {
         /// extra arguments to be passed for the test tool being used
         /// (e.g. libtest, compiletest or rustdoc)
         test_args: Vec<String>,
-        /// extra options to pass the compiler when running tests
-        #[arg(long, value_name = "ARGS", allow_hyphen_values(true))]
-        rustc_args: Vec<String>,
         #[arg(long)]
         /// do not run doc tests
         no_doc: bool,
@@ -439,14 +456,14 @@ Arguments:
     The profile is optional and you will be prompted interactively if it is not given.
     The following profiles are available:
 {}
-    To only set up the git hook, VS Code config or toolchain link, you may use
+    To only set up the git hook, editor config or toolchain link, you may use
         ./x.py setup hook
-        ./x.py setup vscode
+        ./x.py setup editor
         ./x.py setup link", Profile::all_for_help("        ").trim_end()))]
     Setup {
         /// Either the profile for `config.toml` or another setup action.
         /// May be omitted to set up interactively
-        #[arg(value_name = "<PROFILE>|hook|vscode|link")]
+        #[arg(value_name = "<PROFILE>|hook|editor|link")]
         profile: Option<PathBuf>,
     },
     /// Suggest a subset of tests to run, based on modified files
@@ -465,34 +482,37 @@ Arguments:
         #[arg(long)]
         versioned_dirs: bool,
     },
+    /// Perform profiling and benchmarking of the compiler using `rustc-perf`.
+    Perf(PerfArgs),
 }
 
 impl Subcommand {
     pub fn kind(&self) -> Kind {
         match self {
             Subcommand::Bench { .. } => Kind::Bench,
-            Subcommand::Build { .. } => Kind::Build,
+            Subcommand::Build => Kind::Build,
             Subcommand::Check { .. } => Kind::Check,
             Subcommand::Clippy { .. } => Kind::Clippy,
             Subcommand::Doc { .. } => Kind::Doc,
-            Subcommand::Fix { .. } => Kind::Fix,
+            Subcommand::Fix => Kind::Fix,
             Subcommand::Format { .. } => Kind::Format,
             Subcommand::Test { .. } => Kind::Test,
             Subcommand::Miri { .. } => Kind::Miri,
             Subcommand::Clean { .. } => Kind::Clean,
-            Subcommand::Dist { .. } => Kind::Dist,
-            Subcommand::Install { .. } => Kind::Install,
+            Subcommand::Dist => Kind::Dist,
+            Subcommand::Install => Kind::Install,
             Subcommand::Run { .. } => Kind::Run,
             Subcommand::Setup { .. } => Kind::Setup,
             Subcommand::Suggest { .. } => Kind::Suggest,
             Subcommand::Vendor { .. } => Kind::Vendor,
+            Subcommand::Perf { .. } => Kind::Perf,
         }
     }
 
-    pub fn rustc_args(&self) -> Vec<&str> {
+    pub fn compiletest_rustc_args(&self) -> Vec<&str> {
         match *self {
-            Subcommand::Test { ref rustc_args, .. } | Subcommand::Miri { ref rustc_args, .. } => {
-                rustc_args.iter().flat_map(|s| s.split_whitespace()).collect()
+            Subcommand::Test { ref compiletest_rustc_args, .. } => {
+                compiletest_rustc_args.iter().flat_map(|s| s.split_whitespace()).collect()
             }
             _ => vec![],
         }
@@ -546,6 +566,13 @@ impl Subcommand {
     pub fn force_rerun(&self) -> bool {
         match *self {
             Subcommand::Test { force_rerun, .. } => force_rerun,
+            _ => false,
+        }
+    }
+
+    pub fn no_capture(&self) -> bool {
+        match *self {
+            Subcommand::Test { no_capture, .. } => no_capture,
             _ => false,
         }
     }
@@ -620,7 +647,14 @@ pub fn get_completion<G: clap_complete::Generator>(shell: G, path: &Path) -> Opt
         })
     };
     let mut buf = Vec::new();
-    clap_complete::generate(shell, &mut cmd, "x.py", &mut buf);
+    let (bin_name, _) = path
+        .file_name()
+        .expect("path should be a regular file")
+        .to_str()
+        .expect("file name should be UTF-8")
+        .rsplit_once('.')
+        .expect("file name should have an extension");
+    clap_complete::generate(shell, &mut cmd, bin_name, &mut buf);
     if buf == current.as_bytes() {
         return None;
     }

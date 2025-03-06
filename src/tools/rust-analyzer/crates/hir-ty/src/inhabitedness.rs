@@ -5,7 +5,7 @@ use chalk_ir::{
     visit::{TypeSuperVisitable, TypeVisitable, TypeVisitor},
     DebruijnIndex,
 };
-use hir_def::{visibility::Visibility, AdtId, EnumVariantId, HasModule, ModuleId, VariantId};
+use hir_def::{visibility::Visibility, AdtId, EnumVariantId, ModuleId, VariantId};
 use rustc_hash::FxHashSet;
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
 // FIXME: Turn this into a query, it can be quite slow
 /// Checks whether a type is visibly uninhabited from a particular module.
 pub(crate) fn is_ty_uninhabited_from(db: &dyn HirDatabase, ty: &Ty, target_mod: ModuleId) -> bool {
-    let _p = tracing::span!(tracing::Level::INFO, "is_ty_uninhabited_from", ?ty).entered();
+    let _p = tracing::info_span!("is_ty_uninhabited_from", ?ty).entered();
     let mut uninhabited_from =
         UninhabitedFrom { target_mod, db, max_depth: 500, recursive_ty: FxHashSet::default() };
     let inhabitedness = ty.visit_with(&mut uninhabited_from, DebruijnIndex::INNERMOST);
@@ -30,7 +30,7 @@ pub(crate) fn is_enum_variant_uninhabited_from(
     subst: &Substitution,
     target_mod: ModuleId,
 ) -> bool {
-    let _p = tracing::span!(tracing::Level::INFO, "is_enum_variant_uninhabited_from").entered();
+    let _p = tracing::info_span!("is_enum_variant_uninhabited_from").entered();
 
     let mut uninhabited_from =
         UninhabitedFrom { target_mod, db, max_depth: 500, recursive_ty: FxHashSet::default() };
@@ -117,11 +117,6 @@ impl UninhabitedFrom<'_> {
         variant: VariantId,
         subst: &Substitution,
     ) -> ControlFlow<VisiblyUninhabited> {
-        let is_local = variant.krate(self.db.upcast()) == self.target_mod.krate();
-        if !is_local && self.db.attrs(variant.into()).by_key("non_exhaustive").exists() {
-            return CONTINUE_OPAQUELY_INHABITED;
-        }
-
         let variant_data = self.db.variant_data(variant);
         let fields = variant_data.fields();
         if fields.is_empty() {
@@ -144,7 +139,7 @@ impl UninhabitedFrom<'_> {
         ty: &Binders<Ty>,
         subst: &Substitution,
     ) -> ControlFlow<VisiblyUninhabited> {
-        if vis.map_or(true, |it| it.is_visible_from(self.db.upcast(), self.target_mod)) {
+        if vis.is_none_or(|it| it.is_visible_from(self.db.upcast(), self.target_mod)) {
             let ty = ty.clone().substitute(Interner, subst);
             ty.visit_with(self, DebruijnIndex::INNERMOST)
         } else {

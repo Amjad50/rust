@@ -1,14 +1,13 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::numeric_literal::NumericLiteral;
-use clippy_utils::source::snippet_opt;
-use clippy_utils::visitors::{for_each_expr, Visitable};
+use clippy_utils::source::{SpanRangeExt, snippet_opt};
+use clippy_utils::visitors::{Visitable, for_each_expr_without_closures};
 use clippy_utils::{get_parent_expr, is_hir_ty_cfg_dependant, is_ty_alias, path_to_local};
 use rustc_ast::{LitFloatType, LitIntType, LitKind};
 use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::{Expr, ExprKind, Lit, Node, Path, QPath, TyKind, UnOp};
 use rustc_lint::{LateContext, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{self, FloatTy, InferTy, Ty};
 use std::ops::ControlFlow;
 
@@ -43,7 +42,7 @@ pub(super) fn check<'tcx>(
                 }
             },
             // Ignore `p as *const _`
-            TyKind::Infer => return false,
+            TyKind::Infer(()) => return false,
             _ => {},
         }
 
@@ -104,7 +103,7 @@ pub(super) fn check<'tcx>(
         let literal_str = &cast_str;
 
         if let LitKind::Int(n, _) = lit.node
-            && let Some(src) = snippet_opt(cx, cast_expr.span)
+            && let Some(src) = cast_expr.span.get_source_text(cx)
             && cast_to.is_floating_point()
             && let Some(num_lit) = NumericLiteral::from_lit_kind(&src, &lit.node)
             && let from_nbits = 128 - n.get().leading_zeros()
@@ -131,7 +130,7 @@ pub(super) fn check<'tcx>(
             | LitKind::Float(_, LitFloatType::Suffixed(_))
                 if cast_from.kind() == cast_to.kind() =>
             {
-                if let Some(src) = snippet_opt(cx, cast_expr.span) {
+                if let Some(src) = cast_expr.span.get_source_text(cx) {
                     if let Some(num_lit) = NumericLiteral::from_lit_kind(&src, &lit.node) {
                         lint_unnecessary_cast(cx, expr, num_lit.integer, cast_from, cast_to);
                         return true;
@@ -142,7 +141,7 @@ pub(super) fn check<'tcx>(
         }
     }
 
-    if cast_from.kind() == cast_to.kind() && !in_external_macro(cx.sess(), expr.span) {
+    if cast_from.kind() == cast_to.kind() && !expr.span.in_external_macro(cx.sess().source_map()) {
         if let Some(id) = path_to_local(cast_expr)
             && !cx.tcx.hir().span(id).eq_ctxt(cast_expr.span)
         {
@@ -159,8 +158,7 @@ pub(super) fn check<'tcx>(
         // The same is true if the expression encompassing the cast expression is a unary
         // expression or an addressof expression.
         let needs_block = matches!(cast_expr.kind, ExprKind::Unary(..) | ExprKind::AddrOf(..))
-            || get_parent_expr(cx, expr)
-                .map_or(false, |e| matches!(e.kind, ExprKind::Unary(..) | ExprKind::AddrOf(..)));
+            || get_parent_expr(cx, expr).is_some_and(|e| matches!(e.kind, ExprKind::Unary(..) | ExprKind::AddrOf(..)));
 
         span_lint_and_sugg(
             cx,
@@ -245,7 +243,7 @@ fn fp_ty_mantissa_nbits(typ: Ty<'_>) -> u32 {
 /// TODO: Maybe we should move this to `clippy_utils` so others won't need to go down this dark,
 /// dark path reimplementing this (or something similar).
 fn is_cast_from_ty_alias<'tcx>(cx: &LateContext<'tcx>, expr: impl Visitable<'tcx>, cast_from: Ty<'tcx>) -> bool {
-    for_each_expr(expr, |expr| {
+    for_each_expr_without_closures(expr, |expr| {
         // Calls are a `Path`, and usage of locals are a `Path`. So, this checks
         // - call() as i32
         // - local as i32
@@ -253,7 +251,7 @@ fn is_cast_from_ty_alias<'tcx>(cx: &LateContext<'tcx>, expr: impl Visitable<'tcx
             let res = cx.qpath_res(&qpath, expr.hir_id);
             // Function call
             if let Res::Def(DefKind::Fn, def_id) = res {
-                let Some(snippet) = snippet_opt(cx, cx.tcx.def_span(def_id)) else {
+                let Some(snippet) = cx.tcx.def_span(def_id).get_source_text(cx) else {
                     return ControlFlow::Continue(());
                 };
                 // This is the worst part of this entire function. This is the only way I know of to
@@ -268,8 +266,7 @@ fn is_cast_from_ty_alias<'tcx>(cx: &LateContext<'tcx>, expr: impl Visitable<'tcx
                 if !snippet
                     .split("->")
                     .skip(1)
-                    .map(|s| snippet_eq_ty(s, cast_from) || s.split("where").any(|ty| snippet_eq_ty(ty, cast_from)))
-                    .any(|a| a)
+                    .any(|s| snippet_eq_ty(s, cast_from) || s.split("where").any(|ty| snippet_eq_ty(ty, cast_from)))
                 {
                     return ControlFlow::Break(());
                 }

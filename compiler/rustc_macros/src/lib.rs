@@ -1,25 +1,27 @@
-#![feature(allow_internal_unstable)]
+// tidy-alphabetical-start
+#![allow(rustc::default_hash_types)]
 #![feature(if_let_guard)]
 #![feature(let_chains)]
 #![feature(never_type)]
 #![feature(proc_macro_diagnostic)]
 #![feature(proc_macro_span)]
 #![feature(proc_macro_tracked_env)]
-#![allow(rustc::default_hash_types)]
-#![allow(internal_features)]
-
-use synstructure::decl_derive;
+#![warn(unreachable_pub)]
+// tidy-alphabetical-end
 
 use proc_macro::TokenStream;
+use synstructure::decl_derive;
 
 mod current_version;
 mod diagnostics;
 mod extension;
 mod hash_stable;
 mod lift;
+mod print_attribute;
 mod query;
 mod serialize;
 mod symbols;
+mod try_from;
 mod type_foldable;
 mod type_visitable;
 
@@ -108,7 +110,9 @@ decl_derive!(
         // struct attributes
         diag,
         help,
+        help_once,
         note,
+        note_once,
         warning,
         // field attributes
         skip_arg,
@@ -125,7 +129,9 @@ decl_derive!(
         // struct attributes
         diag,
         help,
+        help_once,
         note,
+        note_once,
         warning,
         // field attributes
         skip_arg,
@@ -142,7 +148,9 @@ decl_derive!(
         // struct/variant attributes
         label,
         help,
+        help_once,
         note,
+        note_once,
         warning,
         subdiagnostic,
         suggestion,
@@ -159,3 +167,20 @@ decl_derive!(
         suggestion_part,
         applicability)] => diagnostics::subdiagnostic_derive
 );
+
+decl_derive! {
+    [TryFromU32] =>
+    /// Derives `TryFrom<u32>` for the annotated `enum`, which must have no fields.
+    /// Each variant maps to the value it would produce under an `as u32` cast.
+    ///
+    /// The error type is `u32`.
+    try_from::try_from_u32
+}
+decl_derive! {
+    [PrintAttribute] =>
+    /// Derives `PrintAttribute` for `AttributeKind`.
+    /// This macro is pretty specific to `rustc_attr_data_structures` and likely not that useful in
+    /// other places. It's deriving something close to `Debug` without printing some extraenous
+    /// things like spans.
+    print_attribute::print_attribute
+}

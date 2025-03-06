@@ -1,9 +1,6 @@
 #![no_std]
 #![feature(
-    const_intrinsic_copy,
-    const_refs_to_cell,
-    const_maybe_uninit_as_mut_ptr,
-    const_mut_refs,
+    const_eval_select,
     convert_float_to_int,
     core_intrinsics,
     decl_macro,
@@ -11,7 +8,6 @@
     repr_simd,
     simd_ffi,
     staged_api,
-    strict_provenance,
     prelude_import,
     ptr_metadata
 )]
@@ -29,6 +25,7 @@
     all(target_arch = "arm", target_feature = "v7"),
     feature(stdarch_arm_neon_intrinsics)
 )]
+#![cfg_attr(target_arch = "loongarch64", feature(stdarch_loongarch))]
 #![cfg_attr(
     any(target_arch = "powerpc", target_arch = "powerpc64"),
     feature(stdarch_powerpc)

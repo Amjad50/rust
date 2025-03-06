@@ -18,6 +18,7 @@ fn single_match() {
         },
         _ => (),
     };
+    //~^^^^^^ single_match
 
     let x = Some(1u8);
     match x {
@@ -33,6 +34,7 @@ fn single_match() {
         (2..=3, 7..=9) => dummy(),
         _ => {},
     };
+    //~^^^^ single_match
 
     // Not linted (pattern guards used)
     match x {
@@ -51,8 +53,8 @@ enum Foo {
     Bar,
     Baz(u8),
 }
-use std::borrow::Cow;
 use Foo::*;
+use std::borrow::Cow;
 
 fn single_match_know_enum() {
     let x = Some(1u8);
@@ -62,11 +64,13 @@ fn single_match_know_enum() {
         Some(y) => dummy(),
         None => (),
     };
+    //~^^^^ single_match
 
     match y {
         Ok(y) => dummy(),
         Err(..) => (),
     };
+    //~^^^^ single_match
 
     let c = Cow::Borrowed("");
 
@@ -74,6 +78,7 @@ fn single_match_know_enum() {
         Cow::Borrowed(..) => dummy(),
         Cow::Owned(..) => (),
     };
+    //~^^^^ single_match
 
     let z = Foo::Bar;
     // no warning
@@ -95,6 +100,7 @@ fn if_suggestion() {
         "test" => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     #[derive(PartialEq, Eq)]
     enum Foo {
@@ -108,23 +114,27 @@ fn if_suggestion() {
         Foo::A => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     const FOO_C: Foo = Foo::C(0);
     match x {
         FOO_C => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     match &&x {
         Foo::A => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     let x = &x;
     match &x {
         Foo::A => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     enum Bar {
         A,
@@ -142,6 +152,7 @@ fn if_suggestion() {
         Bar::A => println!(),
         _ => (),
     }
+    //~^^^^ single_match
 
     // issue #7038
     struct X;
@@ -150,6 +161,7 @@ fn if_suggestion() {
         None => println!(),
         _ => (),
     };
+    //~^^^^ single_match
 }
 
 // See: issue #8282
@@ -172,18 +184,21 @@ fn ranges() {
         (Some(_), _) => {},
         (None, _) => {},
     }
+    //~^^^^ single_match
 
     // lint
     match x {
         (Some(E::V), _) => todo!(),
         (_, _) => {},
     }
+    //~^^^^ single_match
 
     // lint
     match (Some(42), Some(E::V), Some(42)) {
         (.., Some(E::V), _) => {},
         (..) => {},
     }
+    //~^^^^ single_match
 
     // Don't lint, see above.
     match (Some(E::V), Some(E::V), Some(E::V)) {
@@ -259,6 +274,7 @@ fn issue_10808(bar: Option<i32>) {
         },
         _ => {},
     }
+    //~^^^^^^^ single_match
 
     match bar {
         #[rustfmt::skip]
@@ -270,6 +286,7 @@ fn issue_10808(bar: Option<i32>) {
         },
         _ => {},
     }
+    //~^^^^^^^^^^ single_match
 }
 
 mod issue8634 {
@@ -309,5 +326,132 @@ mod issue8634 {
                 */
             },
         }
+    }
+}
+
+fn issue11365() {
+    enum Foo {
+        A,
+        B,
+        C,
+    }
+    use Foo::{A, B, C};
+
+    match Some(A) {
+        Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match Some(A) {
+        Some(A | B) => println!(),
+        Some { 0: C } | None => {},
+    }
+
+    match [A, A] {
+        [A, _] => println!(),
+        [_, A | B | C] => {},
+    }
+
+    match Ok::<_, u32>(Some(A)) {
+        Ok(Some(A)) => println!(),
+        Err(_) | Ok(None | Some(B | C)) => {},
+    }
+
+    match Ok::<_, u32>(Some(A)) {
+        Ok(Some(A)) => println!(),
+        Err(_) | Ok(None | Some(_)) => {},
+    }
+    //~^^^^ single_match
+
+    match &Some(A) {
+        Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match &Some(A) {
+        &Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match &Some(A) {
+        Some(A | B) => println!(),
+        None | Some(_) => {},
+    }
+    //~^^^^ single_match
+}
+
+fn issue12758(s: &[u8]) {
+    match &s[0..3] {
+        b"foo" => println!(),
+        _ => {},
+    }
+    //~^^^^ single_match
+}
+
+#[derive(Eq, PartialEq)]
+pub struct Data([u8; 4]);
+
+const DATA: Data = Data([1, 2, 3, 4]);
+const CONST_I32: i32 = 1;
+
+fn irrefutable_match() {
+    match DATA {
+        DATA => println!(),
+        _ => {},
+    }
+    //~^^^^ single_match
+
+    match CONST_I32 {
+        CONST_I32 => println!(),
+        _ => {},
+    }
+    //~^^^^ single_match
+
+    let i = 0;
+    match i {
+        i => {
+            let a = 1;
+            let b = 2;
+        },
+        _ => {},
+    }
+    //~^^^^^^^ single_match
+
+    match i {
+        i => {},
+        _ => {},
+    }
+    //~^^^^ single_match
+
+    match i {
+        i => (),
+        _ => (),
+    }
+    //~^^^^ single_match
+
+    match CONST_I32 {
+        CONST_I32 => println!(),
+        _ => {},
+    }
+    //~^^^^ single_match
+
+    let mut x = vec![1i8];
+
+    // Should not lint.
+    match x.pop() {
+        // bla
+        Some(u) => println!("{u}"),
+        // more comments!
+        None => {},
+    }
+    // Should not lint.
+    match x.pop() {
+        // bla
+        Some(u) => {
+            // bla
+            println!("{u}");
+        },
+        // bla
+        None => {},
     }
 }

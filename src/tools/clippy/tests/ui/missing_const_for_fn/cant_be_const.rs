@@ -1,3 +1,4 @@
+//@ check-pass
 //! False-positive tests to ensure we don't suggest `const` for things where it would cause a
 //! compilation error.
 //! The .stderr output of this test should be empty. Otherwise it's a bug somewhere.
@@ -6,7 +7,7 @@
 //@aux-build:../auxiliary/proc_macros.rs
 
 #![warn(clippy::missing_const_for_fn)]
-#![feature(start)]
+#![feature(type_alias_impl_trait)]
 
 extern crate helper;
 extern crate proc_macros;
@@ -46,10 +47,28 @@ fn get_y() -> u32 {
     Y
 }
 
-// Don't lint entrypoint functions
-#[start]
-fn init(num: isize, something: *const *const u8) -> isize {
-    1
+#[cfg(test)]
+mod with_test_fn {
+    #[derive(Clone, Copy)]
+    pub struct Foo {
+        pub n: u32,
+    }
+
+    impl Foo {
+        #[must_use]
+        pub const fn new(n: u32) -> Foo {
+            Foo { n }
+        }
+    }
+
+    #[test]
+    fn foo_is_copy() {
+        let foo = Foo::new(42);
+        let one = foo;
+        let two = foo;
+        _ = one;
+        _ = two;
+    }
 }
 
 trait Foo {
@@ -161,7 +180,40 @@ union U {
     f: u32,
 }
 
-// Do not lint because accessing union fields from const functions is unstable
+// Do not lint because accessing union fields from const functions is unstable in 1.55
+#[clippy::msrv = "1.55"]
 fn h(u: U) -> u32 {
     unsafe { u.f }
+}
+
+mod msrv {
+    struct Foo(*const u8, *mut u8);
+
+    impl Foo {
+        #[clippy::msrv = "1.57"]
+        fn deref_ptr_cannot_be_const(self) -> usize {
+            unsafe { *self.0 as usize }
+        }
+        #[clippy::msrv = "1.58"]
+        fn deref_mut_ptr_cannot_be_const(self) -> usize {
+            unsafe { *self.1 as usize }
+        }
+    }
+
+    #[clippy::msrv = "1.61"]
+    extern "C" fn c() {}
+}
+
+mod with_ty_alias {
+    type Foo = impl std::fmt::Debug;
+
+    fn foo(_: Foo) {
+        let _: Foo = 1;
+    }
+}
+
+// Do not lint because mutable references in const functions are unstable in 1.82
+#[clippy::msrv = "1.82"]
+fn mut_add(x: &mut i32) {
+    *x += 1;
 }

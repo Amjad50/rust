@@ -1,6 +1,6 @@
 use crate::spec::{Cc, LinkerFlavor, Lld, PanicStrategy, TargetOptions};
 
-pub fn opts() -> TargetOptions {
+pub(crate) fn opts() -> TargetOptions {
     TargetOptions {
         os: "emerald".into(),
         linker: Some("rust-lld".into()),

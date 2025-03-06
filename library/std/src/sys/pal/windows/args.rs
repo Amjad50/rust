@@ -8,30 +8,15 @@ mod tests;
 
 use super::os::current_exe;
 use crate::ffi::{OsStr, OsString};
-use crate::fmt;
-use crate::io;
 use crate::num::NonZero;
 use crate::os::windows::prelude::*;
 use crate::path::{Path, PathBuf};
 use crate::sys::path::get_long_path;
 use crate::sys::process::ensure_no_nuls;
 use crate::sys::{c, to_u16s};
-use crate::sys_common::wstr::WStrUnits;
 use crate::sys_common::AsInner;
-use crate::vec;
-
-use crate::iter;
-
-/// This is the const equivalent to `NonZero::new(n).unwrap()`
-///
-/// FIXME: This can be removed once `Option::unwrap` is stably const.
-/// See the `const_option` feature (#67441).
-const fn non_zero_u16(n: u16) -> NonZero<u16> {
-    match NonZero::new(n) {
-        Some(n) => n,
-        None => panic!("called `unwrap` on a `None` value"),
-    }
-}
+use crate::sys_common::wstr::WStrUnits;
+use crate::{fmt, io, iter, vec};
 
 pub fn args() -> Args {
     // SAFETY: `GetCommandLineW` returns a pointer to a null terminated UTF-16
@@ -70,10 +55,10 @@ fn parse_lp_cmd_line<'a, F: Fn() -> OsString>(
     lp_cmd_line: Option<WStrUnits<'a>>,
     exe_name: F,
 ) -> Vec<OsString> {
-    const BACKSLASH: NonZero<u16> = non_zero_u16(b'\\' as u16);
-    const QUOTE: NonZero<u16> = non_zero_u16(b'"' as u16);
-    const TAB: NonZero<u16> = non_zero_u16(b'\t' as u16);
-    const SPACE: NonZero<u16> = non_zero_u16(b' ' as u16);
+    const BACKSLASH: NonZero<u16> = NonZero::new(b'\\' as u16).unwrap();
+    const QUOTE: NonZero<u16> = NonZero::new(b'"' as u16).unwrap();
+    const TAB: NonZero<u16> = NonZero::new(b'\t' as u16).unwrap();
+    const SPACE: NonZero<u16> = NonZero::new(b' ' as u16).unwrap();
 
     let mut ret_val = Vec::new();
     // If the cmd line pointer is null or it points to an empty string then
@@ -342,7 +327,7 @@ pub(crate) fn make_bat_command_line(
     force_quotes: bool,
 ) -> io::Result<Vec<u16>> {
     const INVALID_ARGUMENT_ERROR: io::Error =
-        io::const_io_error!(io::ErrorKind::InvalidInput, r#"batch file arguments are invalid"#);
+        io::const_error!(io::ErrorKind::InvalidInput, r#"batch file arguments are invalid"#);
     // Set the start of the command line to `cmd.exe /c "`
     // It is necessary to surround the command in an extra pair of quotes,
     // hence the trailing quote here. It will be closed after all arguments
@@ -355,7 +340,7 @@ pub(crate) fn make_bat_command_line(
     // Windows file names cannot contain a `"` character or end with `\\`.
     // If the script name does then return an error.
     if script.contains(&(b'"' as u16)) || script.last() == Some(&(b'\\' as u16)) {
-        return Err(io::const_io_error!(
+        return Err(io::const_error!(
             io::ErrorKind::InvalidInput,
             "Windows file names may not contain `\"` or end with `\\`"
         ));

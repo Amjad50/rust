@@ -1,25 +1,22 @@
-pub use crate::llvm::Type;
+use std::{fmt, ptr};
 
-use crate::abi::{FnAbiLlvmExt, LlvmType};
-use crate::common;
-use crate::context::CodegenCx;
-use crate::llvm;
-use crate::llvm::{Bool, False, True};
-use crate::type_of::LayoutLlvmExt;
-use crate::value::Value;
+use libc::{c_char, c_uint};
+use rustc_abi::{AddressSpace, Align, Integer, Reg, Size};
 use rustc_codegen_ssa::common::TypeKind;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_middle::bug;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{self, Ty};
-use rustc_target::abi::call::{CastTarget, FnAbi, Reg};
-use rustc_target::abi::{AddressSpace, Align, Integer, Size};
+use rustc_target::callconv::{CastTarget, FnAbi};
 
-use std::fmt;
-use std::ptr;
-
-use libc::{c_char, c_uint};
+use crate::abi::{FnAbiLlvmExt, LlvmType};
+use crate::context::{CodegenCx, SimpleCx};
+pub(crate) use crate::llvm::Type;
+use crate::llvm::{Bool, False, Metadata, True};
+use crate::type_of::LayoutLlvmExt;
+use crate::value::Value;
+use crate::{common, llvm};
 
 impl PartialEq for Type {
     fn eq(&self, other: &Self) -> bool {
@@ -38,7 +35,8 @@ impl fmt::Debug for Type {
     }
 }
 
-impl<'ll> CodegenCx<'ll, '_> {
+impl<'ll> CodegenCx<'ll, '_> {}
+impl<'ll> SimpleCx<'ll> {
     pub(crate) fn type_named_struct(&self, name: &str) -> &'ll Type {
         let name = SmallCStr::new(name);
         unsafe { llvm::LLVMStructCreateNamed(self.llcx, name.as_ptr()) }
@@ -47,11 +45,9 @@ impl<'ll> CodegenCx<'ll, '_> {
     pub(crate) fn set_struct_body(&self, ty: &'ll Type, els: &[&'ll Type], packed: bool) {
         unsafe { llvm::LLVMStructSetBody(ty, els.as_ptr(), els.len() as c_uint, packed as Bool) }
     }
-
     pub(crate) fn type_void(&self) -> &'ll Type {
         unsafe { llvm::LLVMVoidTypeInContext(self.llcx) }
     }
-
     pub(crate) fn type_token(&self) -> &'ll Type {
         unsafe { llvm::LLVMTokenTypeInContext(self.llcx) }
     }
@@ -78,7 +74,8 @@ impl<'ll> CodegenCx<'ll, '_> {
             args
         }
     }
-
+}
+impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
     pub(crate) fn type_bool(&self) -> &'ll Type {
         self.type_i8()
     }
@@ -123,17 +120,29 @@ impl<'ll> CodegenCx<'ll, '_> {
         assert_eq!(size % unit_size, 0);
         self.type_array(self.type_from_integer(unit), size / unit_size)
     }
-
+}
+impl<'ll> SimpleCx<'ll> {
     pub(crate) fn type_variadic_func(&self, args: &[&'ll Type], ret: &'ll Type) -> &'ll Type {
         unsafe { llvm::LLVMFunctionType(ret, args.as_ptr(), args.len() as c_uint, True) }
     }
-}
 
-impl<'ll, 'tcx> BaseTypeMethods<'tcx> for CodegenCx<'ll, 'tcx> {
-    fn type_i1(&self) -> &'ll Type {
+    pub(crate) fn type_i1(&self) -> &'ll Type {
         unsafe { llvm::LLVMInt1TypeInContext(self.llcx) }
     }
 
+    pub(crate) fn type_struct(&self, els: &[&'ll Type], packed: bool) -> &'ll Type {
+        unsafe {
+            llvm::LLVMStructTypeInContext(
+                self.llcx,
+                els.as_ptr(),
+                els.len() as c_uint,
+                packed as Bool,
+            )
+        }
+    }
+}
+
+impl<'ll, 'tcx> BaseTypeCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn type_i8(&self) -> &'ll Type {
         unsafe { llvm::LLVMInt8TypeInContext(self.llcx) }
     }
@@ -176,17 +185,6 @@ impl<'ll, 'tcx> BaseTypeMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 
     fn type_func(&self, args: &[&'ll Type], ret: &'ll Type) -> &'ll Type {
         unsafe { llvm::LLVMFunctionType(ret, args.as_ptr(), args.len() as c_uint, False) }
-    }
-
-    fn type_struct(&self, els: &[&'ll Type], packed: bool) -> &'ll Type {
-        unsafe {
-            llvm::LLVMStructTypeInContext(
-                self.llcx,
-                els.as_ptr(),
-                els.len() as c_uint,
-                packed as Bool,
-            )
-        }
     }
 
     fn type_kind(&self, ty: &'ll Type) -> TypeKind {
@@ -239,16 +237,16 @@ impl<'ll, 'tcx> BaseTypeMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 
 impl Type {
     /// Creates an integer type with the given number of bits, e.g., i24
-    pub fn ix_llcx(llcx: &llvm::Context, num_bits: u64) -> &Type {
+    pub(crate) fn ix_llcx(llcx: &llvm::Context, num_bits: u64) -> &Type {
         unsafe { llvm::LLVMIntTypeInContext(llcx, num_bits as c_uint) }
     }
 
-    pub fn ptr_llcx(llcx: &llvm::Context) -> &Type {
+    pub(crate) fn ptr_llcx(llcx: &llvm::Context) -> &Type {
         unsafe { llvm::LLVMPointerTypeInContext(llcx, AddressSpace::DATA.0) }
     }
 }
 
-impl<'ll, 'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'ll, 'tcx> {
+impl<'ll, 'tcx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn backend_type(&self, layout: TyAndLayout<'tcx>) -> &'ll Type {
         layout.llvm_type(self)
     }
@@ -283,46 +281,34 @@ impl<'ll, 'tcx> LayoutTypeMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     }
 }
 
-impl<'ll, 'tcx> TypeMembershipMethods<'tcx> for CodegenCx<'ll, 'tcx> {
+impl<'ll, 'tcx> TypeMembershipCodegenMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn add_type_metadata(&self, function: &'ll Value, typeid: String) {
         let typeid_metadata = self.typeid_metadata(typeid).unwrap();
-        let v = [self.const_usize(0), typeid_metadata];
         unsafe {
+            let v = [llvm::LLVMValueAsMetadata(self.const_usize(0)), typeid_metadata];
             llvm::LLVMRustGlobalAddMetadata(
                 function,
                 llvm::MD_type as c_uint,
-                llvm::LLVMValueAsMetadata(llvm::LLVMMDNodeInContext(
-                    self.llcx,
-                    v.as_ptr(),
-                    v.len() as c_uint,
-                )),
+                llvm::LLVMMDNodeInContext2(self.llcx, v.as_ptr(), v.len()),
             )
         }
     }
 
     fn set_type_metadata(&self, function: &'ll Value, typeid: String) {
         let typeid_metadata = self.typeid_metadata(typeid).unwrap();
-        let v = [self.const_usize(0), typeid_metadata];
         unsafe {
+            let v = [llvm::LLVMValueAsMetadata(self.const_usize(0)), typeid_metadata];
             llvm::LLVMGlobalSetMetadata(
                 function,
                 llvm::MD_type as c_uint,
-                llvm::LLVMValueAsMetadata(llvm::LLVMMDNodeInContext(
-                    self.llcx,
-                    v.as_ptr(),
-                    v.len() as c_uint,
-                )),
+                llvm::LLVMMDNodeInContext2(self.llcx, v.as_ptr(), v.len()),
             )
         }
     }
 
-    fn typeid_metadata(&self, typeid: String) -> Option<&'ll Value> {
+    fn typeid_metadata(&self, typeid: String) -> Option<&'ll Metadata> {
         Some(unsafe {
-            llvm::LLVMMDStringInContext(
-                self.llcx,
-                typeid.as_ptr() as *const c_char,
-                typeid.len() as c_uint,
-            )
+            llvm::LLVMMDStringInContext2(self.llcx, typeid.as_ptr() as *const c_char, typeid.len())
         })
     }
 

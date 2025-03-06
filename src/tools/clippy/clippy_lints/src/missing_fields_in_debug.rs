@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_path_lang_item;
 use clippy_utils::ty::is_type_diagnostic_item;
-use clippy_utils::visitors::{for_each_expr, Visitable};
+use clippy_utils::visitors::{Visitable, for_each_expr};
 use rustc_ast::LitKind;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::{DefKind, Res};
@@ -13,7 +13,7 @@ use rustc_hir::{
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{Ty, TypeckResults};
 use rustc_session::declare_lint_pass;
-use rustc_span::{sym, Span, Symbol};
+use rustc_span::{Span, Symbol, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -110,13 +110,13 @@ fn should_lint<'tcx>(
     // Is there a call to `DebugStruct::debug_struct`? Do lint if there is.
     let mut has_debug_struct = false;
 
-    for_each_expr(block, |expr| {
+    for_each_expr(cx, block, |expr| {
         if let ExprKind::MethodCall(path, recv, ..) = &expr.kind {
             let recv_ty = typeck_results.expr_ty(recv).peel_refs();
 
             if path.ident.name == sym::debug_struct && is_type_diagnostic_item(cx, recv_ty, sym::Formatter) {
                 has_debug_struct = true;
-            } else if path.ident.name == sym!(finish_non_exhaustive)
+            } else if path.ident.name.as_str() == "finish_non_exhaustive"
                 && is_type_diagnostic_item(cx, recv_ty, sym::DebugStruct)
             {
                 has_finish_non_exhaustive = true;
@@ -165,7 +165,7 @@ fn check_struct<'tcx>(
     let mut has_direct_field_access = false;
     let mut field_accesses = FxHashSet::default();
 
-    for_each_expr(block, |expr| {
+    for_each_expr(cx, block, |expr| {
         if let ExprKind::Field(target, ident) = expr.kind
             && let target_ty = typeck_results.expr_ty_adjusted(target).peel_refs()
             && target_ty == self_ty
@@ -207,14 +207,14 @@ impl<'tcx> LateLintPass<'tcx> for MissingFieldsInDebug {
             // this prevents ICEs such as when self is a type parameter or a primitive type
             // (see #10887, #11063)
             && let Res::Def(DefKind::Struct | DefKind::Enum | DefKind::Union, self_path_did) = self_path.res
-            && cx.match_def_path(trait_def_id, &[sym::core, sym::fmt, sym::Debug])
+            && cx.tcx.is_diagnostic_item(sym::Debug, trait_def_id)
             // don't trigger if this impl was derived
             && !cx.tcx.has_attr(item.owner_id, sym::automatically_derived)
             && !item.span.from_expansion()
             // find `Debug::fmt` function
             && let Some(fmt_item) = items.iter().find(|i| i.ident.name == sym::fmt)
-            && let ImplItem { kind: ImplItemKind::Fn(_, body_id), .. } = cx.tcx.hir().impl_item(fmt_item.id)
-            && let body = cx.tcx.hir().body(*body_id)
+            && let ImplItem { kind: ImplItemKind::Fn(_, body_id), .. } = cx.tcx.hir_impl_item(fmt_item.id)
+            && let body = cx.tcx.hir_body(*body_id)
             && let ExprKind::Block(block, _) = body.value.kind
             // inspect `self`
             && let self_ty = cx.tcx.type_of(self_path_did).skip_binder().peel_refs()

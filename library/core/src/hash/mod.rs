@@ -83,17 +83,14 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use crate::fmt;
-use crate::marker;
-
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated)]
 pub use self::sip::SipHasher;
-
 #[unstable(feature = "hashmap_internals", issue = "none")]
 #[allow(deprecated)]
 #[doc(hidden)]
 pub use self::sip::SipHasher13;
+use crate::{fmt, marker};
 
 mod sip;
 
@@ -334,6 +331,7 @@ pub trait Hasher {
     ///
     /// [`write`]: Hasher::write
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     fn finish(&self) -> u64;
 
     /// Writes some data into this `Hasher`.
@@ -754,11 +752,8 @@ pub struct BuildHasherDefault<H>(marker::PhantomData<fn() -> H>);
 
 impl<H> BuildHasherDefault<H> {
     /// Creates a new BuildHasherDefault for Hasher `H`.
-    #[unstable(
-        feature = "build_hasher_default_const_new",
-        issue = "123197",
-        reason = "recently added"
-    )]
+    #[stable(feature = "build_hasher_default_const_new", since = "1.85.0")]
+    #[rustc_const_stable(feature = "build_hasher_default_const_new", since = "1.85.0")]
     pub const fn new() -> Self {
         BuildHasherDefault(marker::PhantomData)
     }
@@ -805,10 +800,8 @@ impl<H> PartialEq for BuildHasherDefault<H> {
 impl<H> Eq for BuildHasherDefault<H> {}
 
 mod impls {
-    use crate::mem;
-    use crate::slice;
-
     use super::*;
+    use crate::{mem, slice};
 
     macro_rules! impl_write {
         ($(($ty:ident, $meth:ident),)*) => {$(

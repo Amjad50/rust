@@ -1,6 +1,9 @@
 //! Test the pattern complexity limit.
+
 use common::*;
-use rustc_pattern_analysis::{pat::DeconstructedPat, usefulness::PlaceValidity, MatchArm};
+use rustc_pattern_analysis::MatchArm;
+use rustc_pattern_analysis::pat::DeconstructedPat;
+use rustc_pattern_analysis::usefulness::PlaceValidity;
 
 #[macro_use]
 mod common;
@@ -11,7 +14,7 @@ fn check(patterns: &[DeconstructedPat<Cx>], complexity_limit: usize) -> Result<(
     let ty = *patterns[0].ty();
     let arms: Vec<_> =
         patterns.iter().map(|pat| MatchArm { pat, has_guard: false, arm_data: () }).collect();
-    compute_match_usefulness(arms.as_slice(), ty, PlaceValidity::ValidOnly, Some(complexity_limit))
+    compute_match_usefulness(arms.as_slice(), ty, PlaceValidity::ValidOnly, complexity_limit)
         .map(|_report| ())
 }
 

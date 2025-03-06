@@ -1,11 +1,11 @@
-use crate::session::Session;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use rustc_data_structures::profiling::VerboseTimingGuard;
 use rustc_fs_util::try_canonicalize;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
+
+use crate::session::Session;
 
 impl Session {
     pub fn timer(&self, what: &'static str) -> VerboseTimingGuard<'_> {
@@ -34,6 +34,7 @@ pub enum NativeLibKind {
         as_needed: Option<bool>,
     },
     /// Dynamic library (e.g. `foo.dll` on Windows) without a corresponding import library.
+    /// On Linux, it refers to a generated shared library stub.
     RawDylib,
     /// A macOS-specific kind of dynamic libraries.
     Framework {
@@ -137,7 +138,7 @@ pub fn extra_compiler_flags() -> Option<(Vec<String>, bool)> {
             let content = if arg.len() == a.len() {
                 // A space-separated option, like `-C incremental=foo` or `--crate-type rlib`
                 match args.next() {
-                    Some(arg) => arg.to_string(),
+                    Some(arg) => arg,
                     None => continue,
                 }
             } else if arg.get(a.len()..a.len() + 1) == Some("=") {

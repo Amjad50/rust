@@ -7,7 +7,18 @@
 //!
 //! [c]: https://rust-lang.github.io/chalk/book/canonical_queries/canonicalization.html
 
-use crate::infer::canonical::instantiate::{instantiate_value, CanonicalExt};
+use std::fmt::Debug;
+use std::iter;
+
+use rustc_index::{Idx, IndexVec};
+use rustc_middle::arena::ArenaAllocatable;
+use rustc_middle::mir::ConstraintCategory;
+use rustc_middle::ty::fold::TypeFoldable;
+use rustc_middle::ty::{self, BoundVar, GenericArg, GenericArgKind, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
+use tracing::{debug, instrument};
+
+use crate::infer::canonical::instantiate::{CanonicalExt, instantiate_value};
 use crate::infer::canonical::{
     Canonical, CanonicalQueryResponse, CanonicalVarValues, Certainty, OriginalQueryValues,
     QueryOutlivesConstraint, QueryRegionConstraints, QueryResponse,
@@ -15,18 +26,10 @@ use crate::infer::canonical::{
 use crate::infer::region_constraints::{Constraint, RegionConstraintData};
 use crate::infer::{DefineOpaqueTypes, InferCtxt, InferOk, InferResult};
 use crate::traits::query::NoSolution;
-use crate::traits::{Obligation, ObligationCause, PredicateObligation};
-use crate::traits::{TraitEngine, TraitEngineExt};
-use rustc_data_structures::captures::Captures;
-use rustc_index::Idx;
-use rustc_index::IndexVec;
-use rustc_middle::arena::ArenaAllocatable;
-use rustc_middle::mir::ConstraintCategory;
-use rustc_middle::ty::fold::TypeFoldable;
-use rustc_middle::ty::{self, BoundVar, Ty, TyCtxt};
-use rustc_middle::ty::{GenericArg, GenericArgKind};
-use std::fmt::Debug;
-use std::iter;
+use crate::traits::{
+    Obligation, ObligationCause, PredicateObligation, PredicateObligations, ScrubbedTraitError,
+    TraitEngine,
+};
 
 impl<'tcx> InferCtxt<'tcx> {
     /// This method is meant to be invoked as the final step of a canonical query
@@ -53,7 +56,7 @@ impl<'tcx> InferCtxt<'tcx> {
         &self,
         inference_vars: CanonicalVarValues<'tcx>,
         answer: T,
-        fulfill_cx: &mut dyn TraitEngine<'tcx>,
+        fulfill_cx: &mut dyn TraitEngine<'tcx, ScrubbedTraitError<'tcx>>,
     ) -> Result<CanonicalQueryResponse<'tcx, T>, NoSolution>
     where
         T: Debug + TypeFoldable<TyCtxt<'tcx>>,
@@ -100,7 +103,7 @@ impl<'tcx> InferCtxt<'tcx> {
         &self,
         inference_vars: CanonicalVarValues<'tcx>,
         answer: T,
-        fulfill_cx: &mut dyn TraitEngine<'tcx>,
+        fulfill_cx: &mut dyn TraitEngine<'tcx, ScrubbedTraitError<'tcx>>,
     ) -> Result<QueryResponse<'tcx, T>, NoSolution>
     where
         T: Debug + TypeFoldable<TyCtxt<'tcx>>,
@@ -108,18 +111,12 @@ impl<'tcx> InferCtxt<'tcx> {
         let tcx = self.tcx;
 
         // Select everything, returning errors.
-        let true_errors = fulfill_cx.select_where_possible(self);
-        debug!("true_errors = {:#?}", true_errors);
+        let errors = fulfill_cx.select_all_or_error(self);
 
-        if !true_errors.is_empty() {
-            // FIXME -- we don't indicate *why* we failed to solve
-            debug!("make_query_response: true_errors={:#?}", true_errors);
+        // True error!
+        if errors.iter().any(|e| e.is_true_error()) {
             return Err(NoSolution);
         }
-
-        // Anything left unselected *now* must be an ambiguity.
-        let ambig_errors = fulfill_cx.select_all_or_error(self);
-        debug!("ambig_errors = {:#?}", ambig_errors);
 
         let region_obligations = self.take_registered_region_obligations();
         debug!(?region_obligations);
@@ -134,8 +131,7 @@ impl<'tcx> InferCtxt<'tcx> {
         });
         debug!(?region_constraints);
 
-        let certainty =
-            if ambig_errors.is_empty() { Certainty::Proven } else { Certainty::Ambiguous };
+        let certainty = if errors.is_empty() { Certainty::Proven } else { Certainty::Ambiguous };
 
         let opaque_types = self.take_opaque_types_for_query_response();
 
@@ -158,12 +154,12 @@ impl<'tcx> InferCtxt<'tcx> {
             .opaque_type_storage
             .opaque_types
             .iter()
-            .map(|(k, v)| (*k, v.hidden_type.ty))
+            .map(|(k, v)| (*k, v.ty))
             .collect()
     }
 
     fn take_opaque_types_for_query_response(&self) -> Vec<(ty::OpaqueTypeKey<'tcx>, Ty<'tcx>)> {
-        self.take_opaque_types().into_iter().map(|(k, v)| (k, v.hidden_type.ty)).collect()
+        self.take_opaque_types().into_iter().map(|(k, v)| (k, v.ty)).collect()
     }
 
     /// Given the (canonicalized) result to a canonical query,
@@ -317,16 +313,6 @@ impl<'tcx> InferCtxt<'tcx> {
                 let ty::OutlivesPredicate(k1, r2) = r_c.0;
                 if k1 != r2.into() { Some(r_c) } else { None }
             }),
-        );
-
-        // ...also include the query member constraints.
-        output_query_region_constraints.member_constraints.extend(
-            query_response
-                .value
-                .region_constraints
-                .member_constraints
-                .iter()
-                .map(|p_c| instantiate_value(self.tcx, &result_args, p_c.clone())),
         );
 
         let user_result: R =
@@ -497,7 +483,7 @@ impl<'tcx> InferCtxt<'tcx> {
             ),
         };
 
-        let mut obligations = vec![];
+        let mut obligations = PredicateObligations::new();
 
         // Carry all newly resolved opaque types to the caller's scope
         for &(a, b) in &query_response.value.opaque_types {
@@ -554,13 +540,13 @@ impl<'tcx> InferCtxt<'tcx> {
 
     /// Converts the region constraints resulting from a query into an
     /// iterator of obligations.
-    fn query_outlives_constraints_into_obligations<'a>(
-        &'a self,
-        cause: &'a ObligationCause<'tcx>,
+    fn query_outlives_constraints_into_obligations(
+        &self,
+        cause: &ObligationCause<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
-        uninstantiated_region_constraints: &'a [QueryOutlivesConstraint<'tcx>],
-        result_args: &'a CanonicalVarValues<'tcx>,
-    ) -> impl Iterator<Item = PredicateObligation<'tcx>> + 'a + Captures<'tcx> {
+        uninstantiated_region_constraints: &[QueryOutlivesConstraint<'tcx>],
+        result_args: &CanonicalVarValues<'tcx>,
+    ) -> impl Iterator<Item = PredicateObligation<'tcx>> {
         uninstantiated_region_constraints.iter().map(move |&constraint| {
             let predicate = instantiate_value(self.tcx, result_args, constraint);
             self.query_outlives_constraint_to_obligation(predicate, cause.clone(), param_env)
@@ -602,7 +588,7 @@ impl<'tcx> InferCtxt<'tcx> {
         variables1: &OriginalQueryValues<'tcx>,
         variables2: impl Fn(BoundVar) -> GenericArg<'tcx>,
     ) -> InferResult<'tcx, ()> {
-        let mut obligations = vec![];
+        let mut obligations = PredicateObligations::new();
         for (index, value1) in variables1.var_values.iter().enumerate() {
             let value2 = variables2(BoundVar::new(index));
 
@@ -646,7 +632,7 @@ pub fn make_query_region_constraints<'tcx>(
     outlives_obligations: impl Iterator<Item = (Ty<'tcx>, ty::Region<'tcx>, ConstraintCategory<'tcx>)>,
     region_constraints: &RegionConstraintData<'tcx>,
 ) -> QueryRegionConstraints<'tcx> {
-    let RegionConstraintData { constraints, verifys, member_constraints } = region_constraints;
+    let RegionConstraintData { constraints, verifys } = region_constraints;
 
     assert!(verifys.is_empty());
 
@@ -677,5 +663,5 @@ pub fn make_query_region_constraints<'tcx>(
         }))
         .collect();
 
-    QueryRegionConstraints { outlives, member_constraints: member_constraints.clone() }
+    QueryRegionConstraints { outlives }
 }

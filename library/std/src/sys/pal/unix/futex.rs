@@ -11,7 +11,17 @@
 use crate::sync::atomic::AtomicU32;
 use crate::time::Duration;
 
-/// Wait for a futex_wake operation to wake us.
+/// An atomic for use as a futex that is at least 32-bits but may be larger
+pub type Futex = AtomicU32;
+/// Must be the underlying type of Futex
+pub type Primitive = u32;
+
+/// An atomic for use as a futex that is at least 8-bits but may be larger.
+pub type SmallFutex = AtomicU32;
+/// Must be the underlying type of SmallFutex
+pub type SmallPrimitive = u32;
+
+/// Waits for a `futex_wake` operation to wake us.
 ///
 /// Returns directly if the futex doesn't hold the expected value.
 ///
@@ -82,7 +92,7 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>) -
     }
 }
 
-/// Wake up one thread that's blocked on futex_wait on this futex.
+/// Wakes up one thread that's blocked on `futex_wait` on this futex.
 ///
 /// Returns true if this actually woke up such a thread,
 /// or false if no thread was waiting on this futex.
@@ -95,7 +105,7 @@ pub fn futex_wake(futex: &AtomicU32) -> bool {
     unsafe { libc::syscall(libc::SYS_futex, ptr, op, 1) > 0 }
 }
 
-/// Wake up all threads that are waiting on futex_wait on this futex.
+/// Wakes up all threads that are waiting on `futex_wait` on this futex.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn futex_wake_all(futex: &AtomicU32) {
     let ptr = futex as *const AtomicU32;
@@ -209,7 +219,7 @@ pub fn futex_wake_all(futex: &AtomicU32) {
 }
 
 #[cfg(target_os = "emscripten")]
-extern "C" {
+unsafe extern "C" {
     fn emscripten_futex_wake(addr: *const AtomicU32, count: libc::c_int) -> libc::c_int;
     fn emscripten_futex_wait(
         addr: *const AtomicU32,
@@ -257,7 +267,7 @@ pub mod zircon {
     pub const ZX_ERR_BAD_STATE: zx_status_t = -20;
     pub const ZX_ERR_TIMED_OUT: zx_status_t = -21;
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn zx_clock_get_monotonic() -> zx_time_t;
         pub fn zx_futex_wait(
             value_ptr: *const zx_futex_t,

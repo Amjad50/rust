@@ -229,10 +229,10 @@ fn t10() {
     let SourceFile {
         name,
         src_hash,
+        checksum_hash,
         source_len,
         lines,
         multibyte_chars,
-        non_narrow_chars,
         normalized_pos,
         stable_id,
         ..
@@ -241,12 +241,12 @@ fn t10() {
     let imported_src_file = sm.new_imported_source_file(
         name,
         src_hash,
+        checksum_hash,
         stable_id,
         source_len.to_u32(),
         CrateNum::ZERO,
         FreezeLock::new(lines.read().clone()),
         multibyte_chars,
-        non_narrow_chars,
         normalized_pos,
         0,
     );
@@ -257,7 +257,7 @@ fn t10() {
     );
     imported_src_file.add_external_src(|| Some(unnormalized.to_string()));
     assert_eq!(
-        imported_src_file.external_src.borrow().get_source().unwrap().as_ref(),
+        imported_src_file.external_src.borrow().get_source().unwrap(),
         normalized,
         "imported source file should be normalized"
     );
@@ -538,7 +538,7 @@ fn test_next_point() {
 #[cfg(target_os = "linux")]
 #[test]
 fn read_binary_file_handles_lying_stat() {
-    // read_binary_file tries to read the contents of a file into an Lrc<[u8]> while
+    // read_binary_file tries to read the contents of a file into an Arc<[u8]> while
     // never having two copies of the data in memory at once. This is an optimization
     // to support include_bytes! with large files. But since Rust allocators are
     // sensitive to alignment, our implementation can't be bootstrapped off calling

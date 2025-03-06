@@ -1,15 +1,14 @@
-use clippy_utils::diagnostics::{span_lint, span_lint_and_help, span_lint_and_sugg};
+use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::source::{snippet, snippet_with_applicability};
 use clippy_utils::ty::is_type_lang_item;
 use clippy_utils::{
-    get_expr_use_or_unification_node, get_parent_expr, is_lint_allowed, is_path_diagnostic_item, method_calls,
-    peel_blocks, SpanlessEq,
+    SpanlessEq, get_expr_use_or_unification_node, get_parent_expr, is_lint_allowed, method_calls, path_def_id,
+    peel_blocks,
 };
 use rustc_errors::Applicability;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, LangItem, Node, QPath};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
 use rustc_session::declare_lint_pass;
 use rustc_span::source_map::Spanned;
@@ -45,10 +44,10 @@ declare_clippy_lint! {
     /// `String`, but only if [`string_add_assign`](#string_add_assign) does *not*
     /// match.
     ///
-    /// ### Why is this bad?
-    /// It's not bad in and of itself. However, this particular
+    /// ### Why restrict this?
+    /// This particular
     /// `Add` implementation is asymmetric (the other operand need not be `String`,
-    /// but `x` does), while addition as mathematically defined is symmetric, also
+    /// but `x` does), while addition as mathematically defined is symmetric, and
     /// the `String::push_str(_)` function is a perfectly good replacement.
     /// Therefore, some dislike it and wish not to have it in their code.
     ///
@@ -123,7 +122,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for slice operations on strings
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// UTF-8 characters span multiple bytes, and it is easy to inadvertently confuse character
     /// counts and string indices. This may lead to panics, and should warrant some test cases
     /// containing wide UTF-8 characters. This lint is most useful in code that should avoid
@@ -147,7 +146,7 @@ declare_lint_pass!(StringAdd => [STRING_ADD, STRING_ADD_ASSIGN, STRING_SLICE]);
 
 impl<'tcx> LateLintPass<'tcx> for StringAdd {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
-        if in_external_macro(cx.sess(), e.span) {
+        if e.span.in_external_macro(cx.sess().source_map()) {
             return;
         }
         match e.kind {
@@ -190,7 +189,7 @@ impl<'tcx> LateLintPass<'tcx> for StringAdd {
                 }
             },
             ExprKind::Index(target, _idx, _) => {
-                let e_ty = cx.typeck_results().expr_ty(target).peel_refs();
+                let e_ty = cx.typeck_results().expr_ty_adjusted(target).peel_refs();
                 if e_ty.is_str() || is_type_lang_item(cx, e_ty, LangItem::String) {
                     span_lint(
                         cx,
@@ -253,18 +252,18 @@ impl<'tcx> LateLintPass<'tcx> for StringLitAsBytes {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
         use rustc_ast::LitKind;
 
-        if let ExprKind::Call(fun, args) = e.kind
-            // Find std::str::converts::from_utf8
-            && is_path_diagnostic_item(cx, fun, sym::str_from_utf8)
+        if let ExprKind::Call(fun, [bytes_arg]) = e.kind
+            // Find `std::str::converts::from_utf8` or `std::primitive::str::from_utf8`
+            && let Some(sym::str_from_utf8 | sym::str_inherent_from_utf8) =
+                path_def_id(cx, fun).and_then(|id| cx.tcx.get_diagnostic_name(id))
 
             // Find string::as_bytes
-            && let ExprKind::AddrOf(BorrowKind::Ref, _, args) = args[0].kind
+            && let ExprKind::AddrOf(BorrowKind::Ref, _, args) = bytes_arg.kind
             && let ExprKind::Index(left, right, _) = args.kind
             && let (method_names, expressions, _) = method_calls(left, 1)
-            && method_names.len() == 1
+            && method_names == [sym!(as_bytes)]
             && expressions.len() == 1
             && expressions[0].1.is_empty()
-            && method_names[0] == sym!(as_bytes)
 
             // Check for slicer
             && let ExprKind::Struct(QPath::LangItem(LangItem::Range, ..), _, _) = right.kind
@@ -285,9 +284,9 @@ impl<'tcx> LateLintPass<'tcx> for StringLitAsBytes {
             );
         }
 
-        if !in_external_macro(cx.sess(), e.span)
+        if !e.span.in_external_macro(cx.sess().source_map())
             && let ExprKind::MethodCall(path, receiver, ..) = &e.kind
-            && path.ident.name == sym!(as_bytes)
+            && path.ident.name.as_str() == "as_bytes"
             && let ExprKind::Lit(lit) = &receiver.kind
             && let LitKind::Str(lit_content, _) = &lit.node
         {
@@ -333,7 +332,7 @@ impl<'tcx> LateLintPass<'tcx> for StringLitAsBytes {
         }
 
         if let ExprKind::MethodCall(path, recv, [], _) = &e.kind
-            && path.ident.name == sym!(into_bytes)
+            && path.ident.name.as_str() == "into_bytes"
             && let ExprKind::MethodCall(path, recv, [], _) = &recv.kind
             && matches!(path.ident.name.as_str(), "to_owned" | "to_string")
             && let ExprKind::Lit(lit) = &recv.kind
@@ -364,19 +363,17 @@ declare_clippy_lint! {
     /// ### What it does
     /// This lint checks for `.to_string()` method calls on values of type `&str`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// The `to_string` method is also used on other types to convert them to a string.
-    /// When called on a `&str` it turns the `&str` into the owned variant `String`, which can be better
-    /// expressed with `.to_owned()`.
+    /// When called on a `&str` it turns the `&str` into the owned variant `String`, which can be
+    /// more specifically expressed with `.to_owned()`.
     ///
     /// ### Example
     /// ```no_run
-    /// // example code where clippy issues a warning
     /// let _ = "str".to_string();
     /// ```
     /// Use instead:
     /// ```no_run
-    /// // example code which does not raise clippy warning
     /// let _ = "str".to_owned();
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -389,19 +386,26 @@ declare_lint_pass!(StrToString => [STR_TO_STRING]);
 
 impl<'tcx> LateLintPass<'tcx> for StrToString {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &Expr<'_>) {
-        if let ExprKind::MethodCall(path, self_arg, ..) = &expr.kind
+        if expr.span.from_expansion() {
+            return;
+        }
+
+        if let ExprKind::MethodCall(path, self_arg, [], _) = &expr.kind
             && path.ident.name == sym::to_string
             && let ty = cx.typeck_results().expr_ty(self_arg)
             && let ty::Ref(_, ty, ..) = ty.kind()
             && ty.is_str()
         {
-            span_lint_and_help(
+            span_lint_and_then(
                 cx,
                 STR_TO_STRING,
                 expr.span,
                 "`to_string()` called on a `&str`",
-                None,
-                "consider using `.to_owned()`",
+                |diag| {
+                    let mut applicability = Applicability::MachineApplicable;
+                    let snippet = snippet_with_applicability(cx, self_arg.span, "..", &mut applicability);
+                    diag.span_suggestion(expr.span, "try", format!("{snippet}.to_owned()"), applicability);
+                },
             );
         }
     }
@@ -411,19 +415,18 @@ declare_clippy_lint! {
     /// ### What it does
     /// This lint checks for `.to_string()` method calls on values of type `String`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// The `to_string` method is also used on other types to convert them to a string.
-    /// When called on a `String` it only clones the `String`, which can be better expressed with `.clone()`.
+    /// When called on a `String` it only clones the `String`, which can be more specifically
+    /// expressed with `.clone()`.
     ///
     /// ### Example
     /// ```no_run
-    /// // example code where clippy issues a warning
     /// let msg = String::from("Hello World");
     /// let _ = msg.to_string();
     /// ```
     /// Use instead:
     /// ```no_run
-    /// // example code which does not raise clippy warning
     /// let msg = String::from("Hello World");
     /// let _ = msg.clone();
     /// ```
@@ -437,18 +440,24 @@ declare_lint_pass!(StringToString => [STRING_TO_STRING]);
 
 impl<'tcx> LateLintPass<'tcx> for StringToString {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &Expr<'_>) {
-        if let ExprKind::MethodCall(path, self_arg, ..) = &expr.kind
+        if expr.span.from_expansion() {
+            return;
+        }
+
+        if let ExprKind::MethodCall(path, self_arg, [], _) = &expr.kind
             && path.ident.name == sym::to_string
             && let ty = cx.typeck_results().expr_ty(self_arg)
             && is_type_lang_item(cx, ty, LangItem::String)
         {
-            span_lint_and_help(
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
                 cx,
                 STRING_TO_STRING,
                 expr.span,
                 "`to_string()` called on a `String`",
-                None,
-                "consider using `.clone()`",
+                |diag| {
+                    diag.help("consider using `.clone()`");
+                },
             );
         }
     }
@@ -480,7 +489,7 @@ impl<'tcx> LateLintPass<'tcx> for TrimSplitWhitespace {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &Expr<'_>) {
         let tyckres = cx.typeck_results();
         if let ExprKind::MethodCall(path, split_recv, [], split_ws_span) = expr.kind
-            && path.ident.name == sym!(split_whitespace)
+            && path.ident.name.as_str() == "split_whitespace"
             && let Some(split_ws_def_id) = tyckres.type_dependent_def_id(expr.hir_id)
             && cx.tcx.is_diagnostic_item(sym::str_split_whitespace, split_ws_def_id)
             && let ExprKind::MethodCall(path, _trim_recv, [], trim_span) = split_recv.kind

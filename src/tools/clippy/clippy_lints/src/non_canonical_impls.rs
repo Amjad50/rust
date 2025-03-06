@@ -1,10 +1,10 @@
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{is_res_lang_ctor, last_path_segment, path_res, std_or_core};
+use clippy_utils::{is_from_proc_macro, is_res_lang_ctor, last_path_segment, path_res, std_or_core};
 use rustc_errors::Applicability;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{Expr, ExprKind, ImplItem, ImplItemKind, LangItem, Node, UnOp};
-use rustc_lint::{LateContext, LateLintPass};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::EarlyBinder;
 use rustc_session::declare_lint_pass;
 use rustc_span::sym;
@@ -111,7 +111,7 @@ declare_lint_pass!(NonCanonicalImpls => [NON_CANONICAL_CLONE_IMPL, NON_CANONICAL
 
 impl LateLintPass<'_> for NonCanonicalImpls {
     #[expect(clippy::too_many_lines)]
-    fn check_impl_item(&mut self, cx: &LateContext<'_>, impl_item: &ImplItem<'_>) {
+    fn check_impl_item<'tcx>(&mut self, cx: &LateContext<'tcx>, impl_item: &ImplItem<'tcx>) {
         let Node::Item(item) = cx.tcx.parent_hir_node(impl_item.hir_id()) else {
             return;
         };
@@ -121,13 +121,16 @@ impl LateLintPass<'_> for NonCanonicalImpls {
         if cx.tcx.is_automatically_derived(item.owner_id.to_def_id()) {
             return;
         }
-        let ImplItemKind::Fn(_, impl_item_id) = cx.tcx.hir().impl_item(impl_item.impl_item_id()).kind else {
+        let ImplItemKind::Fn(_, impl_item_id) = cx.tcx.hir_impl_item(impl_item.impl_item_id()).kind else {
             return;
         };
-        let body = cx.tcx.hir().body(impl_item_id);
+        let body = cx.tcx.hir_body(impl_item_id);
         let ExprKind::Block(block, ..) = body.value.kind else {
             return;
         };
+        if block.span.in_external_macro(cx.sess().source_map()) || is_from_proc_macro(cx, impl_item) {
+            return;
+        }
 
         if cx.tcx.is_diagnostic_item(sym::Clone, trait_impl.def_id)
             && let Some(copy_def_id) = cx.tcx.get_diagnostic_item(sym::Copy)
@@ -277,7 +280,7 @@ fn self_cmp_call<'tcx>(
     needs_fully_qualified: &mut bool,
 ) -> bool {
     match cmp_expr.kind {
-        ExprKind::Call(path, [_self, _other]) => path_res(cx, path)
+        ExprKind::Call(path, [_, _]) => path_res(cx, path)
             .opt_def_id()
             .is_some_and(|def_id| cx.tcx.is_diagnostic_item(sym::ord_cmp_method, def_id)),
         ExprKind::MethodCall(_, _, [_other], ..) => {

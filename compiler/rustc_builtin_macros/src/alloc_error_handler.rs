@@ -1,13 +1,13 @@
+use rustc_ast::ptr::P;
+use rustc_ast::{
+    self as ast, Fn, FnHeader, FnSig, Generics, ItemKind, Safety, Stmt, StmtKind, TyKind,
+};
+use rustc_expand::base::{Annotatable, ExtCtxt};
+use rustc_span::{Ident, Span, kw, sym};
+use thin_vec::{ThinVec, thin_vec};
+
 use crate::errors;
 use crate::util::check_builtin_macro_attribute;
-
-use rustc_ast::ptr::P;
-use rustc_ast::{self as ast, FnHeader, FnSig, Generics, StmtKind};
-use rustc_ast::{Fn, ItemKind, Stmt, TyKind, Unsafe};
-use rustc_expand::base::{Annotatable, ExtCtxt};
-use rustc_span::symbol::{kw, sym, Ident};
-use rustc_span::Span;
-use thin_vec::{thin_vec, ThinVec};
 
 pub(crate) fn expand(
     ecx: &mut ExtCtxt<'_>,
@@ -78,14 +78,15 @@ fn generate_handler(cx: &ExtCtxt<'_>, handler: Ident, span: Span, sig_span: Span
     let never = ast::FnRetTy::Ty(cx.ty(span, TyKind::Never));
     let params = thin_vec![cx.param(span, size, ty_usize.clone()), cx.param(span, align, ty_usize)];
     let decl = cx.fn_decl(params, never);
-    let header = FnHeader { unsafety: Unsafe::Yes(span), ..FnHeader::default() };
-    let sig = FnSig { decl, header, span: span };
+    let header = FnHeader { safety: Safety::Unsafe(span), ..FnHeader::default() };
+    let sig = FnSig { decl, header, span };
 
     let body = Some(cx.block_expr(call));
     let kind = ItemKind::Fn(Box::new(Fn {
         defaultness: ast::Defaultness::Final,
         sig,
         generics: Generics::default(),
+        contract: None,
         body,
     }));
 

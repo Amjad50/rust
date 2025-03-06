@@ -49,6 +49,7 @@ from_id![
     (hir_def::LifetimeParamId, crate::LifetimeParam),
     (hir_def::MacroId, crate::Macro),
     (hir_def::ExternCrateId, crate::ExternCrateDecl),
+    (hir_def::ExternBlockId, crate::ExternBlock),
 ];
 
 impl From<AdtId> for Adt {
@@ -182,8 +183,8 @@ impl From<GenericDef> for GenericDefId {
             GenericDef::TraitAlias(it) => GenericDefId::TraitAliasId(it.id),
             GenericDef::TypeAlias(it) => GenericDefId::TypeAliasId(it.id),
             GenericDef::Impl(it) => GenericDefId::ImplId(it.id),
-            GenericDef::Variant(it) => GenericDefId::EnumVariantId(it.into()),
             GenericDef::Const(it) => GenericDefId::ConstId(it.id),
+            GenericDef::Static(it) => GenericDefId::StaticId(it.id),
         }
     }
 }
@@ -197,8 +198,8 @@ impl From<GenericDefId> for GenericDef {
             GenericDefId::TraitAliasId(it) => GenericDef::TraitAlias(it.into()),
             GenericDefId::TypeAliasId(it) => GenericDef::TypeAlias(it.into()),
             GenericDefId::ImplId(it) => GenericDef::Impl(it.into()),
-            GenericDefId::EnumVariantId(it) => GenericDef::Variant(it.into()),
             GenericDefId::ConstId(it) => GenericDef::Const(it.into()),
+            GenericDefId::StaticId(it) => GenericDef::Static(it.into()),
         }
     }
 }

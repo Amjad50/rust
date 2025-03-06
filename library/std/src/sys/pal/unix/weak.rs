@@ -23,16 +23,15 @@
 
 use crate::ffi::CStr;
 use crate::marker::PhantomData;
-use crate::mem;
-use crate::ptr;
 use crate::sync::atomic::{self, AtomicPtr, Ordering};
+use crate::{mem, ptr};
 
 // We can use true weak linkage on ELF targets.
 #[cfg(all(unix, not(target_vendor = "apple")))]
 pub(crate) macro weak {
     (fn $name:ident($($t:ty),*) -> $ret:ty) => (
         let ref $name: ExternWeak<unsafe extern "C" fn($($t),*) -> $ret> = {
-            extern "C" {
+            unsafe extern "C" {
                 #[linkage = "extern_weak"]
                 static $name: Option<unsafe extern "C" fn($($t),*) -> $ret>;
             }
@@ -169,14 +168,7 @@ pub(crate) macro syscall {
             if let Some(fun) = $name.get() {
                 fun($($arg_name),*)
             } else {
-                // This looks like a hack, but concat_idents only accepts idents
-                // (not paths).
-                use libc::*;
-
-                syscall(
-                    concat_idents!(SYS_, $name),
-                    $($arg_name),*
-                ) as $ret
+                libc::syscall(libc::${concat(SYS_, $name)}, $($arg_name),*) as $ret
             }
         }
     )
@@ -186,14 +178,7 @@ pub(crate) macro syscall {
 pub(crate) macro raw_syscall {
     (fn $name:ident($($arg_name:ident: $t:ty),*) -> $ret:ty) => (
         unsafe fn $name($($arg_name:$t),*) -> $ret {
-            // This looks like a hack, but concat_idents only accepts idents
-            // (not paths).
-            use libc::*;
-
-            syscall(
-                concat_idents!(SYS_, $name),
-                $($arg_name),*
-            ) as $ret
+            libc::syscall(libc::${concat(SYS_, $name)}, $($arg_name),*) as $ret
         }
     )
 }

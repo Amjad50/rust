@@ -1,14 +1,17 @@
+use std::io;
+
+use serde::Serialize;
+
 use crate::compiler_interface::with;
 use crate::mir::pretty::function_body;
 use crate::ty::{
-    AdtDef, ClosureDef, Const, CoroutineDef, GenericArgs, Movability, Region, RigidTy, Ty, TyKind,
-    VariantIdx,
+    AdtDef, ClosureDef, CoroutineClosureDef, CoroutineDef, GenericArgs, MirConst, Movability,
+    Region, RigidTy, Ty, TyConst, TyKind, VariantIdx,
 };
 use crate::{Error, Opaque, Span, Symbol};
-use std::io;
 
 /// The SMIR representation of a single function.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Body {
     pub blocks: Vec<BasicBlock>,
 
@@ -104,20 +107,20 @@ impl Body {
 
 type LocalDecls = Vec<LocalDecl>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LocalDecl {
     pub ty: Ty,
     pub span: Span,
     pub mutability: Mutability,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct BasicBlock {
     pub statements: Vec<Statement>,
     pub terminator: Terminator,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Terminator {
     pub kind: TerminatorKind,
     pub span: Span,
@@ -131,7 +134,7 @@ impl Terminator {
 
 pub type Successors = Vec<BasicBlockIdx>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum TerminatorKind {
     Goto {
         target: BasicBlockIdx,
@@ -221,7 +224,7 @@ impl TerminatorKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InlineAsmOperand {
     pub in_value: Option<Operand>,
     pub out_place: Option<Place>,
@@ -230,7 +233,7 @@ pub struct InlineAsmOperand {
     pub raw_rpr: String,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum UnwindAction {
     Continue,
     Unreachable,
@@ -238,7 +241,7 @@ pub enum UnwindAction {
     Cleanup(BasicBlockIdx),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum AssertMessage {
     BoundsCheck { len: Operand, index: Operand },
     Overflow(BinOp, Operand, Operand),
@@ -248,6 +251,7 @@ pub enum AssertMessage {
     ResumedAfterReturn(CoroutineKind),
     ResumedAfterPanic(CoroutineKind),
     MisalignedPointerDereference { required: Operand, found: Operand },
+    NullPointerDereference,
 }
 
 impl AssertMessage {
@@ -303,11 +307,12 @@ impl AssertMessage {
             AssertMessage::MisalignedPointerDereference { .. } => {
                 Ok("misaligned pointer dereference")
             }
+            AssertMessage::NullPointerDereference => Ok("null pointer dereference occurred"),
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum BinOp {
     Add,
     AddUnchecked,
@@ -342,26 +347,35 @@ impl BinOp {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum UnOp {
     Not,
     Neg,
+    PtrMetadata,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl UnOp {
+    /// Return the type of this operation for the given input Ty.
+    /// This function does not perform type checking, and it currently doesn't handle SIMD.
+    pub fn ty(&self, arg_ty: Ty) -> Ty {
+        with(|ctx| ctx.unop_ty(*self, arg_ty))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineKind {
     Desugared(CoroutineDesugaring, CoroutineSource),
     Coroutine(Movability),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineSource {
     Block,
     Closure,
     Fn,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineDesugaring {
     Async,
 
@@ -377,7 +391,7 @@ pub(crate) type LocalDefId = Opaque;
 pub(crate) type Coverage = Opaque;
 
 /// The FakeReadCause describes the type of pattern why a FakeRead statement exists.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FakeReadCause {
     ForMatchGuard,
     ForMatchedPlace(LocalDefId),
@@ -387,7 +401,7 @@ pub enum FakeReadCause {
 }
 
 /// Describes what kind of retag is to be performed
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum RetagKind {
     FnEntry,
     TwoPhase,
@@ -395,7 +409,7 @@ pub enum RetagKind {
     Default,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum Variance {
     Covariant,
     Invariant,
@@ -403,26 +417,26 @@ pub enum Variance {
     Bivariant,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CopyNonOverlapping {
     pub src: Operand,
     pub dst: Operand,
     pub count: Operand,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum NonDivergingIntrinsic {
     Assume(Operand),
     CopyNonOverlapping(CopyNonOverlapping),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum StatementKind {
     Assign(Place, Rvalue),
     FakeRead(FakeReadCause, Place),
@@ -439,13 +453,13 @@ pub enum StatementKind {
     Nop,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Rvalue {
     /// Creates a pointer with the indicated mutability to the place.
     ///
     /// This is generated by pointer casts like `&v as *const _` or raw address of expressions like
     /// `&raw v` or `addr_of!(v)`.
-    AddressOf(Mutability, Place),
+    AddressOf(RawPtrKind, Place),
 
     /// Creates an aggregate value, like a tuple or struct.
     ///
@@ -515,7 +529,7 @@ pub enum Rvalue {
     /// Corresponds to source code like `[x; 32]`.
     ///
     /// [#74836]: https://github.com/rust-lang/rust/issues/74836
-    Repeat(Operand, Const),
+    Repeat(Operand, TyConst),
 
     /// Transmutes a `*mut u8` into shallow-initialized `Box<T>`.
     ///
@@ -565,7 +579,7 @@ impl Rvalue {
             }
             Rvalue::AddressOf(mutability, place) => {
                 let place_ty = place.ty(locals)?;
-                Ok(Ty::new_ptr(place_ty, *mutability))
+                Ok(Ty::new_ptr(place_ty, mutability.to_mutable_lossy()))
             }
             Rvalue::Len(..) => Ok(Ty::usize_ty()),
             Rvalue::Cast(.., ty) => Ok(*ty),
@@ -580,7 +594,10 @@ impl Rvalue {
                 let ty = op.ty(lhs_ty, rhs_ty);
                 Ok(Ty::new_tuple(&[ty, Ty::bool_ty()]))
             }
-            Rvalue::UnaryOp(UnOp::Not | UnOp::Neg, operand) => operand.ty(locals),
+            Rvalue::UnaryOp(op, operand) => {
+                let arg_ty = operand.ty(locals)?;
+                Ok(op.ty(arg_ty))
+            }
             Rvalue::Discriminant(place) => {
                 let place_ty = place.ty(locals)?;
                 place_ty
@@ -591,7 +608,8 @@ impl Rvalue {
             Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(..), _) => {
                 Ok(Ty::usize_ty())
             }
-            Rvalue::NullaryOp(NullOp::UbChecks, _) => Ok(Ty::bool_ty()),
+            Rvalue::NullaryOp(NullOp::ContractChecks, _)
+            | Rvalue::NullaryOp(NullOp::UbChecks, _) => Ok(Ty::bool_ty()),
             Rvalue::Aggregate(ak, ops) => match *ak {
                 AggregateKind::Array(ty) => Ty::try_new_array(ty, ops.len() as u64),
                 AggregateKind::Tuple => Ok(Ty::new_tuple(
@@ -602,6 +620,9 @@ impl Rvalue {
                 AggregateKind::Coroutine(def, ref args, mov) => {
                     Ok(Ty::new_coroutine(def, args.clone(), mov))
                 }
+                AggregateKind::CoroutineClosure(def, ref args) => {
+                    Ok(Ty::new_coroutine_closure(def, args.clone()))
+                }
                 AggregateKind::RawPtr(ty, mutability) => Ok(Ty::new_ptr(ty, mutability)),
             },
             Rvalue::ShallowInitBox(_, ty) => Ok(Ty::new_box(*ty)),
@@ -610,7 +631,7 @@ impl Rvalue {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum AggregateKind {
     Array(Ty),
     Tuple,
@@ -618,17 +639,18 @@ pub enum AggregateKind {
     Closure(ClosureDef, GenericArgs),
     // FIXME(stable_mir): Movability here is redundant
     Coroutine(CoroutineDef, GenericArgs, Movability),
+    CoroutineClosure(CoroutineClosureDef, GenericArgs),
     RawPtr(Ty, Mutability),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Operand {
     Copy(Place),
     Move(Place),
-    Constant(Constant),
+    Constant(ConstOperand),
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Serialize)]
 pub struct Place {
     pub local: Local,
     /// projection out of a place (access a field, deref a pointer, etc)
@@ -641,8 +663,15 @@ impl From<Local> for Place {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConstOperand {
+    pub span: Span,
+    pub user_ty: Option<UserTypeAnnotationIndex>,
+    pub const_: MirConst,
+}
+
 /// Debug information pertaining to a user variable.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct VarDebugInfo {
     /// The variable name.
     pub name: Symbol,
@@ -684,29 +713,22 @@ impl VarDebugInfo {
 
 pub type SourceScope = u32;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceInfo {
     pub span: Span,
     pub scope: SourceScope,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct VarDebugInfoFragment {
     pub ty: Ty,
     pub projection: Vec<ProjectionElem>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum VarDebugInfoContents {
     Place(Place),
     Const(ConstOperand),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConstOperand {
-    pub span: Span,
-    pub user_ty: Option<UserTypeAnnotationIndex>,
-    pub const_: Const,
 }
 
 // In MIR ProjectionElem is parameterized on the second Field argument and the Index argument. This
@@ -714,7 +736,7 @@ pub struct ConstOperand {
 // ProjectionElem<Local, Ty>) and user-provided type annotations (for which the projection elements
 // are of type ProjectionElem<(), ()>). In SMIR we don't need this generality, so we just use
 // ProjectionElem for Places.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ProjectionElem {
     /// Dereference projections (e.g. `*_1`) project to the address referenced by the base place.
     Deref,
@@ -753,8 +775,10 @@ pub enum ProjectionElem {
     ConstantIndex {
         /// index or -index (in Python terms), depending on from_end
         offset: u64,
-        /// The thing being indexed must be at least this long. For arrays this
-        /// is always the exact length.
+        /// The thing being indexed must be at least this long -- otherwise, the
+        /// projection is UB.
+        ///
+        /// For arrays this is always the exact length.
         min_length: u64,
         /// Counting backwards from end? This is always false when indexing an
         /// array.
@@ -788,7 +812,7 @@ pub enum ProjectionElem {
     Subtype(Ty),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UserTypeProjection {
     pub base: UserTypeAnnotationIndex,
 
@@ -817,15 +841,8 @@ pub type FieldIdx = usize;
 
 type UserTypeAnnotationIndex = usize;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Constant {
-    pub span: Span,
-    pub user_ty: Option<UserTypeAnnotationIndex>,
-    pub literal: Const,
-}
-
 /// The possible branch sites of a [TerminatorKind::SwitchInt].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SwitchTargets {
     /// The conditional branches where the first element represents the value that guards this
     /// branch, and the second element is the branch target.
@@ -847,7 +864,7 @@ impl SwitchTargets {
     }
 
     /// The conditional targets which are only taken if the pattern matches the given value.
-    pub fn branches(&self) -> impl Iterator<Item = (u128, BasicBlockIdx)> + '_ {
+    pub fn branches(&self) -> impl Iterator<Item = (u128, BasicBlockIdx)> {
         self.branches.iter().copied()
     }
 
@@ -862,7 +879,7 @@ impl SwitchTargets {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
     Shared,
@@ -889,14 +906,32 @@ impl BorrowKind {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum RawPtrKind {
+    Mut,
+    Const,
+    FakeForPtrMetadata,
+}
+
+impl RawPtrKind {
+    pub fn to_mutable_lossy(self) -> Mutability {
+        match self {
+            RawPtrKind::Mut { .. } => Mutability::Mut,
+            RawPtrKind::Const => Mutability::Not,
+            // FIXME: There's no type corresponding to a shallow borrow, so use `&` as an approximation.
+            RawPtrKind::FakeForPtrMetadata => Mutability::Not,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum MutBorrowKind {
     Default,
     TwoPhaseBorrow,
     ClosureCapture,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FakeBorrowKind {
     /// A shared (deep) borrow. Data must be immutable and is aliasable.
     Deep,
@@ -907,19 +942,19 @@ pub enum FakeBorrowKind {
     Shallow,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Mutability {
     Not,
     Mut,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Safety {
+    Safe,
     Unsafe,
-    Normal,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum PointerCoercion {
     /// Go from a fn-item type to a fn-pointer type.
     ReifyFnPointer,
@@ -938,20 +973,21 @@ pub enum PointerCoercion {
     ArrayToPointer,
 
     /// Unsize a pointer/reference value, e.g., `&[T; n]` to
-    /// `&[T]`. Note that the source could be a thin or fat pointer.
-    /// This will do things like convert thin pointers to fat
+    /// `&[T]`. Note that the source could be a thin or wide pointer.
+    /// This will do things like convert thin pointers to wide
     /// pointers, or convert structs containing thin pointers to
-    /// structs containing fat pointers, or convert between fat
+    /// structs containing wide pointers, or convert between wide
     /// pointers.
     Unsize,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CastKind {
     // FIXME(smir-rename): rename this to PointerExposeProvenance
     PointerExposeAddress,
     PointerWithExposedProvenance,
     PointerCoercion(PointerCoercion),
+    // FIXME(smir-rename): change this to PointerCoercion(DynStar)
     DynStar,
     IntToInt,
     FloatToInt,
@@ -962,7 +998,7 @@ pub enum CastKind {
     Transmute,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum NullOp {
     /// Returns the size of a value of that type.
     SizeOf,
@@ -972,6 +1008,8 @@ pub enum NullOp {
     OffsetOf(Vec<(VariantIdx, FieldIdx)>),
     /// cfg!(ub_checks), but at codegen time
     UbChecks,
+    /// cfg!(contract_checks), but at codegen time
+    ContractChecks,
 }
 
 impl Operand {
@@ -989,9 +1027,9 @@ impl Operand {
     }
 }
 
-impl Constant {
+impl ConstOperand {
     pub fn ty(&self) -> Ty {
-        self.literal.ty()
+        self.const_.ty()
     }
 }
 
@@ -1017,7 +1055,7 @@ impl ProjectionElem {
             ProjectionElem::Field(_idx, fty) => Ok(*fty),
             ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => Self::index_ty(ty),
             ProjectionElem::Subslice { from, to, from_end } => {
-                Self::subslice_ty(ty, from, to, from_end)
+                Self::subslice_ty(ty, *from, *to, *from_end)
             }
             ProjectionElem::Downcast(_) => Ok(ty),
             ProjectionElem::OpaqueCast(ty) | ProjectionElem::Subtype(ty) => Ok(*ty),
@@ -1028,13 +1066,13 @@ impl ProjectionElem {
         ty.kind().builtin_index().ok_or_else(|| error!("Cannot index non-array type: {ty:?}"))
     }
 
-    fn subslice_ty(ty: Ty, from: &u64, to: &u64, from_end: &bool) -> Result<Ty, Error> {
+    fn subslice_ty(ty: Ty, from: u64, to: u64, from_end: bool) -> Result<Ty, Error> {
         let ty_kind = ty.kind();
         match ty_kind {
             TyKind::RigidTy(RigidTy::Slice(..)) => Ok(ty),
             TyKind::RigidTy(RigidTy::Array(inner, _)) if !from_end => Ty::try_new_array(
                 inner,
-                to.checked_sub(*from).ok_or_else(|| error!("Subslice overflow: {from}..{to}"))?,
+                to.checked_sub(from).ok_or_else(|| error!("Subslice overflow: {from}..{to}"))?,
             ),
             TyKind::RigidTy(RigidTy::Array(inner, size)) => {
                 let size = size.eval_target_usize()?;

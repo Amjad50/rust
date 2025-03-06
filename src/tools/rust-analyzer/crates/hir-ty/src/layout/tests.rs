@@ -1,8 +1,9 @@
 use chalk_ir::{AdtId, TyKind};
 use either::Either;
 use hir_def::db::DefDatabase;
-use project_model::target_data_layout::RustcDataLayoutConfig;
+use project_model::{toolchain_info::QueryConfig, Sysroot};
 use rustc_hash::FxHashMap;
+use syntax::ToSmolStr;
 use test_fixture::WithFixture;
 use triomphe::Arc;
 
@@ -16,15 +17,18 @@ use crate::{
 mod closure;
 
 fn current_machine_data_layout() -> String {
-    project_model::target_data_layout::get(
-        RustcDataLayoutConfig::Rustc(None),
+    project_model::toolchain_info::target_data_layout::get(
+        QueryConfig::Rustc(&Sysroot::empty(), &std::env::current_dir().unwrap()),
         None,
         &FxHashMap::default(),
     )
     .unwrap()
 }
 
-fn eval_goal(ra_fixture: &str, minicore: &str) -> Result<Arc<Layout>, LayoutError> {
+fn eval_goal(
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    minicore: &str,
+) -> Result<Arc<Layout>, LayoutError> {
     let target_data_layout = current_machine_data_layout();
     let ra_fixture = format!(
         "//- target_data_layout: {target_data_layout}\n{minicore}//- /main.rs crate:test\n{ra_fixture}",
@@ -34,20 +38,27 @@ fn eval_goal(ra_fixture: &str, minicore: &str) -> Result<Arc<Layout>, LayoutErro
     let adt_or_type_alias_id = file_ids
         .into_iter()
         .find_map(|file_id| {
-            let module_id = db.module_for_file(file_id);
+            let module_id = db.module_for_file(file_id.file_id());
             let def_map = module_id.def_map(&db);
             let scope = &def_map[module_id.local_id].scope;
             let adt_or_type_alias_id = scope.declarations().find_map(|x| match x {
                 hir_def::ModuleDefId::AdtId(x) => {
                     let name = match x {
-                        hir_def::AdtId::StructId(x) => db.struct_data(x).name.to_smol_str(),
-                        hir_def::AdtId::UnionId(x) => db.union_data(x).name.to_smol_str(),
-                        hir_def::AdtId::EnumId(x) => db.enum_data(x).name.to_smol_str(),
+                        hir_def::AdtId::StructId(x) => {
+                            db.struct_data(x).name.display_no_db(file_id.edition()).to_smolstr()
+                        }
+                        hir_def::AdtId::UnionId(x) => {
+                            db.union_data(x).name.display_no_db(file_id.edition()).to_smolstr()
+                        }
+                        hir_def::AdtId::EnumId(x) => {
+                            db.enum_data(x).name.display_no_db(file_id.edition()).to_smolstr()
+                        }
                     };
                     (name == "Goal").then_some(Either::Left(x))
                 }
                 hir_def::ModuleDefId::TypeAliasId(x) => {
-                    let name = db.type_alias_data(x).name.to_smol_str();
+                    let name =
+                        db.type_alias_data(x).name.display_no_db(file_id.edition()).to_smolstr();
                     (name == "Goal").then_some(Either::Right(x))
                 }
                 _ => None,
@@ -73,49 +84,67 @@ fn eval_goal(ra_fixture: &str, minicore: &str) -> Result<Arc<Layout>, LayoutErro
 }
 
 /// A version of `eval_goal` for types that can not be expressed in ADTs, like closures and `impl Trait`
-fn eval_expr(ra_fixture: &str, minicore: &str) -> Result<Arc<Layout>, LayoutError> {
+fn eval_expr(
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    minicore: &str,
+) -> Result<Arc<Layout>, LayoutError> {
     let target_data_layout = current_machine_data_layout();
     let ra_fixture = format!(
         "//- target_data_layout: {target_data_layout}\n{minicore}//- /main.rs crate:test\nfn main(){{let goal = {{{ra_fixture}}};}}",
     );
 
     let (db, file_id) = TestDB::with_single_file(&ra_fixture);
-    let module_id = db.module_for_file(file_id);
+    let module_id = db.module_for_file(file_id.file_id());
     let def_map = module_id.def_map(&db);
     let scope = &def_map[module_id.local_id].scope;
     let function_id = scope
         .declarations()
         .find_map(|x| match x {
             hir_def::ModuleDefId::FunctionId(x) => {
-                let name = db.function_data(x).name.to_smol_str();
+                let name = db.function_data(x).name.display_no_db(file_id.edition()).to_smolstr();
                 (name == "main").then_some(x)
             }
             _ => None,
         })
         .unwrap();
     let hir_body = db.body(function_id.into());
-    let b = hir_body.bindings.iter().find(|x| x.1.name.to_smol_str() == "goal").unwrap().0;
+    let b = hir_body
+        .bindings
+        .iter()
+        .find(|x| x.1.name.display_no_db(file_id.edition()).to_smolstr() == "goal")
+        .unwrap()
+        .0;
     let infer = db.infer(function_id.into());
     let goal_ty = infer.type_of_binding[b].clone();
     db.layout_of_ty(goal_ty, db.trait_environment(function_id.into()))
 }
 
 #[track_caller]
-fn check_size_and_align(ra_fixture: &str, minicore: &str, size: u64, align: u64) {
+fn check_size_and_align(
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    minicore: &str,
+    size: u64,
+    align: u64,
+) {
     let l = eval_goal(ra_fixture, minicore).unwrap();
     assert_eq!(l.size.bytes(), size, "size mismatch");
     assert_eq!(l.align.abi.bytes(), align, "align mismatch");
 }
 
 #[track_caller]
-fn check_size_and_align_expr(ra_fixture: &str, minicore: &str, size: u64, align: u64) {
+fn check_size_and_align_expr(
+    #[rust_analyzer::rust_fixture] ra_fixture: &str,
+    minicore: &str,
+    size: u64,
+    align: u64,
+) {
     let l = eval_expr(ra_fixture, minicore).unwrap();
     assert_eq!(l.size.bytes(), size, "size mismatch");
     assert_eq!(l.align.abi.bytes(), align, "align mismatch");
 }
 
 #[track_caller]
-fn check_fail(ra_fixture: &str, e: LayoutError) {
+fn check_fail(#[rust_analyzer::rust_fixture] ra_fixture: &str, e: LayoutError) {
     let r = eval_goal(ra_fixture, "");
     assert_eq!(r, Err(e));
 }
@@ -228,31 +257,31 @@ fn recursive() {
 #[test]
 fn repr_packed() {
     size_and_align! {
-        #[repr(packed)]
+        #[repr(Rust, packed)]
         struct Goal;
     }
     size_and_align! {
-        #[repr(packed(2))]
+        #[repr(Rust, packed(2))]
         struct Goal;
     }
     size_and_align! {
-        #[repr(packed(4))]
+        #[repr(Rust, packed(4))]
         struct Goal;
     }
     size_and_align! {
-        #[repr(packed)]
+        #[repr(Rust, packed)]
         struct Goal(i32);
     }
     size_and_align! {
-        #[repr(packed(2))]
+        #[repr(Rust, packed(2))]
         struct Goal(i32);
     }
     size_and_align! {
-        #[repr(packed(4))]
+        #[repr(Rust, packed(4))]
         struct Goal(i32);
     }
 
-    check_size_and_align("#[repr(packed(5))] struct Goal(i32);", "", 4, 1);
+    check_size_and_align("#[repr(Rust, packed(5))] struct Goal(i32);", "", 4, 1);
 }
 
 #[test]
@@ -426,6 +455,7 @@ fn enums() {
 
 #[test]
 fn primitives() {
+    // FIXME(#17451): Add `f16` and `f128` once they are stabilised.
     size_and_align! {
         struct Goal(i32, i128, isize, usize, f32, f64, bool, char);
     }

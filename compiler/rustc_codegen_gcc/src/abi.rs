@@ -1,13 +1,15 @@
 #[cfg(feature = "master")]
 use gccjit::FnAttribute;
 use gccjit::{ToLValue, ToRValue, Type};
-use rustc_codegen_ssa::traits::{AbiBuilderMethods, BaseTypeMethods};
+use rustc_abi::{Reg, RegKind};
+use rustc_codegen_ssa::traits::{AbiBuilderMethods, BaseTypeCodegenMethods};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::bug;
 use rustc_middle::ty::Ty;
+use rustc_middle::ty::layout::LayoutOf;
 #[cfg(feature = "master")]
 use rustc_session::config;
-use rustc_target::abi::call::{ArgAttributes, CastTarget, FnAbi, PassMode, Reg, RegKind};
+use rustc_target::callconv::{ArgAttributes, CastTarget, FnAbi, PassMode};
 
 use crate::builder::Builder;
 use crate::context::CodegenCx;
@@ -25,11 +27,7 @@ impl<'a, 'gcc, 'tcx> AbiBuilderMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
         } else {
             false
         };
-        if on_stack {
-            param.to_lvalue().get_address(None)
-        } else {
-            param.to_rvalue()
-        }
+        if on_stack { param.to_lvalue().get_address(None) } else { param.to_rvalue() }
     }
 }
 
@@ -135,10 +133,10 @@ impl<'gcc, 'tcx> FnAbiGccExt<'gcc, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
             if cx.sess().opts.optimize == config::OptLevel::No {
                 return ty;
             }
-            if attrs.regular.contains(rustc_target::abi::call::ArgAttribute::NoAlias) {
+            if attrs.regular.contains(rustc_target::callconv::ArgAttribute::NoAlias) {
                 ty = ty.make_restrict()
             }
-            if attrs.regular.contains(rustc_target::abi::call::ArgAttribute::NonNull) {
+            if attrs.regular.contains(rustc_target::callconv::ArgAttribute::NonNull) {
                 non_null_args.push(arg_index as i32 + 1);
             }
             ty
@@ -184,9 +182,17 @@ impl<'gcc, 'tcx> FnAbiGccExt<'gcc, 'tcx> for FnAbi<'tcx, Ty<'tcx>> {
                 }
                 PassMode::Indirect { attrs, meta_attrs: Some(meta_attrs), on_stack } => {
                     assert!(!on_stack);
-                    let ty =
-                        apply_attrs(cx.type_ptr_to(arg.memory_ty(cx)), &attrs, argument_tys.len());
-                    apply_attrs(ty, &meta_attrs, argument_tys.len())
+                    // Construct the type of a (wide) pointer to `ty`, and pass its two fields.
+                    // Any two ABI-compatible unsized types have the same metadata type and
+                    // moreover the same metadata value leads to the same dynamic size and
+                    // alignment, so this respects ABI compatibility.
+                    let ptr_ty = Ty::new_mut_ptr(cx.tcx, arg.layout.ty);
+                    let ptr_layout = cx.layout_of(ptr_ty);
+                    let typ1 = ptr_layout.scalar_pair_element_gcc_type(cx, 0);
+                    let typ2 = ptr_layout.scalar_pair_element_gcc_type(cx, 1);
+                    argument_tys.push(apply_attrs(typ1, &attrs, argument_tys.len()));
+                    argument_tys.push(apply_attrs(typ2, &meta_attrs, argument_tys.len()));
+                    continue;
                 }
             };
             argument_tys.push(arg_ty);

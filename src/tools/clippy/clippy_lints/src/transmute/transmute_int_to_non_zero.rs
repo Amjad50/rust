@@ -24,11 +24,11 @@ pub(super) fn check<'tcx>(
 
     if !tcx.is_diagnostic_item(sym::NonZero, adt.did()) {
         return false;
-    };
+    }
 
     let int_ty = substs.type_at(0);
     if from_ty != int_ty {
-      return false;
+        return false;
     }
 
     span_lint_and_then(

@@ -47,8 +47,8 @@ pub(crate) fn get_ptr_and_method_ref<'tcx>(
     idx: usize,
 ) -> (Pointer, Value) {
     let (ptr, vtable) = 'block: {
-        if let Abi::Scalar(_) = arg.layout().abi {
-            while !arg.layout().ty.is_unsafe_ptr() && !arg.layout().ty.is_ref() {
+        if let BackendRepr::Scalar(_) = arg.layout().backend_repr {
+            while !arg.layout().ty.is_raw_ptr() && !arg.layout().ty.is_ref() {
                 let (idx, _) = arg
                     .layout()
                     .non_1zst_field(fx)
@@ -59,7 +59,7 @@ pub(crate) fn get_ptr_and_method_ref<'tcx>(
 
         if let ty::Ref(_, ty, _) = arg.layout().ty.kind() {
             if ty.is_dyn_star() {
-                let inner_layout = fx.layout_of(arg.layout().ty.builtin_deref(true).unwrap().ty);
+                let inner_layout = fx.layout_of(arg.layout().ty.builtin_deref(true).unwrap());
                 let dyn_star = CPlace::for_ptr(Pointer::new(arg.load_scalar(fx)), inner_layout);
                 let ptr = dyn_star.place_field(fx, FieldIdx::ZERO).to_ptr();
                 let vtable =
@@ -68,7 +68,7 @@ pub(crate) fn get_ptr_and_method_ref<'tcx>(
             }
         }
 
-        if let Abi::ScalarPair(_, _) = arg.layout().abi {
+        if let BackendRepr::ScalarPair(_, _) = arg.layout().backend_repr {
             let (ptr, vtable) = arg.load_scalar_pair(fx);
             (Pointer::new(ptr), vtable)
         } else {
@@ -90,7 +90,7 @@ pub(crate) fn get_ptr_and_method_ref<'tcx>(
 pub(crate) fn get_vtable<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     ty: Ty<'tcx>,
-    trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
+    trait_ref: Option<ty::ExistentialTraitRef<'tcx>>,
 ) -> Value {
     let data_id = data_id_for_vtable(fx.tcx, &mut fx.constants_cx, fx.module, ty, trait_ref);
     let local_data_id = fx.module.declare_data_in_func(data_id, fx.bcx.func);
