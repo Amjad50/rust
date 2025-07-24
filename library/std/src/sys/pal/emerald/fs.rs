@@ -2,6 +2,8 @@ use core::ffi::CStr;
 
 use emerald_std::io::{FileStat, SeekWhence};
 
+use super::fd::FileDesc;
+use super::syscall_to_io_error;
 use crate::ffi::OsString;
 use crate::fmt;
 use crate::hash::Hash;
@@ -11,10 +13,9 @@ use crate::os::emerald::prelude::OsStringExt;
 use crate::path::{Path, PathBuf};
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
+use crate::sys::unsupported;
+pub use crate::sys_common::fs::{copy, exists};
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
-
-use super::fd::FileDesc;
-use super::syscall_to_io_error;
 
 pub struct File {
     path: PathBuf,
@@ -332,6 +333,10 @@ impl File {
         }
     }
 
+    pub fn tell(&self) -> io::Result<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
+
     pub fn duplicate(&self) -> io::Result<File> {
         let fd = self.fd.duplicate()?;
         Ok(File { path: self.path.clone(), fd })
@@ -343,6 +348,26 @@ impl File {
 
     pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
         todo!()
+    }
+
+    pub fn lock(&self) -> io::Result<()> {
+        unsupported()
+    }
+
+    pub fn lock_shared(&self) -> io::Result<()> {
+        unsupported()
+    }
+
+    pub fn try_lock(&self) -> io::Result<bool> {
+        unsupported()
+    }
+
+    pub fn try_lock_shared(&self) -> io::Result<bool> {
+        unsupported()
+    }
+
+    pub fn unlock(&self) -> io::Result<()> {
+        unsupported()
     }
 }
 
@@ -436,8 +461,6 @@ pub fn rmdir(_p: &Path) -> io::Result<()> {
 
 pub use crate::sys_common::fs::remove_dir_all;
 
-pub use crate::sys_common::fs::try_exists;
-
 pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
     todo!("readlink")
 }
@@ -470,8 +493,4 @@ pub fn lstat(p: &Path) -> io::Result<FileAttr> {
 
 pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
     todo!("canonicalize")
-}
-
-pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
-    todo!("copy")
 }

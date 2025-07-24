@@ -2,15 +2,12 @@
 
 use core::cmp;
 
-use crate::{
-    io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read},
-    os::emerald::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
-    sys_common::{AsInner, FromInner, IntoInner},
-};
-
 use emerald_std::io::FileMeta;
 
 use super::syscall_to_io_error;
+use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
+use crate::os::emerald::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use crate::sys_common::{AsInner, FromInner, IntoInner};
 
 // TODO: add `ownedFd` and other fd types to manage dropping them
 #[derive(Debug)]
@@ -223,6 +220,11 @@ impl FileDesc {
     pub fn duplicate(&self) -> io::Result<FileDesc> {
         // Ok(Self(self.0.try_clone()?))
         todo!()
+    }
+
+    #[inline]
+    pub fn try_clone(&self) -> io::Result<Self> {
+        self.duplicate()
     }
 }
 

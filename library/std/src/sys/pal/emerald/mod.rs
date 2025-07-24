@@ -5,22 +5,27 @@ pub mod args;
 pub mod env;
 pub mod fd;
 pub mod fs;
-pub mod io;
-pub mod net;
 pub mod os;
 pub mod pipe;
 pub mod process;
 pub mod stdio;
 pub mod thread;
-#[cfg(target_thread_local)]
-pub mod thread_local_dtor;
-pub mod thread_local_key;
 pub mod time;
 
 mod common;
 pub use common::*;
-
 use emerald_std::SyscallError;
+
+pub fn unsupported<T>() -> crate::io::Result<T> {
+    Err(unsupported_err())
+}
+
+pub fn unsupported_err() -> crate::io::Error {
+    crate::io::const_error!(
+        crate::io::ErrorKind::Unsupported,
+        "operation not supported on HermitCore yet",
+    )
+}
 
 fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
     match e {

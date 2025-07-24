@@ -2,31 +2,30 @@ use emerald_std::SyscallError;
 
 use crate::error::Error as StdError;
 use crate::ffi::{OsStr, OsString};
-use crate::fmt;
-use crate::io;
 use crate::marker::PhantomData;
 use crate::os::emerald::prelude::OsStringExt;
 use crate::path::{self, PathBuf};
-use crate::ptr::addr_of;
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::pal::emerald::syscall_to_io_error;
+use crate::{fmt, io};
 
 #[cfg(not(test))]
 #[cfg(feature = "panic_unwind")]
 mod eh_unwinding {
-    pub(crate) struct EhFrameFinder(usize /* eh_frame */);
-    pub(crate) static mut EH_FRAME_SETTINGS: EhFrameFinder = EhFrameFinder(0);
-    impl EhFrameFinder {
-        pub(crate) fn init(&mut self, eh_frame: usize) {
-            self.0 = eh_frame;
-        }
-    }
+    pub(crate) struct EhFrameFinder;
+    pub(crate) static mut EH_FRAME_ADDRESS: usize = 0;
+    pub(crate) static EH_FRAME_SETTINGS: EhFrameFinder = EhFrameFinder;
+
     unsafe impl unwind::EhFrameFinder for EhFrameFinder {
         fn find(&self, _pc: usize) -> Option<unwind::FrameInfo> {
-            Some(unwind::FrameInfo {
-                text_base: None,
-                kind: unwind::FrameInfoKind::EhFrame(self.0),
-            })
+            if unsafe { EH_FRAME_ADDRESS == 0 } {
+                None
+            } else {
+                Some(unwind::FrameInfo {
+                    text_base: None,
+                    kind: unwind::FrameInfoKind::EhFrame(unsafe { EH_FRAME_ADDRESS }),
+                })
+            }
         }
     }
 }
@@ -45,10 +44,9 @@ extern "C" {
 pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     #[cfg(not(test))]
     #[cfg(feature = "panic_unwind")]
-    unsafe {
-        eh_unwinding::EH_FRAME_SETTINGS
-            .init(emerald_std::process::process_metadata().eh_frame_address);
-        unwind::set_custom_eh_frame_finder(&*addr_of!(eh_unwinding::EH_FRAME_SETTINGS)).ok();
+    {
+        unsafe { eh_unwinding::EH_FRAME_ADDRESS = emerald_std::process::process_metadata().eh_frame_address };
+        unwind::set_custom_eh_frame_finder(&eh_unwinding::EH_FRAME_SETTINGS).ok();
     }
     exit(unsafe { main(argc, argv) });
 }
@@ -134,7 +132,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
     use crate::env;
     use crate::io::ErrorKind;
 
-    let exe_path = env::args().next().ok_or(io::const_io_error!(
+    let exe_path = env::args().next().ok_or(io::const_error!(
         ErrorKind::Uncategorized,
         "an executable path was not found because no arguments were provided through argv"
     ))?;
@@ -182,12 +180,12 @@ pub fn getenv(str: &OsStr) -> Option<OsString> {
     None
 }
 
-pub fn setenv(_: &OsStr, _: &OsStr) -> io::Result<()> {
-    Err(io::const_io_error!(io::ErrorKind::Unsupported, "cannot set env vars on this platform"))
+pub unsafe fn setenv(_: &OsStr, _: &OsStr) -> io::Result<()> {
+    Err(io::const_error!(io::ErrorKind::Unsupported, "cannot set env vars on this platform"))
 }
 
-pub fn unsetenv(_: &OsStr) -> io::Result<()> {
-    Err(io::const_io_error!(io::ErrorKind::Unsupported, "cannot unset env vars on this platform"))
+pub unsafe fn unsetenv(_: &OsStr) -> io::Result<()> {
+    Err(io::const_error!(io::ErrorKind::Unsupported, "cannot unset env vars on this platform"))
 }
 
 pub fn temp_dir() -> PathBuf {

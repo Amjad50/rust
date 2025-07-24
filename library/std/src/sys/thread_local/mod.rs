@@ -170,6 +170,14 @@ pub(crate) mod key {
             pub(crate) use xous::destroy_tls;
             pub(super) use xous::{Key, get, set};
             use xous::{create, destroy};
+        } else if #[cfg(target_os = "emerald")] {
+            mod racy;
+            #[cfg(test)]
+            mod tests;
+            mod emerald;
+            pub(super) use racy::LazyKey;
+            pub(super) use emerald::{Key, get, set};
+            use emerald::{create, destroy};
         }
     }
 }

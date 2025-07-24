@@ -104,7 +104,7 @@ impl BorrowedFd<'_> {
     /// description as the existing `BorrowedFd` instance.
     #[stable(feature = "io_safety", since = "1.63.0")]
     pub fn try_clone_to_owned(&self) -> crate::io::Result<OwnedFd> {
-        Err(crate::io::const_io_error!(
+        Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "operation not supported on this platform try_clone_to_owned",
         ))

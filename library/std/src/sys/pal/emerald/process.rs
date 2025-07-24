@@ -1,31 +1,23 @@
-use core::ffi::c_char;
-use core::ffi::CStr;
+use core::ffi::{CStr, c_char};
 use core::ptr;
 
 use alloc_crate::ffi::CString;
-use emerald_std::io::FD_STDERR;
-use emerald_std::io::FD_STDIN;
-use emerald_std::io::FD_STDOUT;
-use emerald_std::process::SpawnFileMapping;
 use emerald_std::SyscallError;
+use emerald_std::io::{FD_STDERR, FD_STDIN, FD_STDOUT};
+use emerald_std::process::SpawnFileMapping;
 
+use super::fd::FileDesc;
+use super::pipe;
 use crate::ffi::OsStr;
-use crate::fmt;
-use crate::io;
+pub use crate::ffi::OsString as EnvKey;
 use crate::num::NonZeroI32;
-use crate::os::emerald::io::AsRawFd;
-use crate::os::emerald::io::IntoRawFd;
-use crate::os::emerald::io::RawFd;
+use crate::os::emerald::io::{AsRawFd, IntoRawFd, RawFd};
 use crate::path::Path;
 use crate::sys::fs::File;
 use crate::sys::pal::emerald::syscall_to_io_error;
 use crate::sys::pipe::AnonPipe;
 use crate::sys_common::process::{CommandEnv, CommandEnvs};
-
-pub use crate::ffi::OsString as EnvKey;
-
-use super::fd::FileDesc;
-use super::pipe;
+use crate::{fmt, io};
 
 struct Argv(Vec<*const c_char>);
 
@@ -75,7 +67,7 @@ pub enum ChildStdio {
 }
 
 impl ChildStdio {
-    pub fn into_file_mappings(self) -> Option<SpawnFileMapping> {
+    fn into_file_mappings(self) -> Option<SpawnFileMapping> {
         match self {
             ChildStdio::Inherit => None,
             ChildStdio::Owned(fd) => Some(SpawnFileMapping { src_fd: fd.into_raw_fd(), dst_fd: 0 }),

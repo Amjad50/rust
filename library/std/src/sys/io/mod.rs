@@ -29,6 +29,9 @@ mod is_terminal {
         } else if #[cfg(target_os = "hermit")] {
             mod hermit;
             pub use hermit::*;
+        } else if #[cfg(target_os = "emerald")] {
+            mod emerald;
+            pub use emerald::*;
         } else {
             mod unsupported;
             pub use unsupported::*;

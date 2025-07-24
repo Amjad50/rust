@@ -1,11 +1,9 @@
-use core::{io::BorrowedCursor, mem::ManuallyDrop};
-
-use crate::{
-    io::{self, IoSlice, IoSliceMut},
-    os::emerald::io::FromRawFd,
-};
+use core::io::BorrowedCursor;
+use core::mem::ManuallyDrop;
 
 use super::fd::FileDesc;
+use crate::io::{self, IoSlice, IoSliceMut};
+use crate::os::emerald::io::FromRawFd;
 
 pub struct Stdin(());
 pub struct Stdout(());
@@ -92,7 +90,7 @@ impl io::Write for Stderr {
     }
 }
 
-pub const STDIN_BUF_SIZE: usize = crate::sys_common::io::DEFAULT_BUF_SIZE;
+pub const STDIN_BUF_SIZE: usize = crate::sys::io::DEFAULT_BUF_SIZE;
 
 pub fn is_ebadf(err: &io::Error) -> bool {
     match err.kind() {
