@@ -3,10 +3,6 @@
 // Run-time:
 //   status: 0
 
-/*
- * Code
- */
-
 fn main() {
     use std::hint::black_box;
 

@@ -6,10 +6,10 @@ use rustfix::{Filter, apply_suggestions, get_suggestions_from_json};
 use tracing::debug;
 
 use super::{
-    AllowUnused, Emit, ErrorKind, FailMode, LinkToAux, PassMode, TargetLocation, TestCx,
-    TestOutput, Truncated, UI_FIXED, WillExecute,
+    AllowUnused, Emit, FailMode, LinkToAux, PassMode, RunFailMode, RunResult, TargetLocation,
+    TestCx, TestOutput, Truncated, UI_FIXED, WillExecute,
 };
-use crate::{errors, json};
+use crate::json;
 
 impl TestCx<'_> {
     pub(super) fn run_ui_test(&self) {
@@ -52,10 +52,10 @@ impl TestCx<'_> {
             // don't test rustfix with nll right now
         } else if self.config.rustfix_coverage {
             // Find out which tests have `MachineApplicable` suggestions but are missing
-            // `run-rustfix` or `run-rustfix-only-machine-applicable` headers.
+            // `run-rustfix` or `run-rustfix-only-machine-applicable` directives.
             //
             // This will return an empty `Vec` in case the executed test file has a
-            // `compile-flags: --error-format=xxxx` header with a value other than `json`.
+            // `compile-flags: --error-format=xxxx` directive with a value other than `json`.
             let suggestions = get_suggestions_from_json(
                 &rustfix_input,
                 &HashSet::new(),
@@ -68,7 +68,7 @@ impl TestCx<'_> {
             {
                 let mut coverage_file_path = self.config.build_test_suite_root.clone();
                 coverage_file_path.push("rustfix_missing_coverage.txt");
-                debug!("coverage_file_path: {}", coverage_file_path.display());
+                debug!("coverage_file_path: {}", coverage_file_path);
 
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -76,8 +76,8 @@ impl TestCx<'_> {
                     .open(coverage_file_path.as_path())
                     .expect("could not create or open file");
 
-                if let Err(e) = writeln!(file, "{}", self.testpaths.file.display()) {
-                    panic!("couldn't write to {}: {e:?}", coverage_file_path.display());
+                if let Err(e) = writeln!(file, "{}", self.testpaths.file) {
+                    panic!("couldn't write to {}: {e:?}", coverage_file_path);
                 }
             }
         } else if self.props.run_rustfix {
@@ -119,7 +119,7 @@ impl TestCx<'_> {
                 self.testpaths.relative_dir.join(self.testpaths.file.file_name().unwrap());
             println!(
                 "To only update this specific test, also pass `--test-args {}`",
-                relative_path_to_file.display(),
+                relative_path_to_file,
             );
             self.fatal_proc_rec(
                 &format!("{} errors occurred comparing output.", errors),
@@ -127,9 +127,7 @@ impl TestCx<'_> {
             );
         }
 
-        let expected_errors = errors::load_errors(&self.testpaths.file, self.revision);
-
-        if let WillExecute::Yes = should_run {
+        let output_to_check = if let WillExecute::Yes = should_run {
             let proc_res = self.exec_compiled_test();
             let run_output_errors = if self.props.check_run_results {
                 self.load_compare_outputs(&proc_res, TestOutput::Run, explicit)
@@ -142,56 +140,68 @@ impl TestCx<'_> {
                     &proc_res,
                 );
             }
+            let code = proc_res.status.code();
+            let run_result = if proc_res.status.success() {
+                RunResult::Pass
+            } else if code.is_some_and(|c| c >= 1 && c <= 127) {
+                RunResult::Fail
+            } else {
+                RunResult::Crash
+            };
+            // Help users understand why the test failed by including the actual
+            // exit code and actual run result in the failure message.
+            let pass_hint = format!("code={code:?} so test would pass with `{run_result}`");
             if self.should_run_successfully(pm) {
-                if !proc_res.status.success() {
-                    self.fatal_proc_rec("test run failed!", &proc_res);
+                if run_result != RunResult::Pass {
+                    self.fatal_proc_rec(
+                        &format!("test did not exit with success! {pass_hint}"),
+                        &proc_res,
+                    );
                 }
-            } else if proc_res.status.success() {
-                self.fatal_proc_rec("test run succeeded!", &proc_res);
+            } else if self.props.fail_mode == Some(FailMode::Run(RunFailMode::Fail)) {
+                // If the test is marked as `run-fail` but do not support
+                // unwinding we allow it to crash, since a panic will trigger an
+                // abort (crash) instead of unwind (exit with code 101).
+                let crash_ok = !self.config.can_unwind();
+                if run_result != RunResult::Fail && !(crash_ok && run_result == RunResult::Crash) {
+                    let err = if crash_ok {
+                        format!(
+                            "test did not exit with failure or crash (`{}` can't unwind)! {pass_hint}",
+                            self.config.target
+                        )
+                    } else {
+                        format!("test did not exit with failure! {pass_hint}")
+                    };
+                    self.fatal_proc_rec(&err, &proc_res);
+                }
+            } else if self.props.fail_mode == Some(FailMode::Run(RunFailMode::Crash)) {
+                if run_result != RunResult::Crash {
+                    self.fatal_proc_rec(&format!("test did not crash! {pass_hint}"), &proc_res);
+                }
+            } else if self.props.fail_mode == Some(FailMode::Run(RunFailMode::FailOrCrash)) {
+                if run_result != RunResult::Fail && run_result != RunResult::Crash {
+                    self.fatal_proc_rec(
+                        &format!("test did not exit with failure or crash! {pass_hint}"),
+                        &proc_res,
+                    );
+                }
+            } else {
+                unreachable!("run_ui_test() must not be called if the test should not run");
             }
 
-            let output_to_check = self.get_output(&proc_res);
-            if !self.props.error_patterns.is_empty() || !self.props.regex_error_patterns.is_empty()
-            {
-                // "// error-pattern" comments
-                self.check_all_error_patterns(&output_to_check, &proc_res, pm);
-            }
-            self.check_forbid_output(&output_to_check, &proc_res)
-        }
+            self.get_output(&proc_res)
+        } else {
+            self.get_output(&proc_res)
+        };
 
         debug!(
-            "run_ui_test: explicit={:?} config.compare_mode={:?} expected_errors={:?} \
+            "run_ui_test: explicit={:?} config.compare_mode={:?} \
                proc_res.status={:?} props.error_patterns={:?}",
-            explicit,
-            self.config.compare_mode,
-            expected_errors,
-            proc_res.status,
-            self.props.error_patterns
+            explicit, self.config.compare_mode, proc_res.status, self.props.error_patterns
         );
 
-        let check_patterns = should_run == WillExecute::No
-            && (!self.props.error_patterns.is_empty()
-                || !self.props.regex_error_patterns.is_empty());
-        if !explicit && self.config.compare_mode.is_none() {
-            let check_annotations = !check_patterns || !expected_errors.is_empty();
-
-            if check_annotations {
-                // "//~ERROR comments"
-                self.check_expected_errors(expected_errors, &proc_res);
-            }
-        } else if explicit && !expected_errors.is_empty() {
-            let msg = format!(
-                "line {}: cannot combine `--error-format` with {} annotations; use `error-pattern` instead",
-                expected_errors[0].line_num,
-                expected_errors[0].kind.unwrap_or(ErrorKind::Error),
-            );
-            self.fatal(&msg);
-        }
-        let output_to_check = self.get_output(&proc_res);
-        if check_patterns {
-            // "// error-pattern" comments
-            self.check_all_error_patterns(&output_to_check, &proc_res, pm);
-        }
+        self.check_expected_errors(&proc_res);
+        self.check_all_error_patterns(&output_to_check, &proc_res);
         self.check_forbid_output(&output_to_check, &proc_res);
 
         if self.props.run_rustfix && self.config.compare_mode.is_none() {
@@ -215,8 +225,6 @@ impl TestCx<'_> {
                 let crate_name =
                     self.testpaths.file.file_stem().expect("test must have a file stem");
                 // crate name must be alphanumeric or `_`.
-                let crate_name =
-                    crate_name.to_str().expect("crate name implies file name must be valid UTF-8");
                 // replace `a.foo` -> `a__foo` for crate name purposes.
                 // replace `revision-name-with-dashes` -> `revision_name_with_underscore`
                 let crate_name = crate_name.replace('.', "__");

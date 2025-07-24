@@ -10,7 +10,7 @@
 //! * Compiler internal types like `Ty` and `TyCtxt`
 
 use rustc_hir::diagnostic_items::DiagnosticItems;
-use rustc_hir::{Attribute, OwnerId};
+use rustc_hir::{Attribute, CRATE_OWNER_ID, OwnerId};
 use rustc_middle::query::{LocalCrate, Providers};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
@@ -19,7 +19,7 @@ use rustc_span::{Symbol, sym};
 use crate::errors::DuplicateDiagnosticItemInCrate;
 
 fn observe_item<'tcx>(tcx: TyCtxt<'tcx>, diagnostic_items: &mut DiagnosticItems, owner: OwnerId) {
-    let attrs = tcx.hir().attrs(owner.into());
+    let attrs = tcx.hir_attrs(owner.into());
     if let Some(name) = extract(attrs) {
         // insert into our table
         collect_item(tcx, diagnostic_items, name, owner.to_def_id());
@@ -41,8 +41,8 @@ fn report_duplicate_item(
     original_def_id: DefId,
     item_def_id: DefId,
 ) {
-    let orig_span = tcx.hir().span_if_local(original_def_id);
-    let duplicate_span = tcx.hir().span_if_local(item_def_id);
+    let orig_span = tcx.hir_span_if_local(original_def_id);
+    let duplicate_span = tcx.hir_span_if_local(item_def_id);
     tcx.dcx().emit_err(DuplicateDiagnosticItemInCrate {
         duplicate_span,
         orig_span,
@@ -67,7 +67,7 @@ fn diagnostic_items(tcx: TyCtxt<'_>, _: LocalCrate) -> DiagnosticItems {
 
     // Collect diagnostic items in this crate.
     let crate_items = tcx.hir_crate_items(());
-    for id in crate_items.owners() {
+    for id in crate_items.owners().chain(std::iter::once(CRATE_OWNER_ID)) {
         observe_item(tcx, &mut diagnostic_items, id);
     }
 

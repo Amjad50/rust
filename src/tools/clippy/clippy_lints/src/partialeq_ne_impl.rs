@@ -19,8 +19,8 @@ declare_clippy_lint! {
     /// struct Foo;
     ///
     /// impl PartialEq for Foo {
-    ///    fn eq(&self, other: &Foo) -> bool { true }
-    ///    fn ne(&self, other: &Foo) -> bool { !(self == other) }
+    ///     fn eq(&self, other: &Foo) -> bool { true }
+    ///     fn ne(&self, other: &Foo) -> bool { !(self == other) }
     /// }
     /// ```
     #[clippy::version = "pre 1.29.0"]
@@ -38,17 +38,17 @@ impl<'tcx> LateLintPass<'tcx> for PartialEqNeImpl {
             items: impl_items,
             ..
         }) = item.kind
-            && !cx.tcx.has_attr(item.owner_id, sym::automatically_derived)
+            && !cx.tcx.is_automatically_derived(item.owner_id.to_def_id())
             && let Some(eq_trait) = cx.tcx.lang_items().eq_trait()
             && trait_ref.path.res.def_id() == eq_trait
         {
             for impl_item in *impl_items {
-                if impl_item.ident.name == sym::ne {
+                if cx.tcx.item_name(impl_item.owner_id) == sym::ne {
                     span_lint_hir(
                         cx,
                         PARTIALEQ_NE_IMPL,
-                        impl_item.id.hir_id(),
-                        impl_item.span,
+                        impl_item.hir_id(),
+                        cx.tcx.def_span(impl_item.owner_id),
                         "re-implementing `PartialEq::ne` is unnecessary",
                     );
                 }

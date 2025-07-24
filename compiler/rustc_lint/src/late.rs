@@ -48,7 +48,7 @@ impl<'tcx, T: LateLintPass<'tcx>> LateContextAndPass<'tcx, T> {
     where
         F: FnOnce(&mut Self),
     {
-        let attrs = self.context.tcx.hir().attrs(id);
+        let attrs = self.context.tcx.hir_attrs(id);
         let prev = self.context.last_node_with_lint_attrs;
         self.context.last_node_with_lint_attrs = id;
         debug!("late context: enter_attrs({:?})", attrs);
@@ -74,7 +74,7 @@ impl<'tcx, T: LateLintPass<'tcx>> LateContextAndPass<'tcx, T> {
 
     fn process_mod(&mut self, m: &'tcx hir::Mod<'tcx>, n: HirId) {
         lint_callback!(self, check_mod, m, n);
-        hir_visit::walk_mod(self, m, n);
+        hir_visit::walk_mod(self, m);
     }
 }
 
@@ -152,7 +152,7 @@ impl<'tcx, T: LateLintPass<'tcx>> hir_visit::Visitor<'tcx> for LateContextAndPas
         hir_visit::walk_pat(self, p);
     }
 
-    fn visit_lit(&mut self, hir_id: HirId, lit: &'tcx hir::Lit, negated: bool) {
+    fn visit_lit(&mut self, hir_id: HirId, lit: hir::Lit, negated: bool) {
         lint_callback!(self, check_lit, hir_id, lit, negated);
     }
 

@@ -3,15 +3,15 @@
 use hir::StructKind;
 use span::Edition;
 use syntax::{
-    ast::{make, Expr, Path},
     ToSmolStr,
+    ast::{Expr, Path, make},
 };
 
 /// given a type return the trivial constructor (if one exists)
 pub fn use_trivial_constructor(
     db: &crate::RootDatabase,
     path: Path,
-    ty: &hir::Type,
+    ty: &hir::Type<'_>,
     edition: Edition,
 ) -> Option<Expr> {
     match ty.as_adt() {

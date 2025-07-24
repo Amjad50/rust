@@ -4,15 +4,21 @@
 
 /* eslint-disable */
 declare global {
+    /** Search engine data used by main.js and search.js */
+    declare var searchState: rustdoc.SearchState;
+    /** Defined and documented in `storage.js` */
+    declare function nonnull(x: T|null, msg: string|undefined);
+    /** Defined and documented in `storage.js` */
+    declare function nonundef(x: T|undefined, msg: string|undefined);
     interface Window {
         /** Make the current theme easy to find */
         currentTheme: HTMLLinkElement|null;
+        /** Generated in `render/context.rs` */
+        SIDEBAR_ITEMS?: { [key: string]: string[] };
         /** Used by the popover tooltip code. */
         RUSTDOC_TOOLTIP_HOVER_MS: number;
         /** Used by the popover tooltip code. */
         RUSTDOC_TOOLTIP_HOVER_EXIT_MS: number;
-        /** Search engine data used by main.js and search.js */
-        searchState: rustdoc.SearchState;
         /** Global option, with a long list of "../"'s */
         rootPath: string|null;
         /**
@@ -22,6 +28,8 @@ declare global {
         currentCrate: string|null;
         /**
          * Hide popovers, tooltips, or the mobile sidebar.
+         *
+         * Pass `true` to reset focus for tooltip popovers.
          */
         hideAllModals: function(boolean),
         /**
@@ -39,9 +47,39 @@ declare global {
          */
         rustdocShowSourceSidebar: function(),
         /**
+         * Close the sidebar in source code view
+         */
+        rustdocCloseSourceSidebar?: function(),
+        /**
+         * Shows the sidebar in source code view
+         */
+        rustdocShowSourceSidebar?: function(),
+        /**
+         * Toggles the sidebar in source code view
+         */
+        rustdocToggleSrcSidebar?: function(),
+        /**
+         * create's the sidebar in source code view.
+         * called in generated `src-files.js`.
+         */
+        createSrcSidebar?: function(string),
+        /**
          * Set up event listeners for a scraped source example.
          */
         updateScrapedExample?: function(HTMLElement, HTMLElement),
+        /**
+         * register trait implementors, called by code generated in
+         * `write_shared.rs`
+         */
+        register_implementors?: function(rustdoc.Implementors): void,
+        /**
+         * fallback in case `register_implementors` isn't defined yet.
+         */
+        pending_implementors?: rustdoc.Implementors,
+        register_type_impls?: function(rustdoc.TypeImpls): void,
+        pending_type_impls?: rustdoc.TypeImpls,
+        rustdoc_add_line_numbers_to_examples?: function(),
+        rustdoc_remove_line_numbers_from_examples?: function(),
     }
     interface HTMLElement {
         /** Used by the popover tooltip code. */
@@ -64,20 +102,22 @@ declare namespace rustdoc {
         currentTab: number;
         focusedByTab: [number|null, number|null, number|null];
         clearInputTimeout: function;
-        outputElement: function(): HTMLElement|null;
-        focus: function();
-        defocus: function();
-        showResults: function(HTMLElement|null|undefined);
-        removeQueryParameters: function();
-        hideResults: function();
-        getQueryStringParams: function(): Object.<any, string>;
+        outputElement(): HTMLElement|null;
+        focus();
+        defocus();
+        // note: an optional param is not the same as
+        // a nullable/undef-able param.
+        showResults(elem?: HTMLElement|null);
+        removeQueryParameters();
+        hideResults();
+        getQueryStringParams(): Object.<any, string>;
         origPlaceholder: string;
         setup: function();
-        setLoadingSearch: function();
+        setLoadingSearch();
         descShards: Map<string, SearchDescShard[]>;
         loadDesc: function({descShard: SearchDescShard, descIndex: number}): Promise<string|null>;
-        loadedDescShard: function(string, number, string);
-        isDisplayed: function(): boolean,
+        loadedDescShard(string, number, string);
+        isDisplayed(): boolean,
     }
 
     interface SearchDescShard {
@@ -89,7 +129,7 @@ declare namespace rustdoc {
 
     /**
      * A single parsed "atom" in a search query. For example,
-     * 
+     *
      *     std::fmt::Formatter, Write -> Result<()>
      *     ┏━━━━━━━━━━━━━━━━━━  ┌────    ┏━━━━━┅┅┅┅┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐
      *     ┃                    │        ┗ QueryElement {        ┊
@@ -179,6 +219,8 @@ declare namespace rustdoc {
         crate: string,
         descShard: SearchDescShard,
         id: number,
+        // This is the name of the item. For doc aliases, if you want the name of the aliased
+        // item, take a look at `Row.original.name`.
         name: string,
         normalizedName: string,
         word: string,
@@ -187,6 +229,11 @@ declare namespace rustdoc {
         path: string,
         ty: number,
         type: FunctionSearchType | null,
+        descIndex: number,
+        bitIndex: number,
+        implDisambiguator: String | null,
+        is_alias?: boolean,
+        original?: Row,
     }
 
     /**
@@ -199,7 +246,7 @@ declare namespace rustdoc {
         query: ParsedQuery,
     }
 
-    type Results = Map<String, ResultObject>;
+    type Results = { max_dist?: number } & Map<number, ResultObject>
 
     /**
      * An annotated `Row`, used in the viewmodel.
@@ -221,10 +268,18 @@ declare namespace rustdoc {
         ty: number,
         type?: FunctionSearchType,
         paramNames?: string[],
-        displayType: Promise<Array<Array<string>>>|null,
-        displayTypeMappedNames: Promise<Array<[string, Array<string>]>>|null,
+        displayTypeSignature: Promise<rustdoc.DisplayTypeSignature> | null,
         item: Row,
         dontValidate?: boolean,
+    }
+
+    /**
+     * output of `formatDisplayTypeSignature`
+     */
+    interface DisplayTypeSignature {
+        type: Array<string>,
+        mappedNames: Map<string, string>,
+        whereClause: Map<string, Array<string>>,
     }
 
     /**
@@ -413,4 +468,34 @@ declare namespace rustdoc {
     };
 
     type VlqData = VlqData[] | number;
+
+    /**
+     * Maps from crate names to trait implementation data.
+     * Provided by generated `trait.impl` files.
+     */
+    type Implementors = {
+        [key: string]: Array<[string, number, Array<string>]>
+    }
+
+    type TypeImpls = {
+        [cratename: string]: Array<Array<string|0>>
+    }
+
+    /**
+     * Directory structure for source code view,
+     * defined in generated `src-files.js`.
+     *
+     * is a tuple of (filename, subdirs, filenames).
+     */
+    type Dir = [string, rustdoc.Dir[], string[]]
+
+    /**
+     * Indivitual setting object, used in `settings.js`
+     */
+    interface Setting {
+        js_name: string,
+        name: string,
+        options?: string[],
+        default: string | boolean,
+    }
 }

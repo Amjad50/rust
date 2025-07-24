@@ -24,6 +24,7 @@ pub(crate) struct NoOptimizedMir {
     #[note]
     pub span: Span,
     pub crate_name: Symbol,
+    pub instance: String,
 }
 
 #[derive(LintDiagnostic)]
@@ -64,15 +65,10 @@ pub(crate) struct EncounteredErrorWhileInstantiating {
 pub(crate) struct StartNotFound;
 
 #[derive(Diagnostic)]
-#[diag(monomorphize_unknown_cgu_collection_mode)]
-pub(crate) struct UnknownCguCollectionMode<'a> {
-    pub mode: &'a str,
-}
-
-#[derive(LintDiagnostic)]
 #[diag(monomorphize_abi_error_disabled_vector_type)]
 #[help]
 pub(crate) struct AbiErrorDisabledVectorType<'a> {
+    #[primary_span]
     #[label]
     pub span: Span,
     pub required_feature: &'a str,
@@ -81,9 +77,10 @@ pub(crate) struct AbiErrorDisabledVectorType<'a> {
     pub is_call: bool,
 }
 
-#[derive(LintDiagnostic)]
+#[derive(Diagnostic)]
 #[diag(monomorphize_abi_error_unsupported_vector_type)]
 pub(crate) struct AbiErrorUnsupportedVectorType<'a> {
+    #[primary_span]
     #[label]
     pub span: Span,
     pub ty: Ty<'a>,

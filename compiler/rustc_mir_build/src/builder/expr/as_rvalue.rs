@@ -145,7 +145,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // malloc some memory of suitable size and align:
                 let exchange_malloc = Operand::function_handle(
                     tcx,
-                    tcx.require_lang_item(LangItem::ExchangeMalloc, Some(expr_span)),
+                    tcx.require_lang_item(LangItem::ExchangeMalloc, expr_span),
                     [],
                     expr_span,
                 );
@@ -171,14 +171,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 this.diverge_from(block);
                 block = success;
 
-                // The `Box<T>` temporary created here is not a part of the HIR,
-                // and therefore is not considered during coroutine auto-trait
-                // determination. See the comment about `box` at `yield_in_scope`.
                 let result = this.local_decls.push(LocalDecl::new(expr.ty, expr_span));
-                this.cfg.push(
-                    block,
-                    Statement { source_info, kind: StatementKind::StorageLive(result) },
-                );
+                this.cfg
+                    .push(block, Statement::new(source_info, StatementKind::StorageLive(result)));
                 if let Some(scope) = scope.temp_lifetime {
                     // schedule a shallow free of that memory, lest we unwind:
                     this.schedule_drop_storage_and_value(expr_span, scope, result);
@@ -278,12 +273,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         };
                         this.cfg.push(
                             block,
-                            Statement {
+                            Statement::new(
                                 source_info,
-                                kind: StatementKind::Intrinsic(Box::new(
-                                    NonDivergingIntrinsic::Assume(Operand::Move(assert_place)),
-                                )),
-                            },
+                                StatementKind::Intrinsic(Box::new(NonDivergingIntrinsic::Assume(
+                                    Operand::Move(assert_place),
+                                ))),
+                            ),
                         );
                     }
 
@@ -416,7 +411,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     if let Some(mir_place) = place_builder.try_to_place(this) {
                         this.cfg.push_fake_read(
                             block,
-                            this.source_info(this.tcx.hir().span(*hir_id)),
+                            this.source_info(this.tcx.hir_span(*hir_id)),
                             *cause,
                             mir_place,
                         );
@@ -538,6 +533,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::RawBorrow { .. }
             | ExprKind::Adt { .. }
             | ExprKind::Loop { .. }
+            | ExprKind::LoopMatch { .. }
             | ExprKind::LogicalOp { .. }
             | ExprKind::Call { .. }
             | ExprKind::Field { .. }
@@ -548,6 +544,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::UpvarRef { .. }
             | ExprKind::Break { .. }
             | ExprKind::Continue { .. }
+            | ExprKind::ConstContinue { .. }
             | ExprKind::Return { .. }
             | ExprKind::Become { .. }
             | ExprKind::InlineAsm { .. }
@@ -569,6 +566,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         LocalInfo::Boring,
                         NeedsTemporary::No,
                     )
+                );
+                block.and(Rvalue::Use(operand))
+            }
+
+            ExprKind::ByUse { expr, span: _ } => {
+                let operand = unpack!(
+                    block =
+                        this.as_operand(block, scope, expr, LocalInfo::Boring, NeedsTemporary::No)
                 );
                 block.and(Rvalue::Use(operand))
             }
@@ -754,6 +759,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         target: success,
                         unwind: UnwindAction::Continue,
                         replace: false,
+                        drop: None,
+                        async_fut: None,
                     },
                 );
                 this.diverge_from(block);
@@ -777,7 +784,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let source_info = this.source_info(upvar_span);
         let temp = this.local_decls.push(LocalDecl::new(upvar_ty, upvar_span));
 
-        this.cfg.push(block, Statement { source_info, kind: StatementKind::StorageLive(temp) });
+        this.cfg.push(block, Statement::new(source_info, StatementKind::StorageLive(temp)));
 
         let arg_place_builder = unpack!(block = this.as_place_builder(block, arg));
 

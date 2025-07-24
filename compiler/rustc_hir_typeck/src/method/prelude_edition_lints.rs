@@ -2,6 +2,7 @@ use std::fmt::Write;
 
 use hir::def_id::DefId;
 use hir::{HirId, ItemKind};
+use rustc_ast::join_path_idents;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::{ARRAY_INTO_ITER, BOXED_SLICE_INTO_ITER};
@@ -363,32 +364,29 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let import_items: Vec<_> = applicable_trait
             .import_ids
             .iter()
-            .map(|&import_id| self.tcx.hir().expect_item(import_id))
+            .map(|&import_id| self.tcx.hir_expect_item(import_id))
             .collect();
 
         // Find an identifier with which this trait was imported (note that `_` doesn't count).
-        let any_id = import_items.iter().find_map(|item| {
-            if item.ident.name != kw::Underscore { Some(item.ident) } else { None }
-        });
-        if let Some(any_id) = any_id {
-            if any_id.name == kw::Empty {
-                // Glob import, so just use its name.
-                return None;
-            } else {
-                return Some(format!("{any_id}"));
+        for item in import_items.iter() {
+            let (_, kind) = item.expect_use();
+            match kind {
+                hir::UseKind::Single(ident) => {
+                    if ident.name != kw::Underscore {
+                        return Some(format!("{}", ident.name));
+                    }
+                }
+                hir::UseKind::Glob => return None, // Glob import, so just use its name.
+                hir::UseKind::ListStem => unreachable!(),
             }
         }
 
-        // All that is left is `_`! We need to use the full path. It doesn't matter which one we pick,
-        // so just take the first one.
+        // All that is left is `_`! We need to use the full path. It doesn't matter which one we
+        // pick, so just take the first one.
         match import_items[0].kind {
-            ItemKind::Use(path, _) => Some(
-                path.segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::"),
-            ),
+            ItemKind::Use(path, _) => {
+                Some(join_path_idents(path.segments.iter().map(|seg| seg.ident)))
+            }
             _ => {
                 span_bug!(span, "unexpected item kind, expected a use: {:?}", import_items[0].kind);
             }

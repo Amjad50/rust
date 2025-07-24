@@ -43,13 +43,13 @@ rustdocs][rustdocs].
 To build a local static HTML site, install [`mdbook`](https://github.com/rust-lang/mdBook) with:
 
 ```
-> cargo install mdbook mdbook-linkcheck2 mdbook-toc mdbook-mermaid
+cargo install mdbook mdbook-linkcheck2 mdbook-toc mdbook-mermaid
 ```
 
 and execute the following command in the root of the repository:
 
 ```
-> mdbook build --open
+mdbook build --open
 ```
 
 The build files are found in the `book/html` directory.
@@ -61,8 +61,8 @@ checking is **not** run by default locally, though it is in CI. To enable it
 locally, set the environment variable `ENABLE_LINKCHECK=1` like in the
 following example.
 
-```console
-$ ENABLE_LINKCHECK=1 mdbook serve
+```
+ENABLE_LINKCHECK=1 mdbook serve
 ```
 
 ### Table of Contents
@@ -72,26 +72,6 @@ including the `<!-- toc -->` marker at the place where you want the TOC.
 
 ## Synchronizing josh subtree with rustc
 
-This repository is linked to `rust-lang/rust` as a [josh](https://josh-project.github.io/josh/intro.html) subtree. You can use the following commands to synchronize the subtree in both directions.
+This repository is linked to `rust-lang/rust` as a [josh](https://josh-project.github.io/josh/intro.html) subtree. You can use the [rustc-josh-sync](https://github.com/rust-lang/josh-sync) tool to perform synchronization.
 
-You'll need to install `josh-proxy` locally via
-
-```
-cargo +stable install josh-proxy --git https://github.com/josh-project/josh --tag r24.10.04
-```
-Older versions of `josh-proxy` may not round trip commits losslessly so it is important to install this exact version.
-
-### Pull changes from `rust-lang/rust` into this repository
-1) Checkout a new branch that will be used to create a PR into `rust-lang/rustc-dev-guide`
-2) Run the pull command
-    ```
-    $ cargo run --manifest-path josh-sync/Cargo.toml rustc-pull
-    ```
-3) Push the branch to your fork and create a PR into `rustc-dev-guide`
-
-### Push changes from this repository into `rust-lang/rust`
-1) Run the push command to create a branch named `<branch-name>` in a `rustc` fork under the `<gh-username>` account
-    ```
-    $ cargo run --manifest-path josh-sync/Cargo.toml rustc-push <branch-name> <gh-username>
-    ```
-2) Create a PR from `<branch-name>` into `rust-lang/rust`
+You can find a guide on how to perform the synchronization [here](./src/external-repos.md#synchronizing-a-josh-subtree).

@@ -12,7 +12,6 @@ use crate::traits;
 
 #[derive(Copy, Clone, Debug)]
 pub enum FutureCompatOverlapErrorKind {
-    OrderDepTraitObjects,
     LeakCheck,
 }
 
@@ -151,12 +150,6 @@ impl<'tcx> Children {
                 {
                     match overlap_kind {
                         ty::ImplOverlapKind::Permitted { marker: _ } => {}
-                        ty::ImplOverlapKind::FutureCompatOrderDepTraitObjects => {
-                            *last_lint_mut = Some(FutureCompatOverlapError {
-                                error: create_overlap_error(overlap),
-                                kind: FutureCompatOverlapErrorKind::OrderDepTraitObjects,
-                            });
-                        }
                     }
 
                     return Ok((false, false));
@@ -280,8 +273,6 @@ impl<'tcx> Graph {
 
         // Descend the specialization tree, where `parent` is the current parent node.
         loop {
-            use self::Inserted::*;
-
             let insert_result = self.children.entry(parent).or_default().insert(
                 tcx,
                 impl_def_id,
@@ -290,11 +281,11 @@ impl<'tcx> Graph {
             )?;
 
             match insert_result {
-                BecameNewSibling(opt_lint) => {
+                Inserted::BecameNewSibling(opt_lint) => {
                     last_lint = opt_lint;
                     break;
                 }
-                ReplaceChildren(grand_children_to_be) => {
+                Inserted::ReplaceChildren(grand_children_to_be) => {
                     // We currently have
                     //
                     //     P
@@ -333,7 +324,7 @@ impl<'tcx> Graph {
                     }
                     break;
                 }
-                ShouldRecurseOn(new_parent) => {
+                Inserted::ShouldRecurseOn(new_parent) => {
                     parent = new_parent;
                 }
             }

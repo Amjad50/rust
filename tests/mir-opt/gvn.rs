@@ -100,17 +100,18 @@ fn subexpression_elimination(x: u64, y: u64, mut z: u64) {
     opaque((x * y) - y);
 
     // We cannot substitute through an immutable reference.
-    // (Disabled due to <https://github.com/rust-lang/rust/issues/130853>)
     // CHECK: [[ref:_.*]] = &_3;
     // CHECK: [[deref:_.*]] = copy (*[[ref]]);
-    // COM: CHECK: [[addref:_.*]] = Add(copy [[deref]], copy _1);
-    // COM: CHECK: opaque::<u64>(copy [[addref]])
-    // COM: CHECK: opaque::<u64>(copy [[addref]])
+    // CHECK: [[addref:_.*]] = Add(move [[deref]], copy _1);
+    // CHECK: opaque::<u64>(move [[addref]])
+    // CHECK: [[deref2:_.*]] = copy (*[[ref]]);
+    // CHECK: [[addref2:_.*]] = Add(move [[deref2]], copy _1);
+    // CHECK: opaque::<u64>(move [[addref2]])
     let a = &z;
     opaque(*a + x);
     opaque(*a + x);
 
-    // And certainly not through a mutable reference or a pointer.
+    // But not through a mutable reference or a pointer.
     // CHECK: [[mut:_.*]] = &mut _3;
     // CHECK: [[addmut:_.*]] = Add(
     // CHECK: opaque::<u64>(move [[addmut]])
@@ -142,9 +143,11 @@ fn subexpression_elimination(x: u64, y: u64, mut z: u64) {
     // Important: `e` is not `a`!
     // CHECK: [[ref2:_.*]] = &_3;
     // CHECK: [[deref2:_.*]] = copy (*[[ref2]]);
-    // COM: CHECK: [[addref2:_.*]] = Add(copy [[deref2]], copy _1);
-    // COM: CHECK: opaque::<u64>(copy [[addref2]])
-    // COM: CHECK: opaque::<u64>(copy [[addref2]])
+    // CHECK: [[addref2:_.*]] = Add(move [[deref2]], copy _1);
+    // CHECK: opaque::<u64>(move [[addref2]])
+    // CHECK: [[deref3:_.*]] = copy (*[[ref2]]);
+    // CHECK: [[addref3:_.*]] = Add(move [[deref3]], copy _1);
+    // CHECK: opaque::<u64>(move [[addref3]])
     let e = &z;
     opaque(*e + x);
     opaque(*e + x);
@@ -499,8 +502,9 @@ fn dereferences(t: &mut u32, u: &impl Copy, s: &S<u32>) {
     // Do not reuse dereferences of `&Freeze`.
     // CHECK: [[ref:_.*]] = &(*_1);
     // CHECK: [[st7:_.*]] = copy (*[[ref]]);
-    // COM: CHECK: opaque::<u32>(copy [[st7]])
-    // COM: CHECK: opaque::<u32>(copy [[st7]])
+    // CHECK: opaque::<u32>(move [[st7]])
+    // CHECK: [[st8:_.*]] = copy (*[[ref]]);
+    // CHECK: opaque::<u32>(move [[st8]])
     let z = &*t;
     opaque(*z);
     opaque(*z);
@@ -519,8 +523,9 @@ fn dereferences(t: &mut u32, u: &impl Copy, s: &S<u32>) {
 
     // `*s` is not Copy, but `(*s).0` is, but we still cannot reuse.
     // CHECK: [[st10:_.*]] = copy ((*_3).0: u32);
-    // COM: CHECK: opaque::<u32>(copy [[st10]])
-    // COM: CHECK: opaque::<u32>(copy [[st10]])
+    // CHECK: opaque::<u32>(move [[st10]])
+    // CHECK: [[st11:_.*]] = copy ((*_3).0: u32);
+    // CHECK: opaque::<u32>(move [[st11]])
     opaque(s.0);
     opaque(s.0);
 }
@@ -528,10 +533,10 @@ fn dereferences(t: &mut u32, u: &impl Copy, s: &S<u32>) {
 fn slices() {
     // CHECK-LABEL: fn slices(
     // CHECK: {{_.*}} = const "
-    // CHECK-NOT: {{_.*}} = const "
-    let s = "my favourite slice"; // This is a `Const::Slice` in MIR.
+    // CHECK: {{_.*}} = const "
+    let s = "my favourite slice";
     opaque(s);
-    let t = s; // This should be the same pointer, so cannot be a `Const::Slice`.
+    let t = s; // This should be the same pointer.
     opaque(t);
     assert_eq!(s.as_ptr(), t.as_ptr());
     let u = unsafe { transmute::<&str, &[u8]>(s) };
@@ -551,12 +556,12 @@ fn duplicate_slice() -> (bool, bool) {
         let d: &str;
         {
             // CHECK: [[a:_.*]] = (const "a",);
-            // CHECK: [[au:_.*]] = copy ([[a]].0: &str) as u128 (Transmute);
+            // CHECK: [[au:_.*]] = const "a" as u128 (Transmute);
             let a = ("a",);
             Call(au = transmute::<_, u128>(a.0), ReturnTo(bb1), UnwindContinue())
         }
         bb1 = {
-            // CHECK: [[c:_.*]] = identity::<&str>(copy ([[a]].0: &str))
+            // CHECK: [[c:_.*]] = identity::<&str>(const "a")
             Call(c = identity(a.0), ReturnTo(bb2), UnwindContinue())
         }
         bb2 = {
@@ -564,15 +569,13 @@ fn duplicate_slice() -> (bool, bool) {
             Call(cu = transmute::<_, u128>(c), ReturnTo(bb3), UnwindContinue())
         }
         bb3 = {
-            // This slice is different from `a.0`. Hence `bu` is not `au`.
             // CHECK: [[b:_.*]] = const "a";
-            // CHECK: [[bu:_.*]] = copy [[b]] as u128 (Transmute);
+            // CHECK: [[bu:_.*]] = copy [[au]];
             let b = "a";
             Call(bu = transmute::<_, u128>(b), ReturnTo(bb4), UnwindContinue())
         }
         bb4 = {
-            // This returns a copy of `b`, which is not `a`.
-            // CHECK: [[d:_.*]] = identity::<&str>(copy [[b]])
+            // CHECK: [[d:_.*]] = identity::<&str>(const "a")
             Call(d = identity(b), ReturnTo(bb5), UnwindContinue())
         }
         bb5 = {
@@ -580,8 +583,7 @@ fn duplicate_slice() -> (bool, bool) {
             Call(du = transmute::<_, u128>(d), ReturnTo(bb6), UnwindContinue())
         }
         bb6 = {
-            // `direct` must not fold to `true`, as `indirect` will not.
-            // CHECK: = Eq(copy [[au]], copy [[bu]]);
+            // CHECK: = const true;
             // CHECK: = Eq(copy [[cu]], copy [[du]]);
             let direct = au == bu;
             let indirect = cu == du;
@@ -737,7 +739,7 @@ fn borrowed<T: Copy + Freeze>(x: T) {
     // CHECK: bb1: {
     // CHECK-NEXT: _0 = opaque::<T>(copy _1)
     // CHECK: bb2: {
-    // COM: CHECK-NEXT: _0 = opaque::<T>(copy _1)
+    // CHECK-NEXT: _0 = opaque::<T>(copy _1)
     mir! {
         {
             let a = x;
@@ -864,7 +866,7 @@ fn generic_cast_metadata<T, A: ?Sized, B: ?Sized>(ps: *const [T], pa: *const A, 
 
             // Metadata usize -> (), do not optimize.
             // CHECK: [[T:_.+]] = copy _1 as
-            // CHECK-NEXT: PtrMetadata(copy [[T]])
+            // CHECK-NEXT: const ();
             let t1 = CastPtrToPtr::<_, *const T>(ps);
             let m1 = PtrMetadata(t1);
 

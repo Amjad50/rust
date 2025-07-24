@@ -242,21 +242,21 @@ fn fn_header_search_pat(header: FnHeader) -> Pat {
 
 fn item_search_pat(item: &Item<'_>) -> (Pat, Pat) {
     let (start_pat, end_pat) = match &item.kind {
-        ItemKind::ExternCrate(_) => (Pat::Str("extern"), Pat::Str(";")),
+        ItemKind::ExternCrate(..) => (Pat::Str("extern"), Pat::Str(";")),
         ItemKind::Static(..) => (Pat::Str("static"), Pat::Str(";")),
         ItemKind::Const(..) => (Pat::Str("const"), Pat::Str(";")),
         ItemKind::Fn { sig, .. } => (fn_header_search_pat(sig.header), Pat::Str("")),
         ItemKind::ForeignMod { .. } => (Pat::Str("extern"), Pat::Str("}")),
         ItemKind::TyAlias(..) => (Pat::Str("type"), Pat::Str(";")),
         ItemKind::Enum(..) => (Pat::Str("enum"), Pat::Str("}")),
-        ItemKind::Struct(VariantData::Struct { .. }, _) => (Pat::Str("struct"), Pat::Str("}")),
+        ItemKind::Struct(_, _, VariantData::Struct { .. }) => (Pat::Str("struct"), Pat::Str("}")),
         ItemKind::Struct(..) => (Pat::Str("struct"), Pat::Str(";")),
         ItemKind::Union(..) => (Pat::Str("union"), Pat::Str("}")),
-        ItemKind::Trait(_, Safety::Unsafe, ..)
+        ItemKind::Trait(_, _, Safety::Unsafe, ..)
         | ItemKind::Impl(Impl {
             safety: Safety::Unsafe, ..
         }) => (Pat::Str("unsafe"), Pat::Str("}")),
-        ItemKind::Trait(IsAuto::Yes, ..) => (Pat::Str("auto"), Pat::Str("}")),
+        ItemKind::Trait(_, IsAuto::Yes, ..) => (Pat::Str("auto"), Pat::Str("}")),
         ItemKind::Trait(..) => (Pat::Str("trait"), Pat::Str("}")),
         ItemKind::Impl(_) => (Pat::Str("impl"), Pat::Str("}")),
         _ => return (Pat::Str(""), Pat::Str("")),
@@ -372,17 +372,17 @@ fn ty_search_pat(ty: &Ty<'_>) -> (Pat, Pat) {
         TyKind::Slice(..) | TyKind::Array(..) => (Pat::Str("["), Pat::Str("]")),
         TyKind::Ptr(MutTy { ty, .. }) => (Pat::Str("*"), ty_search_pat(ty).1),
         TyKind::Ref(_, MutTy { ty, .. }) => (Pat::Str("&"), ty_search_pat(ty).1),
-        TyKind::BareFn(bare_fn) => (
-            if bare_fn.safety.is_unsafe() {
+        TyKind::FnPtr(fn_ptr) => (
+            if fn_ptr.safety.is_unsafe() {
                 Pat::Str("unsafe")
-            } else if bare_fn.abi != ExternAbi::Rust {
+            } else if fn_ptr.abi != ExternAbi::Rust {
                 Pat::Str("extern")
             } else {
                 Pat::MultiStr(&["fn", "extern"])
             },
-            match bare_fn.decl.output {
+            match fn_ptr.decl.output {
                 FnRetTy::DefaultReturn(_) => {
-                    if let [.., ty] = bare_fn.decl.inputs {
+                    if let [.., ty] = fn_ptr.decl.inputs {
                         ty_search_pat(ty).1
                     } else {
                         Pat::Str("(")

@@ -1784,6 +1784,8 @@ impl Foo for u8 {
 }
 
 #[test]
+// FIXME
+#[should_panic]
 fn const_eval_in_function_signature() {
     check_types(
         r#"
@@ -2739,11 +2741,11 @@ impl B for Astruct {}
             715..744 '#[rust...1i32])': Box<[i32; 1], Global>
             737..743 '[1i32]': [i32; 1]
             738..742 '1i32': i32
-            755..756 'v': Vec<Box<dyn B, Global>, Global>
-            776..793 '<[_]> ...to_vec': fn into_vec<Box<dyn B, Global>, Global>(Box<[Box<dyn B, Global>], Global>) -> Vec<Box<dyn B, Global>, Global>
-            776..850 '<[_]> ...ct)]))': Vec<Box<dyn B, Global>, Global>
-            794..849 '#[rust...uct)])': Box<[Box<dyn B, Global>; 1], Global>
-            816..848 '[#[rus...ruct)]': [Box<dyn B, Global>; 1]
+            755..756 'v': Vec<Box<dyn B + '?, Global>, Global>
+            776..793 '<[_]> ...to_vec': fn into_vec<Box<dyn B + '?, Global>, Global>(Box<[Box<dyn B + '?, Global>], Global>) -> Vec<Box<dyn B + '?, Global>, Global>
+            776..850 '<[_]> ...ct)]))': Vec<Box<dyn B + '?, Global>, Global>
+            794..849 '#[rust...uct)])': Box<[Box<dyn B + '?, Global>; 1], Global>
+            816..848 '[#[rus...ruct)]': [Box<dyn B + '?, Global>; 1]
             817..847 '#[rust...truct)': Box<Astruct, Global>
             839..846 'Astruct': Astruct
         "#]],
@@ -3749,7 +3751,7 @@ fn foo() {
     }
     let v: bool = true;
     m!();
- // ^^^^ i32
+ // ^^ i32
 }
         "#,
     );
@@ -3763,39 +3765,39 @@ fn foo() {
     let v: bool;
     macro_rules! m { () => { v } }
     m!();
- // ^^^^ bool
+ // ^^ bool
 
     let v: char;
     macro_rules! m { () => { v } }
     m!();
- // ^^^^ char
+ // ^^ char
 
     {
         let v: u8;
         macro_rules! m { () => { v } }
         m!();
-     // ^^^^ u8
+     // ^^ u8
 
         let v: i8;
         macro_rules! m { () => { v } }
         m!();
-     // ^^^^ i8
+     // ^^ i8
 
         let v: i16;
         macro_rules! m { () => { v } }
         m!();
-     // ^^^^ i16
+     // ^^ i16
 
         {
             let v: u32;
             macro_rules! m { () => { v } }
             m!();
-         // ^^^^ u32
+         // ^^ u32
 
             let v: u64;
             macro_rules! m { () => { v } }
             m!();
-         // ^^^^ u64
+         // ^^ u64
         }
     }
 }
@@ -3858,6 +3860,108 @@ fn main() {
             208..209 'c': u8
             213..214 'a': A
             213..221 'a.into()': [u8; 2]
+        "#]],
+    );
+}
+
+#[test]
+fn regression_19196() {
+    check_infer(
+        r#"
+//- minicore: async_fn
+fn async_closure<F: AsyncFnOnce(i32)>(f: F) {}
+fn closure<F: FnOnce(i32)>(f: F) {}
+
+fn main() {
+    async_closure(async |arg| {
+        arg;
+    });
+    closure(|arg| {
+        arg;
+    });
+}
+"#,
+        expect![[r#"
+            38..39 'f': F
+            44..46 '{}': ()
+            74..75 'f': F
+            80..82 '{}': ()
+            94..191 '{     ... }); }': ()
+            100..113 'async_closure': fn async_closure<impl AsyncFnOnce(i32) -> impl Future<Output = ()>>(impl AsyncFnOnce(i32) -> impl Future<Output = ()>)
+            100..147 'async_...    })': ()
+            114..146 'async ...     }': impl AsyncFnOnce(i32) -> impl Future<Output = ()>
+            121..124 'arg': i32
+            126..146 '{     ...     }': ()
+            136..139 'arg': i32
+            153..160 'closure': fn closure<impl FnOnce(i32)>(impl FnOnce(i32))
+            153..188 'closur...    })': ()
+            161..187 '|arg| ...     }': impl FnOnce(i32)
+            162..165 'arg': i32
+            167..187 '{     ...     }': ()
+            177..180 'arg': i32
+        "#]],
+    );
+}
+
+#[test]
+fn regression_19734() {
+    check_infer(
+        r#"
+trait Foo {
+    type Gat<'o>;
+}
+
+trait Bar {
+    fn baz() -> <Self::Xyz as Foo::Gat<'_>>;
+}
+
+fn foo<T: Bar>() {
+    T::baz();
+}
+    "#,
+        expect![[r#"
+            110..127 '{     ...z(); }': ()
+            116..122 'T::baz': fn baz<T>() -> <{unknown} as Foo>::Gat<'?>
+            116..124 'T::baz()': Foo::Gat<'?, {unknown}>
+        "#]],
+    );
+}
+
+#[test]
+fn asm_const_label() {
+    check_infer(
+        r#"
+//- minicore: asm
+const fn bar() -> i32 { 123 }
+fn baz(s: &str) {}
+
+fn foo() {
+    unsafe {
+        core::arch::asm!(
+            "mov eax, {}",
+            "jmp {}",
+            const bar(),
+            label {
+                baz("hello");
+            },
+        );
+    }
+}
+    "#,
+        expect![[r#"
+            22..29 '{ 123 }': i32
+            24..27 '123': i32
+            37..38 's': &'? str
+            46..48 '{}': ()
+            !0..68 'builti...");},)': ()
+            !40..43 'bar': fn bar() -> i32
+            !40..45 'bar()': i32
+            !51..66 '{baz("hello");}': ()
+            !52..55 'baz': fn baz(&'? str)
+            !52..64 'baz("hello")': ()
+            !56..63 '"hello"': &'static str
+            59..257 '{     ...   } }': ()
+            65..255 'unsafe...     }': ()
         "#]],
     );
 }

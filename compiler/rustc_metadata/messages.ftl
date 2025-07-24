@@ -1,6 +1,10 @@
 metadata_as_needed_compatibility =
     linking modifier `as-needed` is only compatible with `dylib` and `framework` linking kinds
 
+metadata_async_drop_types_in_dependency =
+    found async drop types in dependency `{$extern_crate}`, but async_drop feature is disabled for `{$local_crate}`
+    .help = if async drop type will be dropped in a crate without `feature(async_drop)`, sync Drop will be used
+
 metadata_bad_panic_strategy =
     the linked panic runtime `{$runtime}` is not compiled with this crate's panic strategy `{$strategy}`
 
@@ -97,6 +101,10 @@ metadata_found_staticlib =
     found staticlib `{$crate_name}` instead of rlib or dylib{$add_info}
     .help = please recompile that crate using --crate-type lib
 
+metadata_full_metadata_not_found =
+    only metadata stub found for `{$flavor}` dependency `{$crate_name}`
+    please provide path to the corresponding .rmeta file with full metadata
+
 metadata_global_alloc_required =
     no global memory allocator found but one is required; link to std or add `#[global_allocator]` to a static item that implements the GlobalAlloc trait
 
@@ -118,12 +126,23 @@ metadata_incompatible_rustc =
 
 metadata_incompatible_target_modifiers =
     mixing `{$flag_name_prefixed}` will cause an ABI mismatch in crate `{$local_crate}`
-    .note = `{$flag_name_prefixed}={$flag_local_value}` in this crate is incompatible with `{$flag_name_prefixed}={$flag_extern_value}` in dependency `{$extern_crate}`
+    .note = `{$flag_name_prefixed}={$local_value}` in this crate is incompatible with `{$flag_name_prefixed}={$extern_value}` in dependency `{$extern_crate}`
     .help = the `{$flag_name_prefixed}` flag modifies the ABI so Rust crates compiled with different values of this flag cannot be used together safely
-
 metadata_incompatible_target_modifiers_help_allow = if you are sure this will not cause problems, you may use `-Cunsafe-allow-abi-mismatch={$flag_name}` to silence this error
-metadata_incompatible_target_modifiers_help_fix = set `{$flag_name_prefixed}={$flag_extern_value}` in this crate or `{$flag_name_prefixed}={$flag_local_value}` in `{$extern_crate}`
+metadata_incompatible_target_modifiers_help_fix = set `{$flag_name_prefixed}={$extern_value}` in this crate or `{$flag_name_prefixed}={$local_value}` in `{$extern_crate}`
 
+metadata_incompatible_target_modifiers_help_fix_l_missed = set `{$flag_name_prefixed}={$extern_value}` in this crate or unset `{$flag_name_prefixed}` in `{$extern_crate}`
+
+metadata_incompatible_target_modifiers_help_fix_r_missed = unset `{$flag_name_prefixed}` in this crate or set `{$flag_name_prefixed}={$local_value}` in `{$extern_crate}`
+
+metadata_incompatible_target_modifiers_l_missed =
+    mixing `{$flag_name_prefixed}` will cause an ABI mismatch in crate `{$local_crate}`
+    .note = unset `{$flag_name_prefixed}` in this crate is incompatible with `{$flag_name_prefixed}={$extern_value}` in dependency `{$extern_crate}`
+    .help = the `{$flag_name_prefixed}` flag modifies the ABI so Rust crates compiled with different values of this flag cannot be used together safely
+metadata_incompatible_target_modifiers_r_missed =
+    mixing `{$flag_name_prefixed}` will cause an ABI mismatch in crate `{$local_crate}`
+    .note = `{$flag_name_prefixed}={$local_value}` in this crate is incompatible with unset `{$flag_name_prefixed}` in dependency `{$extern_crate}`
+    .help = the `{$flag_name_prefixed}` flag modifies the ABI so Rust crates compiled with different values of this flag cannot be used together safely
 metadata_incompatible_wasm_link =
     `wasm_import_module` is incompatible with other arguments in `#[link]` attributes
 
@@ -253,6 +272,9 @@ metadata_raw_dylib_no_nul =
 metadata_raw_dylib_only_windows =
     link kind `raw-dylib` is only supported on Windows targets
 
+metadata_raw_dylib_unsupported_abi =
+    ABI not supported by `#[link(kind = "raw-dylib")]` on this architecture
+
 metadata_renaming_no_link =
     renaming of the library `{$lib_name}` was specified, however this crate contains no `#[link(...)]` attributes referencing this library
 
@@ -299,12 +321,6 @@ metadata_unknown_link_modifier =
     unknown linking modifier `{$modifier}`, expected one of: bundle, verbatim, whole-archive, as-needed
 
 metadata_unknown_target_modifier_unsafe_allowed = unknown target modifier `{$flag_name}`, requested by `-Cunsafe-allow-abi-mismatch={$flag_name}`
-
-metadata_unsupported_abi =
-    ABI not supported by `#[link(kind = "raw-dylib")]` on this architecture
-
-metadata_unsupported_abi_i686 =
-    ABI not supported by `#[link(kind = "raw-dylib")]` on i686
 
 metadata_wasm_c_abi =
     older versions of the `wasm-bindgen` crate are incompatible with current versions of Rust; please update to `wasm-bindgen` v0.2.88

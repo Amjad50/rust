@@ -34,7 +34,7 @@ extern crate thin_vec;
 extern crate rustc_driver;
 
 use parser::parse_expr;
-use rustc_ast::mut_visit::{visit_clobber, MutVisitor};
+use rustc_ast::mut_visit::MutVisitor;
 use rustc_ast::ptr::P;
 use rustc_ast::*;
 use rustc_ast_pretty::pprust;
@@ -114,7 +114,6 @@ fn iter_exprs(depth: usize, f: &mut dyn FnMut(P<Expr>)) {
                     rules: BlockCheckMode::Default,
                     span: DUMMY_SP,
                     tokens: None,
-                    could_be_bare_literal: false,
                 });
                 iter_exprs(depth - 1, &mut |e| g(ExprKind::If(e, block.clone(), None)));
             }
@@ -188,9 +187,9 @@ fn iter_exprs(depth: usize, f: &mut dyn FnMut(P<Expr>)) {
 struct RemoveParens;
 
 impl MutVisitor for RemoveParens {
-    fn visit_expr(&mut self, e: &mut P<Expr>) {
+    fn visit_expr(&mut self, e: &mut Expr) {
         match e.kind.clone() {
-            ExprKind::Paren(inner) => *e = inner,
+            ExprKind::Paren(inner) => *e = *inner,
             _ => {}
         };
         mut_visit::walk_expr(self, e);
@@ -201,17 +200,11 @@ impl MutVisitor for RemoveParens {
 struct AddParens;
 
 impl MutVisitor for AddParens {
-    fn visit_expr(&mut self, e: &mut P<Expr>) {
+    fn visit_expr(&mut self, e: &mut Expr) {
         mut_visit::walk_expr(self, e);
-        visit_clobber(e, |e| {
-            P(Expr {
-                id: DUMMY_NODE_ID,
-                kind: ExprKind::Paren(e),
-                span: DUMMY_SP,
-                attrs: AttrVec::new(),
-                tokens: None,
-            })
-        });
+        let expr = std::mem::replace(e, Expr::dummy());
+
+        e.kind = ExprKind::Paren(P(expr));
     }
 }
 

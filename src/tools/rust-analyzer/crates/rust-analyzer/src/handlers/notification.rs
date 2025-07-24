@@ -3,6 +3,7 @@
 
 use std::ops::{Deref, Not as _};
 
+use ide_db::base_db::salsa::Cancelled;
 use itertools::Itertools;
 use lsp_types::{
     CancelParams, DidChangeConfigurationParams, DidChangeTextDocumentParams,
@@ -238,7 +239,7 @@ pub(crate) fn handle_did_change_configuration(
                         let (config, e, _) = config.apply_change(change);
                         this.config_errors = e.is_empty().not().then_some(e);
 
-                        // Client config changes neccesitates .update_config method to be called.
+                        // Client config changes necessitates .update_config method to be called.
                         this.update_configuration(config);
                     }
                 }
@@ -305,10 +306,10 @@ fn run_flycheck(state: &mut GlobalState, vfs_path: VfsPath) -> bool {
         let invocation_strategy_once = state.config.flycheck(None).invocation_strategy_once();
         let may_flycheck_workspace = state.config.flycheck_workspace(None);
         let mut updated = false;
-        let task = move || -> std::result::Result<(), ide::Cancelled> {
+        let task = move || -> std::result::Result<(), Cancelled> {
             if invocation_strategy_once {
                 let saved_file = vfs_path.as_path().map(|p| p.to_owned());
-                world.flycheck[0].restart_workspace(saved_file.clone());
+                world.flycheck[0].restart_workspace(saved_file);
             }
 
             let target = TargetSpec::for_file(&world, file_id)?.and_then(|it| {

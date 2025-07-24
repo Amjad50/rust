@@ -14,7 +14,7 @@ use tracing::{debug, instrument};
 
 use self::CombineMapType::*;
 use self::UndoLog::*;
-use super::{MiscVariable, RegionVariableOrigin, Rollback, SubregionOrigin};
+use super::{RegionVariableOrigin, Rollback, SubregionOrigin};
 use crate::infer::snapshot::undo_log::{InferCtxtUndoLogs, Snapshot};
 use crate::infer::unify_key::{RegionVariableValue, RegionVidKey};
 
@@ -463,7 +463,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         // cannot add constraints once regions are resolved
         debug!("origin = {:#?}", origin);
 
-        match (*sub, *sup) {
+        match (sub.kind(), sup.kind()) {
             (ReBound(..), _) | (_, ReBound(..)) => {
                 span_bug!(origin.span(), "cannot relate bound region: {:?} <= {:?}", sub, sup);
             }
@@ -580,7 +580,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         let a_universe = self.universe(a);
         let b_universe = self.universe(b);
         let c_universe = cmp::max(a_universe, b_universe);
-        let c = self.new_region_var(c_universe, MiscVariable(origin.span()));
+        let c = self.new_region_var(c_universe, RegionVariableOrigin::Misc(origin.span()));
         self.combine_map(t).insert(vars, c);
         self.undo_log.push(AddCombination(t, vars));
         let new_r = ty::Region::new_var(tcx, c);
@@ -595,7 +595,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     }
 
     pub fn universe(&mut self, region: Region<'tcx>) -> ty::UniverseIndex {
-        match *region {
+        match region.kind() {
             ty::ReStatic
             | ty::ReErased
             | ty::ReLateParam(..)
@@ -618,9 +618,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
             RegionVid::from(value_count)..RegionVid::from(self.storage.unification_table.len());
         (
             range.clone(),
-            (range.start.index()..range.end.index())
-                .map(|index| self.storage.var_infos[ty::RegionVid::from(index)].origin)
-                .collect(),
+            (range.start..range.end).map(|index| self.storage.var_infos[index].origin).collect(),
         )
     }
 
@@ -657,7 +655,7 @@ impl<'tcx> fmt::Display for GenericKind<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             GenericKind::Param(ref p) => write!(f, "{p}"),
-            GenericKind::Placeholder(ref p) => write!(f, "{p:?}"),
+            GenericKind::Placeholder(ref p) => write!(f, "{p}"),
             GenericKind::Alias(ref p) => write!(f, "{p}"),
         }
     }

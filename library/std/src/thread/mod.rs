@@ -166,7 +166,7 @@ use crate::mem::{self, ManuallyDrop, forget};
 use crate::num::NonZero;
 use crate::pin::Pin;
 use crate::sync::Arc;
-use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{Atomic, AtomicUsize, Ordering};
 use crate::sys::sync::Parker;
 use crate::sys::thread as imp;
 use crate::sys_common::{AsInner, IntoInner};
@@ -481,7 +481,7 @@ impl Builder {
         let Builder { name, stack_size, no_hooks } = self;
 
         let stack_size = stack_size.unwrap_or_else(|| {
-            static MIN: AtomicUsize = AtomicUsize::new(0);
+            static MIN: Atomic<usize> = AtomicUsize::new(0);
 
             match MIN.load(Ordering::Relaxed) {
                 0 => {}
@@ -897,8 +897,31 @@ pub fn sleep(dur: Duration) {
 ///
 /// # Platform-specific behavior
 ///
-/// This function uses [`sleep`] internally, see its platform-specific behavior.
+/// In most cases this function will call an OS specific function. Where that
+/// is not supported [`sleep`] is used. Those platforms are referred to as other
+/// in the table below.
 ///
+/// # Underlying System calls
+///
+/// The following system calls are [currently] being used:
+///
+/// |  Platform |               System call                                            |
+/// |-----------|----------------------------------------------------------------------|
+/// | Linux     | [clock_nanosleep] (Monotonic clock)                                  |
+/// | BSD except OpenBSD | [clock_nanosleep] (Monotonic Clock)]                        |
+/// | Android   | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Solaris   | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Illumos   | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Dragonfly | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Hurd      | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Fuchsia   | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Vxworks   | [clock_nanosleep] (Monotonic Clock)]                                 |
+/// | Other     | `sleep_until` uses [`sleep`] and does not issue a syscall itself     |
+///
+/// [currently]: crate::io#platform-specific-behavior
+/// [clock_nanosleep]: https://linux.die.net/man/3/clock_nanosleep
+///
+/// **Disclaimer:** These system calls might change over time.
 ///
 /// # Examples
 ///
@@ -923,9 +946,9 @@ pub fn sleep(dur: Duration) {
 /// }
 /// ```
 ///
-/// A slow api we must not call too fast and which takes a few
+/// A slow API we must not call too fast and which takes a few
 /// tries before succeeding. By using `sleep_until` the time the
-/// api call takes does not influence when we retry or when we give up
+/// API call takes does not influence when we retry or when we give up
 ///
 /// ```no_run
 /// #![feature(thread_sleep_until)]
@@ -960,11 +983,7 @@ pub fn sleep(dur: Duration) {
 /// ```
 #[unstable(feature = "thread_sleep_until", issue = "113752")]
 pub fn sleep_until(deadline: Instant) {
-    let now = Instant::now();
-
-    if let Some(delay) = deadline.checked_duration_since(now) {
-        sleep(delay);
-    }
+    imp::Thread::sleep_until(deadline)
 }
 
 /// Used to ensure that `park` and `park_timeout` do not unwind, as that can
@@ -1195,9 +1214,9 @@ impl ThreadId {
 
         cfg_if::cfg_if! {
             if #[cfg(target_has_atomic = "64")] {
-                use crate::sync::atomic::AtomicU64;
+                use crate::sync::atomic::{Atomic, AtomicU64};
 
-                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                static COUNTER: Atomic<u64> = AtomicU64::new(0);
 
                 let mut last = COUNTER.load(Ordering::Relaxed);
                 loop {
@@ -1302,10 +1321,10 @@ pub(crate) mod main_thread {
     cfg_if::cfg_if! {
         if #[cfg(target_has_atomic = "64")] {
             use super::ThreadId;
-            use crate::sync::atomic::AtomicU64;
+            use crate::sync::atomic::{Atomic, AtomicU64};
             use crate::sync::atomic::Ordering::Relaxed;
 
-            static MAIN: AtomicU64 = AtomicU64::new(0);
+            static MAIN: Atomic<u64> = AtomicU64::new(0);
 
             pub(super) fn get() -> Option<ThreadId> {
                 ThreadId::from_u64(MAIN.load(Relaxed))
@@ -1319,10 +1338,10 @@ pub(crate) mod main_thread {
         } else {
             use super::ThreadId;
             use crate::mem::MaybeUninit;
-            use crate::sync::atomic::AtomicBool;
+            use crate::sync::atomic::{Atomic, AtomicBool};
             use crate::sync::atomic::Ordering::{Acquire, Release};
 
-            static INIT: AtomicBool = AtomicBool::new(false);
+            static INIT: Atomic<bool> = AtomicBool::new(false);
             static mut MAIN: MaybeUninit<ThreadId> = MaybeUninit::uninit();
 
             pub(super) fn get() -> Option<ThreadId> {
@@ -1676,6 +1695,7 @@ impl fmt::Debug for Thread {
 /// [`Result`]: crate::result::Result
 /// [`std::panic::resume_unwind`]: crate::panic::resume_unwind
 #[stable(feature = "rust1", since = "1.0.0")]
+#[doc(search_unbox)]
 pub type Result<T> = crate::result::Result<T, Box<dyn Any + Send + 'static>>;
 
 // This packet is used to communicate the return value between the spawned

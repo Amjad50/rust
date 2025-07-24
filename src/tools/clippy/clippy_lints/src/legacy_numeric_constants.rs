@@ -49,9 +49,11 @@ impl<'tcx> LateLintPass<'tcx> for LegacyNumericConstants {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         // Integer modules are "TBD" deprecated, and the contents are too,
         // so lint on the `use` statement directly.
-        if let ItemKind::Use(path, kind @ (UseKind::Single | UseKind::Glob)) = item.kind
+        if let ItemKind::Use(path, kind @ (UseKind::Single(_) | UseKind::Glob)) = item.kind
             && !item.span.in_external_macro(cx.sess().source_map())
-            && let Some(def_id) = path.res[0].opt_def_id()
+            // use `present_items` because it could be in either type_ns or value_ns
+            && let Some(res) = path.res.present_items().next()
+            && let Some(def_id) = res.opt_def_id()
             && self.msrv.meets(cx, msrvs::NUMERIC_ASSOCIATED_CONSTANTS)
         {
             let module = if is_integer_module(cx, def_id) {
@@ -72,7 +74,9 @@ impl<'tcx> LateLintPass<'tcx> for LegacyNumericConstants {
                     "importing a legacy numeric constant"
                 },
                 |diag| {
-                    if item.ident.name == kw::Underscore {
+                    if let UseKind::Single(ident) = kind
+                        && ident.name == kw::Underscore
+                    {
                         diag.help("remove this import");
                         return;
                     }

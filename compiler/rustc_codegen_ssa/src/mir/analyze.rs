@@ -171,8 +171,7 @@ impl<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> Visitor<'tcx> for LocalAnalyzer
         if let Some(local) = place.as_local() {
             self.define(local, DefLocation::Assignment(location));
             if self.locals[local] != LocalKind::Memory {
-                let decl_span = self.fx.mir.local_decls[local].source_info.span;
-                if !self.fx.rvalue_creates_operand(rvalue, decl_span) {
+                if !self.fx.rvalue_creates_operand(rvalue) {
                     self.locals[local] = LocalKind::Memory;
                 }
             }
@@ -205,7 +204,12 @@ impl<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> Visitor<'tcx> for LocalAnalyzer
             | PlaceContext::MutatingUse(MutatingUseContext::Retag) => {}
 
             PlaceContext::NonMutatingUse(
-                NonMutatingUseContext::Copy | NonMutatingUseContext::Move,
+                NonMutatingUseContext::Copy
+                | NonMutatingUseContext::Move
+                // Inspect covers things like `PtrMetadata` and `Discriminant`
+                // which we can treat similar to `Copy` use for the purpose of
+                // whether we can use SSA variables for things.
+                | NonMutatingUseContext::Inspect,
             ) => match &mut self.locals[local] {
                 LocalKind::ZST => {}
                 LocalKind::Memory => {}
@@ -229,8 +233,7 @@ impl<'a, 'b, 'tcx, Bx: BuilderMethods<'b, 'tcx>> Visitor<'tcx> for LocalAnalyzer
                 | MutatingUseContext::Projection,
             )
             | PlaceContext::NonMutatingUse(
-                NonMutatingUseContext::Inspect
-                | NonMutatingUseContext::SharedBorrow
+                NonMutatingUseContext::SharedBorrow
                 | NonMutatingUseContext::FakeBorrow
                 | NonMutatingUseContext::RawBorrow
                 | NonMutatingUseContext::Projection,

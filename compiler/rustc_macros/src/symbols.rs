@@ -142,13 +142,13 @@ pub(super) fn symbols(input: TokenStream) -> TokenStream {
     output
 }
 
-struct Preinterned {
+struct Predefined {
     idx: u32,
     span_of_name: Span,
 }
 
 struct Entries {
-    map: HashMap<String, Preinterned>,
+    map: HashMap<String, Predefined>,
 }
 
 impl Entries {
@@ -163,7 +163,7 @@ impl Entries {
             prev.idx
         } else {
             let idx = self.len();
-            self.map.insert(s.to_string(), Preinterned { idx, span_of_name: span });
+            self.map.insert(s.to_string(), Predefined { idx, span_of_name: span });
             idx
         }
     }
@@ -190,17 +190,6 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
     let mut symbols_stream = quote! {};
     let mut prefill_stream = quote! {};
     let mut entries = Entries::with_capacity(input.keywords.len() + input.symbols.len() + 10);
-    let mut prev_key: Option<(Span, String)> = None;
-
-    let mut check_order = |span: Span, s: &str, errors: &mut Errors| {
-        if let Some((prev_span, ref prev_str)) = prev_key {
-            if s < prev_str {
-                errors.error(span, format!("Symbol `{s}` must precede `{prev_str}`"));
-                errors.error(prev_span, format!("location of previous symbol `{prev_str}`"));
-            }
-        }
-        prev_key = Some((span, s.to_string()));
-    };
 
     // Generate the listed keywords.
     for keyword in input.keywords.iter() {
@@ -219,7 +208,6 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
     // Generate the listed symbols.
     for symbol in input.symbols.iter() {
         let name = &symbol.name;
-        check_order(symbol.name.span(), &name.to_string(), &mut errors);
 
         let value = match &symbol.value {
             Value::SameAsName => name.to_string(),
@@ -295,10 +283,14 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
     }
 
     let symbol_digits_base = entries.map["0"].idx;
-    let preinterned_symbols_count = entries.len();
+    let predefined_symbols_count = entries.len();
     let output = quote! {
         const SYMBOL_DIGITS_BASE: u32 = #symbol_digits_base;
-        const PREINTERNED_SYMBOLS_COUNT: u32 = #preinterned_symbols_count;
+
+        /// The number of predefined symbols; this is the first index for
+        /// extra pre-interned symbols in an Interner created via
+        /// [`Interner::with_extra_symbols`].
+        pub const PREDEFINED_SYMBOLS_COUNT: u32 = #predefined_symbols_count;
 
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
@@ -315,10 +307,13 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
         }
 
         impl Interner {
-            pub(crate) fn fresh() -> Self {
-                Interner::prefill(&[
-                    #prefill_stream
-                ])
+            /// Creates an `Interner` with the predefined symbols from the `symbols!` macro and
+            /// any extra symbols provided by external drivers such as Clippy
+            pub(crate) fn with_extra_symbols(extra_symbols: &[&'static str]) -> Self {
+                Interner::prefill(
+                    &[#prefill_stream],
+                    extra_symbols,
+                )
             }
         }
     };

@@ -67,11 +67,11 @@ impl ProvenanceMap {
 }
 
 impl<Prov: Provenance> ProvenanceMap<Prov> {
-    fn adjusted_range(range: AllocRange, cx: &impl HasDataLayout) -> Range<Size> {
+    fn adjusted_range_ptrs(range: AllocRange, cx: &impl HasDataLayout) -> Range<Size> {
         // We have to go back `pointer_size - 1` bytes, as that one would still overlap with
         // the beginning of this range.
         let adjusted_start = Size::from_bytes(
-            range.start.bytes().saturating_sub(cx.data_layout().pointer_size.bytes() - 1),
+            range.start.bytes().saturating_sub(cx.data_layout().pointer_size().bytes() - 1),
         );
         adjusted_start..range.end()
     }
@@ -79,26 +79,21 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
     /// Returns all ptr-sized provenance in the given range.
     /// If the range has length 0, returns provenance that crosses the edge between `start-1` and
     /// `start`.
-    pub(super) fn range_get_ptrs(
+    pub(super) fn range_ptrs_get(
         &self,
         range: AllocRange,
         cx: &impl HasDataLayout,
     ) -> &[(Size, Prov)] {
-        self.ptrs.range(Self::adjusted_range(range, cx))
+        self.ptrs.range(Self::adjusted_range_ptrs(range, cx))
     }
 
-    /// `pm.range_get_ptrs_is_empty(r, cx)` == `pm.range_get_ptrs(r, cx).is_empty()`, but is
-    /// faster.
-    pub(super) fn range_get_ptrs_is_empty(
-        &self,
-        range: AllocRange,
-        cx: &impl HasDataLayout,
-    ) -> bool {
-        self.ptrs.range_is_empty(Self::adjusted_range(range, cx))
+    /// `pm.range_ptrs_is_empty(r, cx)` == `pm.range_ptrs_get(r, cx).is_empty()`, but is faster.
+    pub(super) fn range_ptrs_is_empty(&self, range: AllocRange, cx: &impl HasDataLayout) -> bool {
+        self.ptrs.range_is_empty(Self::adjusted_range_ptrs(range, cx))
     }
 
     /// Returns all byte-wise provenance in the given range.
-    fn range_get_bytes(&self, range: AllocRange) -> &[(Size, Prov)] {
+    fn range_bytes_get(&self, range: AllocRange) -> &[(Size, Prov)] {
         if let Some(bytes) = self.bytes.as_ref() {
             bytes.range(range.start..range.end())
         } else {
@@ -106,9 +101,14 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
         }
     }
 
+    /// Same as `range_bytes_get(range).is_empty()`, but faster.
+    fn range_bytes_is_empty(&self, range: AllocRange) -> bool {
+        self.bytes.as_ref().is_none_or(|bytes| bytes.range_is_empty(range.start..range.end()))
+    }
+
     /// Get the provenance of a single byte.
     pub fn get(&self, offset: Size, cx: &impl HasDataLayout) -> Option<Prov> {
-        let prov = self.range_get_ptrs(alloc_range(offset, Size::from_bytes(1)), cx);
+        let prov = self.range_ptrs_get(alloc_range(offset, Size::from_bytes(1)), cx);
         debug_assert!(prov.len() <= 1);
         if let Some(entry) = prov.first() {
             // If it overlaps with this byte, it is on this byte.
@@ -120,7 +120,7 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
         }
     }
 
-    /// Check if here is ptr-sized provenance at the given index.
+    /// Check if there is ptr-sized provenance at the given index.
     /// Does not mean anything for bytewise provenance! But can be useful as an optimization.
     pub fn get_ptr(&self, offset: Size) -> Option<Prov> {
         self.ptrs.get(&offset).copied()
@@ -132,7 +132,7 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
     /// limit access to provenance outside of the `Allocation` abstraction.
     ///
     pub fn range_empty(&self, range: AllocRange, cx: &impl HasDataLayout) -> bool {
-        self.range_get_ptrs_is_empty(range, cx) && self.range_get_bytes(range).is_empty()
+        self.range_ptrs_is_empty(range, cx) && self.range_bytes_is_empty(range)
     }
 
     /// Yields all the provenances stored in this map.
@@ -142,7 +142,7 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
     }
 
     pub fn insert_ptr(&mut self, offset: Size, prov: Prov, cx: &impl HasDataLayout) {
-        debug_assert!(self.range_empty(alloc_range(offset, cx.data_layout().pointer_size), cx));
+        debug_assert!(self.range_empty(alloc_range(offset, cx.data_layout().pointer_size()), cx));
         self.ptrs.insert(offset, prov);
     }
 
@@ -160,22 +160,21 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
             debug_assert!(self.bytes.is_none());
         }
 
+        let pointer_size = cx.data_layout().pointer_size();
+
         // For the ptr-sized part, find the first (inclusive) and last (exclusive) byte of
         // provenance that overlaps with the given range.
         let (first, last) = {
             // Find all provenance overlapping the given range.
-            if self.range_get_ptrs_is_empty(range, cx) {
+            if self.range_ptrs_is_empty(range, cx) {
                 // No provenance in this range, we are done. This is the common case.
                 return Ok(());
             }
 
             // This redoes some of the work of `range_get_ptrs_is_empty`, but this path is much
             // colder than the early return above, so it's worth it.
-            let provenance = self.range_get_ptrs(range, cx);
-            (
-                provenance.first().unwrap().0,
-                provenance.last().unwrap().0 + cx.data_layout().pointer_size,
-            )
+            let provenance = self.range_ptrs_get(range, cx);
+            (provenance.first().unwrap().0, provenance.last().unwrap().0 + pointer_size)
         };
 
         // We need to handle clearing the provenance from parts of a pointer.
@@ -192,7 +191,7 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
             }
         }
         if last > end {
-            let begin_of_last = last - cx.data_layout().pointer_size;
+            let begin_of_last = last - pointer_size;
             if !Prov::OFFSET_IS_ADDR {
                 // We can't split up the provenance into less than a pointer.
                 return Err(AllocError::OverwritePartialPointer(begin_of_last));
@@ -213,21 +212,37 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
         Ok(())
     }
 
-    /// Overwrites all provenance in the allocation with wildcard provenance.
+    /// Overwrites all provenance in the given range with wildcard provenance.
+    /// Pointers partially overwritten will have their provenances preserved
+    /// bytewise on their remaining bytes.
     ///
     /// Provided for usage in Miri and panics otherwise.
-    pub fn write_wildcards(&mut self, alloc_size: usize) {
+    pub fn write_wildcards(&mut self, cx: &impl HasDataLayout, range: AllocRange) {
         assert!(
             Prov::OFFSET_IS_ADDR,
             "writing wildcard provenance is not supported when `OFFSET_IS_ADDR` is false"
         );
         let wildcard = Prov::WILDCARD.unwrap();
 
-        // Remove all pointer provenances, then write wildcards into the whole byte range.
-        self.ptrs.clear();
-        let last = Size::from_bytes(alloc_size);
         let bytes = self.bytes.get_or_insert_with(Box::default);
-        for offset in Size::ZERO..last {
+
+        // Remove pointer provenances that overlap with the range, then readd the edge ones bytewise.
+        let ptr_range = Self::adjusted_range_ptrs(range, cx);
+        let ptrs = self.ptrs.range(ptr_range.clone());
+        if let Some((offset, prov)) = ptrs.first() {
+            for byte_ofs in *offset..range.start {
+                bytes.insert(byte_ofs, *prov);
+            }
+        }
+        if let Some((offset, prov)) = ptrs.last() {
+            for byte_ofs in range.end()..*offset + cx.data_layout().pointer_size() {
+                bytes.insert(byte_ofs, *prov);
+            }
+        }
+        self.ptrs.remove_range(ptr_range);
+
+        // Overwrite bytewise provenance.
+        for offset in range.start..range.end() {
             bytes.insert(offset, wildcard);
         }
     }
@@ -255,7 +270,7 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
             // shift offsets from source allocation to destination allocation
             (offset - src.start) + dest_offset // `Size` operations
         };
-        let ptr_size = cx.data_layout().pointer_size;
+        let ptr_size = cx.data_layout().pointer_size();
 
         // # Pointer-sized provenances
         // Get the provenances that are entirely within this range.
@@ -284,8 +299,8 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
         // This includes the existing bytewise provenance in the range, and ptr provenance
         // that overlaps with the begin/end of the range.
         let mut dest_bytes_box = None;
-        let begin_overlap = self.range_get_ptrs(alloc_range(src.start, Size::ZERO), cx).first();
-        let end_overlap = self.range_get_ptrs(alloc_range(src.end(), Size::ZERO), cx).first();
+        let begin_overlap = self.range_ptrs_get(alloc_range(src.start, Size::ZERO), cx).first();
+        let end_overlap = self.range_ptrs_get(alloc_range(src.end(), Size::ZERO), cx).first();
         if !Prov::OFFSET_IS_ADDR {
             // There can't be any bytewise provenance, and we cannot split up the begin/end overlap.
             if let Some(entry) = begin_overlap {
@@ -308,10 +323,10 @@ impl<Prov: Provenance> ProvenanceMap<Prov> {
             } else {
                 trace!("no start overlapping entry");
             }
+
             // Then the main part, bytewise provenance from `self.bytes`.
-            if let Some(all_bytes) = self.bytes.as_ref() {
-                bytes.extend(all_bytes.range(src.start..src.end()));
-            }
+            bytes.extend(self.range_bytes_get(src));
+
             // And finally possibly parts of a pointer at the end.
             if let Some(entry) = end_overlap {
                 trace!("end overlapping entry: {entry:?}");

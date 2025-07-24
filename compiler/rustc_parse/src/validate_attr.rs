@@ -3,9 +3,10 @@
 use rustc_ast::token::Delimiter;
 use rustc_ast::tokenstream::DelimSpan;
 use rustc_ast::{
-    self as ast, AttrArgs, Attribute, DelimArgs, MetaItem, MetaItemInner, MetaItemKind, Safety,
+    self as ast, AttrArgs, Attribute, DelimArgs, MetaItem, MetaItemInner, MetaItemKind, NodeId,
+    Path, Safety,
 };
-use rustc_errors::{Applicability, FatalError, PResult};
+use rustc_errors::{Applicability, DiagCtxtHandle, FatalError, PResult};
 use rustc_feature::{AttributeSafety, AttributeTemplate, BUILTIN_ATTRIBUTE_MAP, BuiltinAttribute};
 use rustc_session::errors::report_lit_error;
 use rustc_session::lint::BuiltinLintDiag;
@@ -15,20 +16,19 @@ use rustc_span::{Span, Symbol, sym};
 
 use crate::{errors, parse_in};
 
-pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
-    if attr.is_doc_comment() {
+pub fn check_attr(psess: &ParseSess, attr: &Attribute, id: NodeId) {
+    if attr.is_doc_comment() || attr.has_name(sym::cfg_trace) || attr.has_name(sym::cfg_attr_trace)
+    {
         return;
     }
 
-    let attr_info = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
-    let attr_item = attr.get_normal_item();
+    let builtin_attr_info = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
 
-    // All non-builtin attributes are considered safe
-    let safety = attr_info.map(|x| x.safety).unwrap_or(AttributeSafety::Normal);
-    check_attribute_safety(psess, safety, attr);
+    let builtin_attr_safety = builtin_attr_info.map(|x| x.safety);
+    check_attribute_safety(psess, builtin_attr_safety, attr, id);
 
     // Check input tokens for built-in and key-value attributes.
-    match attr_info {
+    match builtin_attr_info {
         // `rustc_dummy` doesn't have any restrictions specific to built-in attributes.
         Some(BuiltinAttribute { name, template, .. }) if *name != sym::rustc_dummy => {
             match parse_meta(psess, attr) {
@@ -42,6 +42,7 @@ pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
             }
         }
         _ => {
+            let attr_item = attr.get_normal_item();
             if let AttrArgs::Eq { .. } = attr_item.args {
                 // All key-value attributes are restricted to meta-item syntax.
                 match parse_meta(psess, attr) {
@@ -153,11 +154,23 @@ fn is_attr_template_compatible(template: &AttributeTemplate, meta: &ast::MetaIte
     }
 }
 
-pub fn check_attribute_safety(psess: &ParseSess, safety: AttributeSafety, attr: &Attribute) {
+pub fn check_attribute_safety(
+    psess: &ParseSess,
+    builtin_attr_safety: Option<AttributeSafety>,
+    attr: &Attribute,
+    id: NodeId,
+) {
     let attr_item = attr.get_normal_item();
+    match (builtin_attr_safety, attr_item.unsafety) {
+        // - Unsafe builtin attribute
+        // - User wrote `#[unsafe(..)]`, which is permitted on any edition
+        (Some(AttributeSafety::Unsafe { .. }), Safety::Unsafe(..)) => {
+            // OK
+        }
 
-    if safety == AttributeSafety::Unsafe {
-        if let ast::Safety::Default = attr_item.unsafety {
+        // - Unsafe builtin attribute
+        // - User did not write `#[unsafe(..)]`
+        (Some(AttributeSafety::Unsafe { unsafe_since }), Safety::Default) => {
             let path_span = attr_item.path.span;
 
             // If the `attr_item`'s span is not from a macro, then just suggest
@@ -166,7 +179,18 @@ pub fn check_attribute_safety(psess: &ParseSess, safety: AttributeSafety, attr: 
             // square bracket respectively.
             let diag_span = attr_item.span();
 
-            if attr.span.at_least_rust_2024() {
+            // Attributes can be safe in earlier editions, and become unsafe in later ones.
+            //
+            // Use the span of the attribute's name to determine the edition: the span of the
+            // attribute as a whole may be inaccurate if it was emitted by a macro.
+            //
+            // See https://github.com/rust-lang/rust/issues/142182.
+            let emit_error = match unsafe_since {
+                None => true,
+                Some(unsafe_since) => path_span.edition() >= unsafe_since,
+            };
+
+            if emit_error {
                 psess.dcx().emit_err(errors::UnsafeAttrOutsideUnsafe {
                     span: path_span,
                     suggestion: errors::UnsafeAttrOutsideUnsafeSuggestion {
@@ -178,7 +202,7 @@ pub fn check_attribute_safety(psess: &ParseSess, safety: AttributeSafety, attr: 
                 psess.buffer_lint(
                     UNSAFE_ATTR_OUTSIDE_UNSAFE,
                     path_span,
-                    ast::CRATE_NODE_ID,
+                    id,
                     BuiltinLintDiag::UnsafeAttrOutsideUnsafe {
                         attribute_name_span: path_span,
                         sugg_spans: (diag_span.shrink_to_lo(), diag_span.shrink_to_hi()),
@@ -186,24 +210,49 @@ pub fn check_attribute_safety(psess: &ParseSess, safety: AttributeSafety, attr: 
                 );
             }
         }
-    } else if let Safety::Unsafe(unsafe_span) = attr_item.unsafety {
-        psess.dcx().emit_err(errors::InvalidAttrUnsafe {
-            span: unsafe_span,
-            name: attr_item.path.clone(),
-        });
+
+        // - Normal builtin attribute, or any non-builtin attribute
+        // - All non-builtin attributes are currently considered safe; writing `#[unsafe(..)]` is
+        //   not permitted on non-builtin attributes or normal builtin attributes
+        (Some(AttributeSafety::Normal) | None, Safety::Unsafe(unsafe_span)) => {
+            psess.dcx().emit_err(errors::InvalidAttrUnsafe {
+                span: unsafe_span,
+                name: attr_item.path.clone(),
+            });
+        }
+
+        // - Normal builtin attribute
+        // - No explicit `#[unsafe(..)]` written.
+        (Some(AttributeSafety::Normal), Safety::Default) => {
+            // OK
+        }
+
+        // - Non-builtin attribute
+        // - No explicit `#[unsafe(..)]` written.
+        (None, Safety::Default) => {
+            // OK
+        }
+
+        (
+            Some(AttributeSafety::Unsafe { .. } | AttributeSafety::Normal) | None,
+            Safety::Safe(..),
+        ) => {
+            psess.dcx().span_delayed_bug(
+                attr_item.span(),
+                "`check_attribute_safety` does not expect `Safety::Safe` on attributes",
+            );
+        }
     }
 }
 
 // Called by `check_builtin_meta_item` and code that manually denies
 // `unsafe(...)` in `cfg`
-pub fn deny_builtin_meta_unsafety(psess: &ParseSess, meta: &MetaItem) {
+pub fn deny_builtin_meta_unsafety(diag: DiagCtxtHandle<'_>, unsafety: Safety, name: &Path) {
     // This only supports denying unsafety right now - making builtin attributes
     // support unsafety will requite us to thread the actual `Attribute` through
     // for the nice diagnostics.
-    if let Safety::Unsafe(unsafe_span) = meta.unsafety {
-        psess
-            .dcx()
-            .emit_err(errors::InvalidAttrUnsafe { span: unsafe_span, name: meta.path.clone() });
+    if let Safety::Unsafe(unsafe_span) = unsafety {
+        diag.emit_err(errors::InvalidAttrUnsafe { span: unsafe_span, name: name.clone() });
     }
 }
 
@@ -215,16 +264,73 @@ pub fn check_builtin_meta_item(
     template: AttributeTemplate,
     deny_unsafety: bool,
 ) {
-    // Some special attributes like `cfg` must be checked
-    // before the generic check, so we skip them here.
-    let should_skip = |name| name == sym::cfg;
-
-    if !should_skip(name) && !is_attr_template_compatible(&template, &meta.kind) {
+    if !is_attr_template_compatible(&template, &meta.kind) {
+        // attrs with new parsers are locally validated so excluded here
+        if matches!(
+            name,
+            sym::inline
+                | sym::export_stable
+                | sym::ffi_const
+                | sym::ffi_pure
+                | sym::rustc_std_internal_symbol
+                | sym::may_dangle
+                | sym::rustc_as_ptr
+                | sym::rustc_pub_transparent
+                | sym::rustc_const_stable_indirect
+                | sym::rustc_force_inline
+                | sym::rustc_confusables
+                | sym::rustc_skip_during_method_dispatch
+                | sym::rustc_pass_by_value
+                | sym::rustc_deny_explicit_impl
+                | sym::rustc_do_not_implement_via_object
+                | sym::rustc_coinductive
+                | sym::const_trait
+                | sym::rustc_specialization_trait
+                | sym::rustc_unsafe_specialization_marker
+                | sym::rustc_allow_incoherent_impl
+                | sym::rustc_coherence_is_core
+                | sym::marker
+                | sym::fundamental
+                | sym::rustc_paren_sugar
+                | sym::type_const
+                | sym::repr
+                // FIXME(#82232, #143834): temporarily renamed to mitigate `#[align]` nameres
+                // ambiguity
+                | sym::rustc_align
+                | sym::deprecated
+                | sym::optimize
+                | sym::pointee
+                | sym::cold
+                | sym::target_feature
+                | sym::rustc_allow_const_fn_unstable
+                | sym::macro_use
+                | sym::macro_escape
+                | sym::naked
+                | sym::no_mangle
+                | sym::non_exhaustive
+                | sym::omit_gdb_pretty_printer_section
+                | sym::path
+                | sym::ignore
+                | sym::must_use
+                | sym::track_caller
+                | sym::link_name
+                | sym::link_ordinal
+                | sym::export_name
+                | sym::rustc_macro_transparency
+                | sym::link_section
+                | sym::rustc_layout_scalar_valid_range_start
+                | sym::rustc_layout_scalar_valid_range_end
+                | sym::no_implicit_prelude
+                | sym::automatically_derived
+                | sym::coverage
+        ) {
+            return;
+        }
         emit_malformed_attribute(psess, style, meta.span, name, template);
     }
 
     if deny_unsafety {
-        deny_builtin_meta_unsafety(psess, meta);
+        deny_builtin_meta_unsafety(psess.dcx(), meta.unsafety, &meta.path);
     }
 }
 
@@ -237,9 +343,7 @@ fn emit_malformed_attribute(
 ) {
     // Some of previously accepted forms were used in practice,
     // report them as warnings for now.
-    let should_warn = |name| {
-        matches!(name, sym::doc | sym::ignore | sym::inline | sym::link | sym::test | sym::bench)
-    };
+    let should_warn = |name| matches!(name, sym::doc | sym::link | sym::test | sym::bench);
 
     let error_msg = format!("malformed `{name}` attribute input");
     let mut suggestions = vec![];

@@ -48,7 +48,7 @@ monomorphize_large_assignments =
     .note = The current maximum size is {$limit}, but it can be customized with the move_size_limit attribute: `#![move_size_limit = "..."]`
 
 monomorphize_no_optimized_mir =
-    missing optimized MIR for an item in the crate `{$crate_name}`
+    missing optimized MIR for `{$instance}` in the crate `{$crate_name}`
     .note = missing optimized MIR for this item (was the crate `{$crate_name}` compiled with `--emit=metadata`?)
 
 monomorphize_recursion_limit =
@@ -59,8 +59,5 @@ monomorphize_start_not_found = using `fn main` requires the standard library
     .help = use `#![no_main]` to bypass the Rust generated entrypoint and declare a platform specific entrypoint yourself, usually with `#[no_mangle]`
 
 monomorphize_symbol_already_defined = symbol `{$symbol}` is already defined
-
-monomorphize_unknown_cgu_collection_mode =
-    unknown codegen-item collection mode '{$mode}', falling back to 'lazy' mode
 
 monomorphize_written_to_path = the full type name has been written to '{$path}'

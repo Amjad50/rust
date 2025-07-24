@@ -3,6 +3,7 @@ use std::hash::Hash;
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir::def_id::DefIndex;
 use rustc_index::{Idx, IndexVec};
+use rustc_span::Symbol;
 
 use crate::ty;
 
@@ -20,6 +21,10 @@ impl<T: ParameterizedOverTcx> ParameterizedOverTcx for Option<T> {
 
 impl<A: ParameterizedOverTcx, B: ParameterizedOverTcx> ParameterizedOverTcx for (A, B) {
     type Value<'tcx> = (A::Value<'tcx>, B::Value<'tcx>);
+}
+
+impl<T: ParameterizedOverTcx> ParameterizedOverTcx for Vec<T> {
+    type Value<'tcx> = Vec<T::Value<'tcx>>;
 }
 
 impl<I: Idx + 'static, T: ParameterizedOverTcx> ParameterizedOverTcx for IndexVec<I, T> {
@@ -64,9 +69,12 @@ trivially_parameterized_over_tcx! {
     crate::middle::lib_features::FeatureStability,
     crate::middle::resolve_bound_vars::ObjectLifetimeDefault,
     crate::mir::ConstQualifs,
+    ty::AsyncDestructor,
     ty::AssocItemContainer,
     ty::Asyncness,
+    ty::AnonConstKind,
     ty::DeducedParamAttrs,
+    ty::Destructor,
     ty::Generics,
     ty::ImplPolarity,
     ty::ImplTraitInTraitData,
@@ -79,11 +87,11 @@ trivially_parameterized_over_tcx! {
     ty::IntrinsicDef,
     rustc_ast::Attribute,
     rustc_ast::DelimArgs,
-    rustc_ast::expand::StrippedCfgItem<rustc_hir::def_id::DefIndex>,
-    rustc_attr_parsing::ConstStability,
-    rustc_attr_parsing::DefaultBodyStability,
-    rustc_attr_parsing::Deprecation,
-    rustc_attr_parsing::Stability,
+    rustc_attr_data_structures::StrippedCfgItem<rustc_hir::def_id::DefIndex>,
+    rustc_attr_data_structures::ConstStability,
+    rustc_attr_data_structures::DefaultBodyStability,
+    rustc_attr_data_structures::Deprecation,
+    rustc_attr_data_structures::Stability,
     rustc_hir::Constness,
     rustc_hir::Defaultness,
     rustc_hir::Safety,
@@ -96,6 +104,7 @@ trivially_parameterized_over_tcx! {
     rustc_hir::def_id::DefIndex,
     rustc_hir::definitions::DefKey,
     rustc_hir::OpaqueTyOrigin<rustc_hir::def_id::DefId>,
+    rustc_hir::PreciseCapturingArgKind<Symbol, Symbol>,
     rustc_index::bit_set::DenseBitSet<u32>,
     rustc_index::bit_set::FiniteBitSet<u32>,
     rustc_session::cstore::ForeignModule,
@@ -109,7 +118,7 @@ trivially_parameterized_over_tcx! {
     rustc_span::Span,
     rustc_span::Symbol,
     rustc_span::def_id::DefPathHash,
-    rustc_span::hygiene::SyntaxContextData,
+    rustc_span::hygiene::SyntaxContextKey,
     rustc_span::Ident,
     rustc_type_ir::Variance,
     rustc_hir::Attribute,

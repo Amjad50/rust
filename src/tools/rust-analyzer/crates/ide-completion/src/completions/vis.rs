@@ -1,14 +1,14 @@
 //! Completion for visibility specifiers.
 
 use crate::{
-    context::{CompletionContext, PathCompletionCtx, Qualified},
     Completions,
+    context::{CompletionContext, PathCompletionCtx, Qualified},
 };
 
 pub(crate) fn complete_vis_path(
     acc: &mut Completions,
     ctx: &CompletionContext<'_>,
-    path_ctx @ PathCompletionCtx { qualified, .. }: &PathCompletionCtx,
+    path_ctx @ PathCompletionCtx { qualified, .. }: &PathCompletionCtx<'_>,
     &has_in_token: &bool,
 ) {
     match qualified {

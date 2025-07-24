@@ -22,11 +22,15 @@ use crate::fmt;
 ///
 /// Initialization is dynamically performed on the first call to a setter (e.g.
 /// [`with`]) within a thread, and values that implement [`Drop`] get
-/// destructed when a thread exits. Some caveats apply, which are explained below.
+/// destructed when a thread exits. Some platform-specific caveats apply, which
+/// are explained below.
+/// Note that, should the destructor panics, the whole process will be [aborted].
 ///
 /// A `LocalKey`'s initializer cannot recursively depend on itself. Using a
 /// `LocalKey` in this way may cause panics, aborts or infinite recursion on
 /// the first call to `with`.
+///
+/// [aborted]: crate::process::abort
 ///
 /// # Single-thread Synchronization
 ///
@@ -464,6 +468,29 @@ impl<T: 'static> LocalKey<Cell<T>> {
     #[rustc_confusables("swap")]
     pub fn replace(&'static self, value: T) -> T {
         self.with(|cell| cell.replace(value))
+    }
+
+    /// Updates the contained value using a function.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(local_key_cell_update)]
+    /// use std::cell::Cell;
+    ///
+    /// thread_local! {
+    ///     static X: Cell<i32> = const { Cell::new(5) };
+    /// }
+    ///
+    /// X.update(|x| x + 1);
+    /// assert_eq!(X.get(), 6);
+    /// ```
+    #[unstable(feature = "local_key_cell_update", issue = "143989")]
+    pub fn update(&'static self, f: impl FnOnce(T) -> T)
+    where
+        T: Copy,
+    {
+        self.with(|cell| cell.update(f))
     }
 }
 

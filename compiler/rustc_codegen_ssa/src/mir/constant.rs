@@ -20,7 +20,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         OperandRef::from_const(bx, val, ty)
     }
 
-    pub fn eval_mir_constant(&self, constant: &mir::ConstOperand<'tcx>) -> mir::ConstValue<'tcx> {
+    pub fn eval_mir_constant(&self, constant: &mir::ConstOperand<'tcx>) -> mir::ConstValue {
         // `MirUsedCollector` visited all required_consts before codegen began, so if we got here
         // there can be no more constants that fail to evaluate.
         self.monomorphize(constant.const_)
@@ -43,7 +43,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::Const::Ty(_, c) => match c.kind() {
                 // A constant that came from a const generic but was then used as an argument to
                 // old-style simd_shuffle (passing as argument instead of as a generic param).
-                rustc_type_ir::ConstKind::Value(cv) => return Ok(Ok(cv.valtree)),
+                ty::ConstKind::Value(cv) => return Ok(Ok(cv.valtree)),
                 other => span_bug!(constant.span, "{other:#?}"),
             },
             // We should never encounter `Const::Val` unless MIR opts (like const prop) evaluate

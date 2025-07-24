@@ -57,7 +57,7 @@ impl MultiItemModifier for BuiltinDerive {
         let mut items = Vec::new();
         match item {
             Annotatable::Stmt(stmt) => {
-                if let ast::StmtKind::Item(item) = stmt.into_inner().kind {
+                if let ast::StmtKind::Item(item) = stmt.kind {
                     (self.0)(
                         ecx,
                         span,
@@ -110,7 +110,6 @@ fn call_unreachable(cx: &ExtCtxt<'_>, span: Span) -> P<ast::Expr> {
         rules: ast::BlockCheckMode::Unsafe(ast::CompilerGenerated),
         span,
         tokens: None,
-        could_be_bare_literal: false,
     }))
 }
 

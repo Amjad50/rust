@@ -1,5 +1,9 @@
-hir_analysis_ambiguous_assoc_item = ambiguous associated {$assoc_kind} `{$assoc_name}` in bounds of `{$qself}`
-    .label = ambiguous associated {$assoc_kind} `{$assoc_name}`
+hir_analysis_abi_custom_clothed_function =
+    items with the "custom" ABI can only be declared externally or defined via naked functions
+    .suggestion = convert this to an `#[unsafe(naked)]` function
+
+hir_analysis_ambiguous_assoc_item = ambiguous associated {$assoc_kind} `{$assoc_ident}` in bounds of `{$qself}`
+    .label = ambiguous associated {$assoc_kind} `{$assoc_ident}`
 
 hir_analysis_ambiguous_lifetime_bound =
     ambiguous lifetime bound, explicit lifetime bound required
@@ -12,13 +16,13 @@ hir_analysis_assoc_item_is_private = {$kind} `{$name}` is private
     .label = private {$kind}
     .defined_here_label = the {$kind} is defined here
 
-hir_analysis_assoc_item_not_found = associated {$assoc_kind} `{$assoc_name}` not found for `{$qself}`
+hir_analysis_assoc_item_not_found = associated {$assoc_kind} `{$assoc_ident}` not found for `{$qself}`
 
 hir_analysis_assoc_item_not_found_found_in_other_trait_label = there is {$identically_named ->
         [true] an
         *[false] a similarly named
     } associated {$assoc_kind} `{$suggested_name}` in the trait `{$trait_name}`
-hir_analysis_assoc_item_not_found_label = associated {$assoc_kind} `{$assoc_name}` not found
+hir_analysis_assoc_item_not_found_label = associated {$assoc_kind} `{$assoc_ident}` not found
 hir_analysis_assoc_item_not_found_other_sugg = `{$qself}` has the following associated {$assoc_kind}
 hir_analysis_assoc_item_not_found_similar_in_other_trait_qpath_sugg =
     consider fully qualifying{$identically_named ->
@@ -37,10 +41,13 @@ hir_analysis_assoc_kind_mismatch = expected {$expected}, found {$got}
 
 hir_analysis_assoc_kind_mismatch_wrap_in_braces_sugg = consider adding braces here
 
-hir_analysis_associated_type_trait_uninferred_generic_params = cannot use the associated {$what} of a trait with uninferred generic parameters
+hir_analysis_associated_type_trait_uninferred_generic_params = cannot use the {$what} of a trait with uninferred generic parameters
     .suggestion = use a fully qualified path with inferred lifetimes
 
 hir_analysis_associated_type_trait_uninferred_generic_params_multipart_suggestion = use a fully qualified path with explicit lifetimes
+
+hir_analysis_async_drop_without_sync_drop = `AsyncDrop` impl without `Drop` impl
+    .help = type implementing `AsyncDrop` trait must also implement `Drop` trait to be used in sync context and unwinds
 
 hir_analysis_auto_deref_reached_recursion_limit = reached the recursion limit while auto-dereferencing `{$ty}`
     .label = deref recursion limit reached
@@ -66,10 +73,10 @@ hir_analysis_closure_implicit_hrtb = implicit types in closure signatures are fo
     .label = `for<...>` is here
 
 hir_analysis_cmse_call_generic =
-    function pointers with the `"C-cmse-nonsecure-call"` ABI cannot contain generics in their type
+    function pointers with the `"cmse-nonsecure-call"` ABI cannot contain generics in their type
 
 hir_analysis_cmse_entry_generic =
-    functions with the `"C-cmse-nonsecure-entry"` ABI cannot contain generics in their type
+    functions with the `"cmse-nonsecure-entry"` ABI cannot contain generics in their type
 
 hir_analysis_cmse_inputs_stack_spill =
     arguments for `{$abi}` function too large to pass via registers
@@ -110,15 +117,15 @@ hir_analysis_coercion_between_struct_same_note = expected coercion between the s
 
 hir_analysis_coercion_between_struct_single_note = expected a single field to be coerced, none found
 
-hir_analysis_const_bound_for_non_const_trait = `{$modifier}` can only be applied to `#[const_trait]` traits
+hir_analysis_const_bound_for_non_const_trait = `{$modifier}` can only be applied to `const` traits
     .label = can't be applied to `{$trait_name}`
-    .note = `{$trait_name}` can't be used with `{$modifier}` because it isn't annotated with `#[const_trait]`
-    .suggestion = {$suggestion_pre}mark `{$trait_name}` as `#[const_trait]` to allow it to have `const` implementations
+    .note = `{$trait_name}` can't be used with `{$modifier}` because it isn't `const`
+    .suggestion = {$suggestion_pre}mark `{$trait_name}` as `const` to allow it to have `const` implementations
 
-hir_analysis_const_impl_for_non_const_trait = const `impl` for trait `{$trait_name}` which is not marked with `#[const_trait]`
+hir_analysis_const_impl_for_non_const_trait = const `impl` for trait `{$trait_name}` which is not `const`
     .label = this trait is not `const`
-    .suggestion = {$suggestion_pre}mark `{$trait_name}` as `#[const_trait]` to allow it to have `const` implementations
-    .note = marking a trait with `#[const_trait]` ensures all default method bodies are `const`
+    .suggestion = {$suggestion_pre}mark `{$trait_name}` as `const` to allow it to have `const` implementations
+    .note = marking a trait with `const` ensures all default method bodies are `const`
     .adding = adding a non-const method body in the future would be a breaking change
 
 hir_analysis_const_param_ty_impl_on_non_adt =
@@ -151,7 +158,7 @@ hir_analysis_dispatch_from_dyn_zst = the trait `DispatchFromDyn` may only be imp
 hir_analysis_drop_impl_negative = negative `Drop` impls are not supported
 
 hir_analysis_drop_impl_on_wrong_item =
-    the `Drop` trait may only be implemented for local structs, enums, and unions
+    the `{$trait_}` trait may only be implemented for local structs, enums, and unions
     .label = must be a struct, enum, or union in the current crate
 
 hir_analysis_drop_impl_reservation = reservation `Drop` impls are not supported
@@ -244,9 +251,6 @@ hir_analysis_inherent_ty_outside_relevant = cannot define inherent `impl` for a 
     .help = consider moving this inherent impl into the crate defining the type if possible
     .span_help = alternatively add `#[rustc_allow_incoherent_impl]` to the relevant impl items
 
-hir_analysis_invalid_base_type = `{$ty}` is not a valid base type for range patterns
-    .note = range patterns only support integers
-
 hir_analysis_invalid_generic_receiver_ty = invalid generic `self` parameter type: `{$receiver_ty}`
     .note = type of `self` must not be a method generic parameter type
 
@@ -276,13 +280,6 @@ hir_analysis_invalid_union_field =
     .note = union fields must not have drop side-effects, which is currently enforced via either `Copy` or `ManuallyDrop<...>`
 
 hir_analysis_invalid_union_field_sugg =
-    wrap the field type in `ManuallyDrop<...>`
-
-hir_analysis_invalid_unsafe_field =
-    field must implement `Copy` or be wrapped in `ManuallyDrop<...>` to be unsafe
-    .note = unsafe fields must not have drop side-effects, which is currently enforced via either `Copy` or `ManuallyDrop<...>`
-
-hir_analysis_invalid_unsafe_field_sugg =
     wrap the field type in `ManuallyDrop<...>`
 
 hir_analysis_late_bound_const_in_apit = `impl Trait` can only mention const parameters from an fn or impl
@@ -374,9 +371,6 @@ hir_analysis_missing_type_params =
         *[other] parameters
     } must be specified on the object type
 
-hir_analysis_multiple_relaxed_default_bounds =
-    type parameter has more than one relaxed default bound, only one is supported
-
 hir_analysis_must_be_name_of_associated_function = must be a name of an associated function
 
 hir_analysis_must_implement_not_function = not a function
@@ -450,6 +444,7 @@ hir_analysis_parenthesized_fn_trait_expansion =
 
 hir_analysis_placeholder_not_allowed_item_signatures = the placeholder `_` is not allowed within types on item signatures for {$kind}
     .label = not allowed in type signatures
+
 hir_analysis_precise_capture_self_alias = `Self` can't be captured in `use<...>` precise captures list, since it is an alias
     .label = `Self` is not a generic argument, but an alias to the type of the {$what}
 
@@ -459,9 +454,6 @@ hir_analysis_recursive_generic_parameter = {$param_def_kind} `{$param_name}` is 
 
 hir_analysis_redundant_lifetime_args = unnecessary lifetime parameter `{$victim}`
     .note = you can use the `{$candidate}` lifetime directly, in place of `{$victim}`
-
-hir_analysis_register_type_unstable =
-    type `{$ty}` cannot be used with this register class in stable
 
 hir_analysis_requires_note = the `{$trait_name}` impl for `{$ty}` requires that `{$error_predicate}`
 
@@ -496,6 +488,9 @@ hir_analysis_self_in_impl_self =
     `Self` is not valid in the self type of an impl block
     .note = replace `Self` with a different type
 
+hir_analysis_self_in_type_alias = `Self` is not allowed in type aliases
+    .label = `Self` is only available in impls, traits, and concrete type definitions
+
 hir_analysis_self_ty_not_captured = `impl Trait` must mention the `Self` type of the trait in `use<...>`
     .label = `Self` type parameter is implicitly captured by this `impl Trait`
     .note = currently, all type parameters are required to be mentioned in the precise captures list
@@ -514,12 +509,9 @@ hir_analysis_supertrait_item_shadowee = item from `{$supertrait}` is shadowed by
 
 hir_analysis_supertrait_item_shadowing = trait item `{$item}` from `{$subtrait}` shadows identically named item from supertrait
 
-hir_analysis_tait_forward_compat = item constrains opaque type that is not in its signature
-    .note = this item must mention the opaque type in its signature in order to be able to register hidden types
-
-hir_analysis_tait_forward_compat2 = item does not constrain `{$opaque_type}`, but has it in its signature
-    .note = consider moving the opaque type's declaration and defining uses into a separate module
-    .opaque = this opaque type is in the signature
+hir_analysis_tait_forward_compat2 = item does not constrain `{$opaque_type}`
+    .note = consider removing `#[define_opaque]` or adding an empty `#[define_opaque()]`
+    .opaque = this opaque type is supposed to be constrained
 
 hir_analysis_target_feature_on_main = `main` function is not allowed to have `#[target_feature]`
 
@@ -535,7 +527,7 @@ hir_analysis_trait_object_declared_with_no_traits =
     at least one trait is required for an object type
     .alias_span = this alias does not contain a trait
 
-hir_analysis_traits_with_defualt_impl = traits with a default impl, like `{$traits}`, cannot be implemented for {$problematic_kind} `{$self_ty}`
+hir_analysis_traits_with_default_impl = traits with a default impl, like `{$traits}`, cannot be implemented for {$problematic_kind} `{$self_ty}`
     .note = a trait object implements `{$traits}` if and only if `{$traits}` is one of the trait object's trait bounds
 
 hir_analysis_transparent_enum_variant = transparent enum needs exactly one variant, but has {$number}
@@ -578,10 +570,6 @@ hir_analysis_unconstrained_generic_parameter = the {$param_def_kind} `{$param_na
 hir_analysis_unconstrained_opaque_type = unconstrained opaque type
     .note = `{$name}` must be used in combination with a concrete type within the same {$what}
 
-hir_analysis_unrecognized_atomic_operation =
-    unrecognized atomic operation function: `{$op}`
-    .label = unrecognized atomic operation
-
 hir_analysis_unrecognized_intrinsic_function =
     unrecognized intrinsic function: `{$name}`
     .label = unrecognized intrinsic
@@ -612,13 +600,15 @@ hir_analysis_value_of_associated_struct_already_specified =
     .label = re-bound here
     .previous_bound_label = `{$item_name}` bound here first
 
-hir_analysis_variadic_function_compatible_convention = C-variadic function must have a compatible calling convention, like {$conventions}
+hir_analysis_variadic_function_compatible_convention = C-variadic functions with the {$convention} calling convention are not supported
     .label = C-variadic function must have a compatible calling convention
 
 hir_analysis_variances_of = {$variances}
 
 hir_analysis_where_clause_on_main = `main` function is not allowed to have a `where` clause
     .label = `main` cannot have a `where` clause
+
+hir_analysis_within_macro = due to this macro variable
 
 hir_analysis_wrong_number_of_generic_arguments_to_intrinsic =
     intrinsic has wrong number of {$descr} parameters: found {$found}, expected {$expected}

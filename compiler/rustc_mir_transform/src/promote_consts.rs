@@ -18,7 +18,7 @@ use either::{Left, Right};
 use rustc_const_eval::check_consts::{ConstCx, qualifs};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
-use rustc_index::{Idx, IndexSlice, IndexVec};
+use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, GenericArgs, List, Ty, TyCtxt, TypeVisitableExt};
@@ -731,23 +731,22 @@ struct Promoter<'a, 'tcx> {
 impl<'a, 'tcx> Promoter<'a, 'tcx> {
     fn new_block(&mut self) -> BasicBlock {
         let span = self.promoted.span;
-        self.promoted.basic_blocks_mut().push(BasicBlockData {
-            statements: vec![],
-            terminator: Some(Terminator {
+        self.promoted.basic_blocks_mut().push(BasicBlockData::new(
+            Some(Terminator {
                 source_info: SourceInfo::outermost(span),
                 kind: TerminatorKind::Return,
             }),
-            is_cleanup: false,
-        })
+            false,
+        ))
     }
 
     fn assign(&mut self, dest: Local, rvalue: Rvalue<'tcx>, span: Span) {
         let last = self.promoted.basic_blocks.last_index().unwrap();
         let data = &mut self.promoted[last];
-        data.statements.push(Statement {
-            source_info: SourceInfo::outermost(span),
-            kind: StatementKind::Assign(Box::new((Place::from(dest), rvalue))),
-        });
+        data.statements.push(Statement::new(
+            SourceInfo::outermost(span),
+            StatementKind::Assign(Box::new((Place::from(dest), rvalue))),
+        ));
     }
 
     fn is_temp_kind(&self, local: Local) -> bool {
@@ -864,17 +863,21 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
         new_temp
     }
 
-    fn promote_candidate(mut self, candidate: Candidate, next_promoted_id: usize) -> Body<'tcx> {
+    fn promote_candidate(
+        mut self,
+        candidate: Candidate,
+        next_promoted_index: Promoted,
+    ) -> Body<'tcx> {
         let def = self.source.source.def_id();
         let (mut rvalue, promoted_op) = {
             let promoted = &mut self.promoted;
-            let promoted_id = Promoted::new(next_promoted_id);
             let tcx = self.tcx;
             let mut promoted_operand = |ty, span| {
                 promoted.span = span;
                 promoted.local_decls[RETURN_PLACE] = LocalDecl::new(ty, span);
                 let args = tcx.erase_regions(GenericArgs::identity_for_item(tcx, def));
-                let uneval = mir::UnevaluatedConst { def, args, promoted: Some(promoted_id) };
+                let uneval =
+                    mir::UnevaluatedConst { def, args, promoted: Some(next_promoted_index) };
 
                 ConstOperand { span, user_ty: None, const_: Const::Unevaluated(uneval, ty) }
             };
@@ -910,13 +913,13 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
             assert_eq!(self.temps.push(TempState::Unpromotable), promoted_ref);
 
             let promoted_operand = promoted_operand(ref_ty, span);
-            let promoted_ref_statement = Statement {
-                source_info: statement.source_info,
-                kind: StatementKind::Assign(Box::new((
+            let promoted_ref_statement = Statement::new(
+                statement.source_info,
+                StatementKind::Assign(Box::new((
                     Place::from(promoted_ref),
                     Rvalue::Use(Operand::Constant(Box::new(promoted_operand))),
                 ))),
-            };
+            );
             self.extra_statements.push((loc, promoted_ref_statement));
 
             (
@@ -1034,7 +1037,7 @@ fn promote_candidates<'tcx>(
             required_consts: Vec::new(),
         };
 
-        let mut promoted = promoter.promote_candidate(candidate, promotions.len());
+        let mut promoted = promoter.promote_candidate(candidate, promotions.next_index());
         promoted.source.promoted = Some(promotions.next_index());
         promotions.push(promoted);
     }

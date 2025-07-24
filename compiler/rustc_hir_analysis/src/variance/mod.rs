@@ -8,7 +8,6 @@ use rustc_arena::DroplessArena;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_middle::query::Providers;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{
     self, CrateVariancesMap, GenericArgsRef, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable,
@@ -27,30 +26,26 @@ mod solve;
 
 pub(crate) mod dump;
 
-pub(crate) fn provide(providers: &mut Providers) {
-    *providers = Providers { variances_of, crate_variances, ..*providers };
-}
-
-fn crate_variances(tcx: TyCtxt<'_>, (): ()) -> CrateVariancesMap<'_> {
+pub(super) fn crate_variances(tcx: TyCtxt<'_>, (): ()) -> CrateVariancesMap<'_> {
     let arena = DroplessArena::default();
     let terms_cx = terms::determine_parameters_to_be_inferred(tcx, &arena);
     let constraints_cx = constraints::add_constraints_from_crate(terms_cx);
     solve::solve_constraints(constraints_cx)
 }
 
-fn variances_of(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Variance] {
+pub(super) fn variances_of(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Variance] {
     // Skip items with no generics - there's nothing to infer in them.
     if tcx.generics_of(item_def_id).is_empty() {
         return &[];
     }
 
-    match tcx.def_kind(item_def_id) {
+    let kind = tcx.def_kind(item_def_id);
+    match kind {
         DefKind::Fn
         | DefKind::AssocFn
         | DefKind::Enum
         | DefKind::Struct
         | DefKind::Union
-        | DefKind::Variant
         | DefKind::Ctor(..) => {
             // These are inferred.
             let crate_map = tcx.crate_variances(());
@@ -89,7 +84,11 @@ fn variances_of(tcx: TyCtxt<'_>, item_def_id: LocalDefId) -> &[ty::Variance] {
     }
 
     // Variance not relevant.
-    span_bug!(tcx.def_span(item_def_id), "asked to compute variance for wrong kind of item");
+    span_bug!(
+        tcx.def_span(item_def_id),
+        "asked to compute variance for {}",
+        kind.descr(item_def_id.to_def_id())
+    );
 }
 
 #[derive(Debug, Copy, Clone)]

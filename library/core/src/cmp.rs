@@ -29,6 +29,8 @@ mod bytewise;
 pub(crate) use bytewise::BytewiseEq;
 
 use self::Ordering::*;
+use crate::marker::PointeeSized;
+use crate::ops::ControlFlow;
 
 /// Trait for comparisons using the equality operator.
 ///
@@ -245,7 +247,9 @@ use self::Ordering::*;
     append_const_msg
 )]
 #[rustc_diagnostic_item = "PartialEq"]
-pub trait PartialEq<Rhs: ?Sized = Self> {
+#[const_trait]
+#[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+pub trait PartialEq<Rhs: PointeeSized = Self>: PointeeSized {
     /// Tests for `self` and `other` values to be equal, and is used by `==`.
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -331,7 +335,7 @@ pub macro PartialEq($item:item) {
 #[doc(alias = "!=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_diagnostic_item = "Eq"]
-pub trait Eq: PartialEq<Self> {
+pub trait Eq: PartialEq<Self> + PointeeSized {
     // this method is used solely by `impl Eq or #[derive(Eq)]` to assert that every component of a
     // type implements `Eq` itself. The current deriving infrastructure means doing this assertion
     // without using a method on this trait is nearly impossible.
@@ -360,7 +364,7 @@ pub macro Eq($item:item) {
 #[doc(hidden)]
 #[allow(missing_debug_implementations)]
 #[unstable(feature = "derive_eq", reason = "deriving hack, should not be public", issue = "none")]
-pub struct AssertParamIsEq<T: Eq + ?Sized> {
+pub struct AssertParamIsEq<T: Eq + PointeeSized> {
     _field: crate::marker::PhantomData<T>,
 }
 
@@ -377,7 +381,8 @@ pub struct AssertParamIsEq<T: Eq + ?Sized> {
 ///
 /// assert_eq!(2.cmp(&1), Ordering::Greater);
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(Clone, Copy, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive_const(PartialEq)]
 #[stable(feature = "rust1", since = "1.0.0")]
 // This is a lang item only so that `BinOp::Cmp` in MIR can return it.
 // It has no special behavior, but does require that the three variants
@@ -397,6 +402,12 @@ pub enum Ordering {
 }
 
 impl Ordering {
+    #[inline]
+    const fn as_raw(self) -> i8 {
+        // FIXME(const-hack): just use `PartialOrd` against `Equal` once that's const
+        crate::intrinsics::discriminant_value(&self)
+    }
+
     /// Returns `true` if the ordering is the `Equal` variant.
     ///
     /// # Examples
@@ -413,7 +424,11 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_eq(self) -> bool {
-        matches!(self, Equal)
+        // All the `is_*` methods are implemented as comparisons against zero
+        // to follow how clang's libcxx implements their equivalents in
+        // <https://github.com/llvm/llvm-project/blob/60486292b79885b7800b082754153202bef5b1f0/libcxx/include/__compare/is_eq.h#L23-L28>
+
+        self.as_raw() == 0
     }
 
     /// Returns `true` if the ordering is not the `Equal` variant.
@@ -432,7 +447,7 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_ne(self) -> bool {
-        !matches!(self, Equal)
+        self.as_raw() != 0
     }
 
     /// Returns `true` if the ordering is the `Less` variant.
@@ -451,7 +466,7 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_lt(self) -> bool {
-        matches!(self, Less)
+        self.as_raw() < 0
     }
 
     /// Returns `true` if the ordering is the `Greater` variant.
@@ -470,7 +485,7 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_gt(self) -> bool {
-        matches!(self, Greater)
+        self.as_raw() > 0
     }
 
     /// Returns `true` if the ordering is either the `Less` or `Equal` variant.
@@ -489,7 +504,7 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_le(self) -> bool {
-        !matches!(self, Greater)
+        self.as_raw() <= 0
     }
 
     /// Returns `true` if the ordering is either the `Greater` or `Equal` variant.
@@ -508,7 +523,7 @@ impl Ordering {
     #[rustc_const_stable(feature = "ordering_helpers", since = "1.53.0")]
     #[stable(feature = "ordering_helpers", since = "1.53.0")]
     pub const fn is_ge(self) -> bool {
-        !matches!(self, Less)
+        self.as_raw() >= 0
     }
 
     /// Reverses the `Ordering`.
@@ -943,7 +958,7 @@ impl<T: Clone> Clone for Reverse<T> {
 #[doc(alias = ">=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_diagnostic_item = "Ord"]
-pub trait Ord: Eq + PartialOrd<Self> {
+pub trait Ord: Eq + PartialOrd<Self> + PointeeSized {
     /// This method returns an [`Ordering`] between `self` and `other`.
     ///
     /// By convention, `self.cmp(&other)` returns the ordering matching the expression
@@ -1326,7 +1341,8 @@ pub macro Ord($item:item) {
     append_const_msg
 )]
 #[rustc_diagnostic_item = "PartialOrd"]
-pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
+#[allow(multiple_supertrait_upcastable)] // FIXME(sized_hierarchy): remove this
+pub trait PartialOrd<Rhs: PointeeSized = Self>: PartialEq<Rhs> + PointeeSized {
     /// This method returns an ordering between `self` and `other` values if one exists.
     ///
     /// # Examples
@@ -1425,6 +1441,64 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     fn ge(&self, other: &Rhs) -> bool {
         self.partial_cmp(other).is_some_and(Ordering::is_ge)
     }
+
+    /// If `self == other`, returns `ControlFlow::Continue(())`.
+    /// Otherwise, returns `ControlFlow::Break(self < other)`.
+    ///
+    /// This is useful for chaining together calls when implementing a lexical
+    /// `PartialOrd::lt`, as it allows types (like primitives) which can cheaply
+    /// check `==` and `<` separately to do rather than needing to calculate
+    /// (then optimize out) the three-way `Ordering` result.
+    #[inline]
+    // Added to improve the behaviour of tuples; not necessarily stabilization-track.
+    #[unstable(feature = "partial_ord_chaining_methods", issue = "none")]
+    #[doc(hidden)]
+    fn __chaining_lt(&self, other: &Rhs) -> ControlFlow<bool> {
+        default_chaining_impl(self, other, Ordering::is_lt)
+    }
+
+    /// Same as `__chaining_lt`, but for `<=` instead of `<`.
+    #[inline]
+    #[unstable(feature = "partial_ord_chaining_methods", issue = "none")]
+    #[doc(hidden)]
+    fn __chaining_le(&self, other: &Rhs) -> ControlFlow<bool> {
+        default_chaining_impl(self, other, Ordering::is_le)
+    }
+
+    /// Same as `__chaining_lt`, but for `>` instead of `<`.
+    #[inline]
+    #[unstable(feature = "partial_ord_chaining_methods", issue = "none")]
+    #[doc(hidden)]
+    fn __chaining_gt(&self, other: &Rhs) -> ControlFlow<bool> {
+        default_chaining_impl(self, other, Ordering::is_gt)
+    }
+
+    /// Same as `__chaining_lt`, but for `>=` instead of `<`.
+    #[inline]
+    #[unstable(feature = "partial_ord_chaining_methods", issue = "none")]
+    #[doc(hidden)]
+    fn __chaining_ge(&self, other: &Rhs) -> ControlFlow<bool> {
+        default_chaining_impl(self, other, Ordering::is_ge)
+    }
+}
+
+fn default_chaining_impl<T, U>(
+    lhs: &T,
+    rhs: &U,
+    p: impl FnOnce(Ordering) -> bool,
+) -> ControlFlow<bool>
+where
+    T: PartialOrd<U> + PointeeSized,
+    U: PointeeSized,
+{
+    // It's important that this only call `partial_cmp` once, not call `eq` then
+    // one of the relational operators.  We don't want to `bcmp`-then-`memcp` a
+    // `String`, for example, or similarly for other data structures (#108157).
+    match <T as PartialOrd<U>>::partial_cmp(lhs, rhs) {
+        Some(Equal) => ControlFlow::Continue(()),
+        Some(c) => ControlFlow::Break(p(c)),
+        None => ControlFlow::Break(false),
+    }
 }
 
 /// Derive macro generating an impl of the trait [`PartialOrd`].
@@ -1471,7 +1545,7 @@ pub macro PartialOrd($item:item) {
 #[inline]
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "cmp_min")]
+#[rustc_diagnostic_item = "cmp_min"]
 pub fn min<T: Ord>(v1: T, v2: T) -> T {
     v1.min(v2)
 }
@@ -1563,7 +1637,7 @@ pub fn min_by_key<T, F: FnMut(&T) -> K, K: Ord>(v1: T, v2: T, mut f: F) -> T {
 #[inline]
 #[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "cmp_max")]
+#[rustc_diagnostic_item = "cmp_max"]
 pub fn max<T: Ord>(v1: T, v2: T) -> T {
     v1.max(v2)
 }
@@ -1731,15 +1805,18 @@ where
 mod impls {
     use crate::cmp::Ordering::{self, Equal, Greater, Less};
     use crate::hint::unreachable_unchecked;
+    use crate::marker::PointeeSized;
+    use crate::ops::ControlFlow::{self, Break, Continue};
 
     macro_rules! partial_eq_impl {
         ($($t:ty)*) => ($(
             #[stable(feature = "rust1", since = "1.0.0")]
-            impl PartialEq for $t {
+            #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+            impl const PartialEq for $t {
                 #[inline]
-                fn eq(&self, other: &$t) -> bool { (*self) == (*other) }
+                fn eq(&self, other: &Self) -> bool { *self == *other }
                 #[inline]
-                fn ne(&self, other: &$t) -> bool { (*self) != (*other) }
+                fn ne(&self, other: &Self) -> bool { *self != *other }
             }
         )*)
     }
@@ -1769,12 +1846,51 @@ mod impls {
 
     eq_impl! { () bool char usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 
+    #[rustfmt::skip]
+    macro_rules! partial_ord_methods_primitive_impl {
+        () => {
+            #[inline(always)]
+            fn lt(&self, other: &Self) -> bool { *self <  *other }
+            #[inline(always)]
+            fn le(&self, other: &Self) -> bool { *self <= *other }
+            #[inline(always)]
+            fn gt(&self, other: &Self) -> bool { *self >  *other }
+            #[inline(always)]
+            fn ge(&self, other: &Self) -> bool { *self >= *other }
+
+            // These implementations are the same for `Ord` or `PartialOrd` types
+            // because if either is NAN the `==` test will fail so we end up in
+            // the `Break` case and the comparison will correctly return `false`.
+
+            #[inline]
+            fn __chaining_lt(&self, other: &Self) -> ControlFlow<bool> {
+                let (lhs, rhs) = (*self, *other);
+                if lhs == rhs { Continue(()) } else { Break(lhs < rhs) }
+            }
+            #[inline]
+            fn __chaining_le(&self, other: &Self) -> ControlFlow<bool> {
+                let (lhs, rhs) = (*self, *other);
+                if lhs == rhs { Continue(()) } else { Break(lhs <= rhs) }
+            }
+            #[inline]
+            fn __chaining_gt(&self, other: &Self) -> ControlFlow<bool> {
+                let (lhs, rhs) = (*self, *other);
+                if lhs == rhs { Continue(()) } else { Break(lhs > rhs) }
+            }
+            #[inline]
+            fn __chaining_ge(&self, other: &Self) -> ControlFlow<bool> {
+                let (lhs, rhs) = (*self, *other);
+                if lhs == rhs { Continue(()) } else { Break(lhs >= rhs) }
+            }
+        };
+    }
+
     macro_rules! partial_ord_impl {
         ($($t:ty)*) => ($(
             #[stable(feature = "rust1", since = "1.0.0")]
             impl PartialOrd for $t {
                 #[inline]
-                fn partial_cmp(&self, other: &$t) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                     match (*self <= *other, *self >= *other) {
                         (false, false) => None,
                         (false, true) => Some(Greater),
@@ -1782,14 +1898,8 @@ mod impls {
                         (true, true) => Some(Equal),
                     }
                 }
-                #[inline(always)]
-                fn lt(&self, other: &$t) -> bool { (*self) < (*other) }
-                #[inline(always)]
-                fn le(&self, other: &$t) -> bool { (*self) <= (*other) }
-                #[inline(always)]
-                fn ge(&self, other: &$t) -> bool { (*self) >= (*other) }
-                #[inline(always)]
-                fn gt(&self, other: &$t) -> bool { (*self) > (*other) }
+
+                partial_ord_methods_primitive_impl!();
             }
         )*)
     }
@@ -1808,6 +1918,8 @@ mod impls {
         fn partial_cmp(&self, other: &bool) -> Option<Ordering> {
             Some(self.cmp(other))
         }
+
+        partial_ord_methods_primitive_impl!();
     }
 
     partial_ord_impl! { f16 f32 f64 f128 }
@@ -1817,23 +1929,17 @@ mod impls {
             #[stable(feature = "rust1", since = "1.0.0")]
             impl PartialOrd for $t {
                 #[inline]
-                fn partial_cmp(&self, other: &$t) -> Option<Ordering> {
+                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                     Some(crate::intrinsics::three_way_compare(*self, *other))
                 }
-                #[inline(always)]
-                fn lt(&self, other: &$t) -> bool { (*self) < (*other) }
-                #[inline(always)]
-                fn le(&self, other: &$t) -> bool { (*self) <= (*other) }
-                #[inline(always)]
-                fn ge(&self, other: &$t) -> bool { (*self) >= (*other) }
-                #[inline(always)]
-                fn gt(&self, other: &$t) -> bool { (*self) > (*other) }
+
+                partial_ord_methods_primitive_impl!();
             }
 
             #[stable(feature = "rust1", since = "1.0.0")]
             impl Ord for $t {
                 #[inline]
-                fn cmp(&self, other: &$t) -> Ordering {
+                fn cmp(&self, other: &Self) -> Ordering {
                     crate::intrinsics::three_way_compare(*self, *other)
                 }
             }
@@ -1913,9 +2019,10 @@ mod impls {
     // & pointers
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialEq<&B> for &A
+    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+    impl<A: PointeeSized, B: PointeeSized> const PartialEq<&B> for &A
     where
-        A: PartialEq<B>,
+        A: ~const PartialEq<B>,
     {
         #[inline]
         fn eq(&self, other: &&B) -> bool {
@@ -1927,7 +2034,7 @@ mod impls {
         }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialOrd<&B> for &A
+    impl<A: PointeeSized, B: PointeeSized> PartialOrd<&B> for &A
     where
         A: PartialOrd<B>,
     {
@@ -1951,9 +2058,25 @@ mod impls {
         fn ge(&self, other: &&B) -> bool {
             PartialOrd::ge(*self, *other)
         }
+        #[inline]
+        fn __chaining_lt(&self, other: &&B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_lt(*self, *other)
+        }
+        #[inline]
+        fn __chaining_le(&self, other: &&B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_le(*self, *other)
+        }
+        #[inline]
+        fn __chaining_gt(&self, other: &&B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_gt(*self, *other)
+        }
+        #[inline]
+        fn __chaining_ge(&self, other: &&B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_ge(*self, *other)
+        }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized> Ord for &A
+    impl<A: PointeeSized> Ord for &A
     where
         A: Ord,
     {
@@ -1963,14 +2086,15 @@ mod impls {
         }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized> Eq for &A where A: Eq {}
+    impl<A: PointeeSized> Eq for &A where A: Eq {}
 
     // &mut pointers
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialEq<&mut B> for &mut A
+    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+    impl<A: PointeeSized, B: PointeeSized> const PartialEq<&mut B> for &mut A
     where
-        A: PartialEq<B>,
+        A: ~const PartialEq<B>,
     {
         #[inline]
         fn eq(&self, other: &&mut B) -> bool {
@@ -1982,7 +2106,7 @@ mod impls {
         }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialOrd<&mut B> for &mut A
+    impl<A: PointeeSized, B: PointeeSized> PartialOrd<&mut B> for &mut A
     where
         A: PartialOrd<B>,
     {
@@ -2006,9 +2130,25 @@ mod impls {
         fn ge(&self, other: &&mut B) -> bool {
             PartialOrd::ge(*self, *other)
         }
+        #[inline]
+        fn __chaining_lt(&self, other: &&mut B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_lt(*self, *other)
+        }
+        #[inline]
+        fn __chaining_le(&self, other: &&mut B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_le(*self, *other)
+        }
+        #[inline]
+        fn __chaining_gt(&self, other: &&mut B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_gt(*self, *other)
+        }
+        #[inline]
+        fn __chaining_ge(&self, other: &&mut B) -> ControlFlow<bool> {
+            PartialOrd::__chaining_ge(*self, *other)
+        }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized> Ord for &mut A
+    impl<A: PointeeSized> Ord for &mut A
     where
         A: Ord,
     {
@@ -2018,12 +2158,13 @@ mod impls {
         }
     }
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized> Eq for &mut A where A: Eq {}
+    impl<A: PointeeSized> Eq for &mut A where A: Eq {}
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialEq<&mut B> for &A
+    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+    impl<A: PointeeSized, B: PointeeSized> const PartialEq<&mut B> for &A
     where
-        A: PartialEq<B>,
+        A: ~const PartialEq<B>,
     {
         #[inline]
         fn eq(&self, other: &&mut B) -> bool {
@@ -2036,9 +2177,10 @@ mod impls {
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    impl<A: ?Sized, B: ?Sized> PartialEq<&B> for &mut A
+    #[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+    impl<A: PointeeSized, B: PointeeSized> const PartialEq<&B> for &mut A
     where
-        A: PartialEq<B>,
+        A: ~const PartialEq<B>,
     {
         #[inline]
         fn eq(&self, other: &&B) -> bool {

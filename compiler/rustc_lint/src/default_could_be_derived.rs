@@ -1,3 +1,4 @@
+use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{Applicability, Diag};
 use rustc_hir as hir;
@@ -62,7 +63,7 @@ impl<'tcx> LateLintPass<'tcx> for DefaultCouldBeDerived {
         let hir::ImplItemKind::Fn(_sig, body_id) = impl_item.kind else { return };
         let assoc = cx.tcx.associated_item(impl_item.owner_id);
         let parent = assoc.container_id(cx.tcx);
-        if cx.tcx.has_attr(parent, sym::automatically_derived) {
+        if find_attr!(cx.tcx.get_all_attrs(parent), AttributeKind::AutomaticallyDerived(..)) {
             // We don't care about what `#[derive(Default)]` produces in this lint.
             return;
         }
@@ -93,7 +94,11 @@ impl<'tcx> LateLintPass<'tcx> for DefaultCouldBeDerived {
         let orig_fields = match cx.tcx.hir_get_if_local(type_def_id) {
             Some(hir::Node::Item(hir::Item {
                 kind:
-                    hir::ItemKind::Struct(hir::VariantData::Struct { fields, recovered: _ }, _generics),
+                    hir::ItemKind::Struct(
+                        _,
+                        _generics,
+                        hir::VariantData::Struct { fields, recovered: _ },
+                    ),
                 ..
             })) => fields.iter().map(|f| (f.ident.name, f)).collect::<FxHashMap<_, _>>(),
             _ => return,
@@ -129,11 +134,11 @@ impl<'tcx> LateLintPass<'tcx> for DefaultCouldBeDerived {
             //     }
             // }
             // where `something()` would have to be a call or path.
-            // We have nothing meaninful to do with this.
+            // We have nothing meaningful to do with this.
             return;
         }
 
-        // At least one of the fields with a default value have been overriden in
+        // At least one of the fields with a default value have been overridden in
         // the `Default` implementation. We suggest removing it and relying on `..`
         // instead.
         let any_default_field_given =

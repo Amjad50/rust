@@ -4,12 +4,11 @@ These are a set of steps to add support for a new target. There are
 numerous end states and paths to get there, so not all sections may be
 relevant to your desired goal.
 
-See also the associated documentation in the
-[target tier policy][target_tier_policy_add].
+See also the associated documentation in the [target tier policy].
 
 <!-- toc -->
 
-[target_tier_policy_add]: https://doc.rust-lang.org/rustc/target-tier-policy.html#adding-a-new-target
+[target tier policy]: https://doc.rust-lang.org/rustc/target-tier-policy.html#adding-a-new-target
 
 ## Specifying a new LLVM
 
@@ -38,7 +37,7 @@ able to configure Rust to treat your build as the system LLVM to avoid
 redundant builds.
 
 You can tell Rust to use a pre-built version of LLVM using the `target` section
-of `config.toml`:
+of `bootstrap.toml`:
 
 ```toml
 [target.x86_64-unknown-linux-gnu]
@@ -56,8 +55,8 @@ for codegen tests. This tool is normally built with LLVM, but if you use your
 own preinstalled LLVM, you will need to provide `FileCheck` in some other way.
 On Debian-based systems, you can install the `llvm-N-tools` package (where `N`
 is the LLVM version number, e.g. `llvm-8-tools`). Alternately, you can specify
-the path to `FileCheck` with the `llvm-filecheck` config item in `config.toml`
-or you can disable codegen test with the `codegen-tests` item in `config.toml`.
+the path to `FileCheck` with the `llvm-filecheck` config item in `bootstrap.toml`
+or you can disable codegen test with the `codegen-tests` item in `bootstrap.toml`.
 
 ## Creating a target specification
 
@@ -86,7 +85,7 @@ Look for existing targets to use as examples.
 After adding your target to the `rustc_target` crate you may want to add
 `core`, `std`, ... with support for your new target. In that case you will
 probably need access to some `target_*` cfg. Unfortunately when building with
-stage0 (the beta compiler), you'll get an error that the target cfg is
+stage0 (a precompiled compiler), you'll get an error that the target cfg is
 unexpected because stage0 doesn't know about the new target specification and
 we pass `--check-cfg` in order to tell it to check.
 
@@ -142,14 +141,14 @@ After this, run `cargo update -p libc` to update the lockfiles.
 
 Beware that if you patch to a local `path` dependency, this will enable
 warnings for that dependency. Some dependencies are not warning-free, and due
-to the `deny-warnings` setting in `config.toml`, the build may suddenly start
+to the `deny-warnings` setting in `bootstrap.toml`, the build may suddenly start
 to fail.
 To work around warnings, you may want to:
 - Modify the dependency to remove the warnings
-- Or for local development purposes, suppress the warnings by setting deny-warnings = false in config.toml.
+- Or for local development purposes, suppress the warnings by setting deny-warnings = false in bootstrap.toml.
 
 ```toml
-# config.toml
+# bootstrap.toml
 [rust]
 deny-warnings = false
 ```
@@ -175,8 +174,8 @@ compiler, you can use it instead of the JSON file for both arguments.
 ## Promoting a target from tier 2 (target) to tier 2 (host)
 
 There are two levels of tier 2 targets:
-  a) Targets that are only cross-compiled (`rustup target add`)
-  b) Targets that [have a native toolchain][tier2-native] (`rustup toolchain install`)
+- Targets that are only cross-compiled (`rustup target add`)
+- Targets that [have a native toolchain][tier2-native] (`rustup toolchain install`)
 
 [tier2-native]: https://doc.rust-lang.org/nightly/rustc/target-tier-policy.html#tier-2-with-host-tools
 

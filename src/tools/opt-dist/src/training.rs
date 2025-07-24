@@ -36,7 +36,7 @@ fn init_compiler_benchmarks(
         profiles.join(",").as_str(),
         "--scenarios",
         scenarios.join(",").as_str(),
-        "--include",
+        "--exact-match",
         crates.join(",").as_str(),
     ])
     .env("RUST_LOG", "collector=debug")
@@ -70,7 +70,9 @@ fn merge_llvm_profiles(
     profdata: LlvmProfdata,
 ) -> anyhow::Result<()> {
     let llvm_profdata = match profdata {
-        LlvmProfdata::Host => env.host_llvm_dir().join("bin/llvm-profdata"),
+        LlvmProfdata::Host => {
+            env.host_llvm_dir().join(format!("bin/llvm-profdata{}", executable_extension()))
+        }
         LlvmProfdata::Target => env
             .build_artifacts()
             .join("llvm")
@@ -161,7 +163,9 @@ pub fn gather_rustc_profiles(
     let merged_profile = env.artifact_dir().join("rustc-pgo.profdata");
     log::info!("Merging Rustc PGO profiles to {merged_profile}");
 
-    merge_llvm_profiles(env, &merged_profile, profile_root, LlvmProfdata::Target)?;
+    let llvm_profdata = if env.build_llvm() { LlvmProfdata::Target } else { LlvmProfdata::Host };
+
+    merge_llvm_profiles(env, &merged_profile, profile_root, llvm_profdata)?;
     log_profile_stats("Rustc", &merged_profile, profile_root)?;
 
     // We don't need the individual .profraw files now that they have been merged

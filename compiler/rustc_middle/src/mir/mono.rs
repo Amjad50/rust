@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
 use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
-use rustc_attr_parsing::InlineAttr;
+use rustc_attr_data_structures::InlineAttr;
 use rustc_data_structures::base_n::{BaseNString, CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxIndexMap;
@@ -21,7 +22,7 @@ use tracing::debug;
 
 use crate::dep_graph::{DepNode, WorkProduct, WorkProductId};
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use crate::ty::{GenericArgs, Instance, InstanceKind, SymbolName, TyCtxt};
+use crate::ty::{self, GenericArgs, Instance, InstanceKind, SymbolName, Ty, TyCtxt};
 
 /// Describes how a monomorphization will be instantiated in object files.
 #[derive(PartialEq)]
@@ -53,6 +54,39 @@ pub enum MonoItem<'tcx> {
     Fn(Instance<'tcx>),
     Static(DefId),
     GlobalAsm(ItemId),
+}
+
+fn opt_incr_drop_glue_mode<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> InstantiationMode {
+    // Non-ADTs can't have a Drop impl. This case is mostly hit by closures whose captures require
+    // dropping.
+    let ty::Adt(adt_def, _) = ty.kind() else {
+        return InstantiationMode::LocalCopy;
+    };
+
+    // Types that don't have a direct Drop impl, but have fields that require dropping.
+    let Some(dtor) = adt_def.destructor(tcx) else {
+        // We use LocalCopy for drops of enums only; this code is inherited from
+        // https://github.com/rust-lang/rust/pull/67332 and the theory is that we get to optimize
+        // out code like drop_in_place(Option::None) before crate-local ThinLTO, which improves
+        // compile time. At the time of writing, simply removing this entire check does seem to
+        // regress incr-opt compile times. But it sure seems like a more sophisticated check could
+        // do better here.
+        if adt_def.is_enum() {
+            return InstantiationMode::LocalCopy;
+        } else {
+            return InstantiationMode::GloballyShared { may_conflict: true };
+        }
+    };
+
+    // We've gotten to a drop_in_place for a type that directly implements Drop.
+    // The drop glue is a wrapper for the Drop::drop impl, and we are an optimized build, so in an
+    // effort to coordinate with the mode that the actual impl will get, we make the glue also
+    // LocalCopy.
+    if tcx.cross_crate_inlinable(dtor.did) {
+        InstantiationMode::LocalCopy
+    } else {
+        InstantiationMode::GloballyShared { may_conflict: true }
+    }
 }
 
 impl<'tcx> MonoItem<'tcx> {
@@ -117,23 +151,44 @@ impl<'tcx> MonoItem<'tcx> {
 
         // If the function is #[naked] or contains any other attribute that requires exactly-once
         // instantiation:
-        let codegen_fn_attrs = tcx.codegen_fn_attrs(instance.def_id());
+        // We emit an unused_attributes lint for this case, which should be kept in sync if possible.
+        let codegen_fn_attrs = tcx.codegen_instance_attrs(instance.def);
         if codegen_fn_attrs.contains_extern_indicator()
             || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NAKED)
         {
             return InstantiationMode::GloballyShared { may_conflict: false };
         }
 
-        // FIXME: The logic for which functions are permitted to get LocalCopy is actually spread
-        // across 4 functions:
-        // * cross_crate_inlinable(def_id)
-        // * InstanceKind::requires_inline
-        // * InstanceKind::generate_cgu_internal_copy
-        // * MonoItem::instantiation_mode
-        // Since reachable_non_generics calls InstanceKind::generates_cgu_internal_copy to decide
-        // which symbols this crate exports, we are obligated to only generate LocalCopy when
-        // generates_cgu_internal_copy returns true.
-        if !instance.def.generates_cgu_internal_copy(tcx) {
+        // This is technically a heuristic even though it's in the "not a heuristic" part of
+        // instantiation mode selection.
+        // It is surely possible to untangle this; the root problem is that the way we instantiate
+        // InstanceKind other than Item is very complicated.
+        //
+        // The fallback case is to give everything else GloballyShared at OptLevel::No and
+        // LocalCopy at all other opt levels. This is a good default, except for one specific build
+        // configuration: Optimized incremental builds.
+        // In the current compiler architecture there is a fundamental tension between
+        // optimizations (which want big CGUs with as many things LocalCopy as possible) and
+        // incrementality (which wants small CGUs with as many things GloballyShared as possible).
+        // The heuristics implemented here do better than a completely naive approach in the
+        // compiler benchmark suite, but there is no reason to believe they are optimal.
+        if let InstanceKind::DropGlue(_, Some(ty)) = instance.def {
+            if tcx.sess.opts.optimize == OptLevel::No {
+                return InstantiationMode::GloballyShared { may_conflict: false };
+            }
+            if tcx.sess.opts.incremental.is_none() {
+                return InstantiationMode::LocalCopy;
+            }
+            return opt_incr_drop_glue_mode(tcx, ty);
+        }
+
+        // We need to ensure that we do not decide the InstantiationMode of an exported symbol is
+        // LocalCopy. Since exported symbols are computed based on the output of
+        // cross_crate_inlinable, we are beholden to our previous decisions.
+        //
+        // Note that just like above, this check for requires_inline is technically a heuristic
+        // even though it's in the "not a heuristic" part of instantiation mode selection.
+        if !tcx.cross_crate_inlinable(instance.def_id()) && !instance.def.requires_inline(tcx) {
             return InstantiationMode::GloballyShared { may_conflict: false };
         }
 
@@ -164,7 +219,7 @@ impl<'tcx> MonoItem<'tcx> {
         // functions the same as those that unconditionally get LocalCopy codegen. It's only when
         // we get here that we can at least not codegen a #[inline(never)] generic function in all
         // of our CGUs.
-        if let InlineAttr::Never = tcx.codegen_fn_attrs(instance.def_id()).inline
+        if let InlineAttr::Never = codegen_fn_attrs.inline
             && self.is_generic_fn()
         {
             return InstantiationMode::GloballyShared { may_conflict: true };
@@ -179,14 +234,13 @@ impl<'tcx> MonoItem<'tcx> {
     }
 
     pub fn explicit_linkage(&self, tcx: TyCtxt<'tcx>) -> Option<Linkage> {
-        let def_id = match *self {
-            MonoItem::Fn(ref instance) => instance.def_id(),
-            MonoItem::Static(def_id) => def_id,
+        let instance_kind = match *self {
+            MonoItem::Fn(ref instance) => instance.def,
+            MonoItem::Static(def_id) => InstanceKind::Item(def_id),
             MonoItem::GlobalAsm(..) => return None,
         };
 
-        let codegen_fn_attrs = tcx.codegen_fn_attrs(def_id);
-        codegen_fn_attrs.linkage
+        tcx.codegen_instance_attrs(instance_kind).linkage
     }
 
     /// Returns `true` if this instance is instantiable - whether it has no unsatisfied
@@ -264,7 +318,7 @@ impl<'tcx> fmt::Display for MonoItem<'tcx> {
         match *self {
             MonoItem::Fn(instance) => write!(f, "fn {instance}"),
             MonoItem::Static(def_id) => {
-                write!(f, "static {}", Instance::new(def_id, GenericArgs::empty()))
+                write!(f, "static {}", Instance::new_raw(def_id, GenericArgs::empty()))
             }
             MonoItem::GlobalAsm(..) => write!(f, "global_asm"),
         }
@@ -414,6 +468,29 @@ impl<'tcx> CodegenUnit<'tcx> {
         hash.as_u128().to_base_fixed_len(CASE_INSENSITIVE)
     }
 
+    pub fn shorten_name(human_readable_name: &str) -> Cow<'_, str> {
+        // Set a limit a somewhat below the common platform limits for file names.
+        const MAX_CGU_NAME_LENGTH: usize = 200;
+        const TRUNCATED_NAME_PREFIX: &str = "-trunc-";
+        if human_readable_name.len() > MAX_CGU_NAME_LENGTH {
+            let mangled_name = Self::mangle_name(human_readable_name);
+            // Determine a safe byte offset to truncate the name to
+            let truncate_to = human_readable_name.floor_char_boundary(
+                MAX_CGU_NAME_LENGTH - TRUNCATED_NAME_PREFIX.len() - mangled_name.len(),
+            );
+            format!(
+                "{}{}{}",
+                &human_readable_name[..truncate_to],
+                TRUNCATED_NAME_PREFIX,
+                mangled_name
+            )
+            .into()
+        } else {
+            // If the name is short enough, we can just return it as is.
+            human_readable_name.into()
+        }
+    }
+
     pub fn compute_size_estimate(&mut self) {
         // The size of a codegen unit as the sum of the sizes of the items
         // within it.
@@ -476,6 +553,8 @@ impl<'tcx> CodegenUnit<'tcx> {
                             | InstanceKind::CloneShim(..)
                             | InstanceKind::ThreadLocalShim(..)
                             | InstanceKind::FnPtrAddrShim(..)
+                            | InstanceKind::AsyncDropGlue(..)
+                            | InstanceKind::FutureDropPollShim(..)
                             | InstanceKind::AsyncDropGlueCtorShim(..) => None,
                         }
                     }
@@ -548,7 +627,7 @@ impl<'tcx> CodegenUnitNameBuilder<'tcx> {
         let cgu_name = self.build_cgu_name_no_mangle(cnum, components, special_suffix);
 
         if self.tcx.sess.opts.unstable_opts.human_readable_cgu_names {
-            cgu_name
+            Symbol::intern(&CodegenUnit::shorten_name(cgu_name.as_str()))
         } else {
             Symbol::intern(&CodegenUnit::mangle_name(cgu_name.as_str()))
         }

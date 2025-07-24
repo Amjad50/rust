@@ -18,7 +18,7 @@ extern crate rustc_span;
 use std::path::{Path, PathBuf};
 
 use rustc_interface::{Linker, interface};
-use rustc_session::config::{Input, Options, OutFileName, OutputType, OutputTypes};
+use rustc_session::config::{Input, Options, OutFileName, OutputType, OutputTypes, Sysroot};
 use rustc_span::FileName;
 
 fn main() {
@@ -32,7 +32,7 @@ fn main() {
         panic!("expected sysroot (and optional linker)");
     }
 
-    let sysroot = PathBuf::from(&args[1]);
+    let sysroot = Sysroot::new(Some(PathBuf::from(&args[1])));
     let linker = args.get(2).map(PathBuf::from);
 
     // compiletest sets the current dir to `output_base_dir` when running.
@@ -43,10 +43,10 @@ fn main() {
     compile(src.to_string(), tmpdir.join("out"), sysroot.clone(), linker.as_deref());
 }
 
-fn compile(code: String, output: PathBuf, sysroot: PathBuf, linker: Option<&Path>) {
+fn compile(code: String, output: PathBuf, sysroot: Sysroot, linker: Option<&Path>) {
     let mut opts = Options::default();
     opts.output_types = OutputTypes::new(&[(OutputType::Exe, None)]);
-    opts.maybe_sysroot = Some(sysroot);
+    opts.sysroot = sysroot;
 
     if let Some(linker) = linker {
         opts.cg.linker = Some(linker.to_owned());
@@ -70,6 +70,7 @@ fn compile(code: String, output: PathBuf, sysroot: PathBuf, linker: Option<&Path
         hash_untracked_state: None,
         register_lints: None,
         override_queries: None,
+        extra_symbols: Vec::new(),
         make_codegen_backend: None,
         registry: rustc_driver::diagnostics_registry(),
         using_internal_features: &rustc_driver::USING_INTERNAL_FEATURES,

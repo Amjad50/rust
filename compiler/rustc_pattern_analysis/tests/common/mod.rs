@@ -1,11 +1,12 @@
 use rustc_pattern_analysis::constructor::{
     Constructor, ConstructorSet, IntRange, MaybeInfiniteInt, RangeEnd, VariantVisibility,
 };
+use rustc_pattern_analysis::pat::DeconstructedPat;
 use rustc_pattern_analysis::usefulness::{PlaceValidity, UsefulnessReport};
 use rustc_pattern_analysis::{MatchArm, PatCx, PrivateUninhabitedField};
 
 /// Sets up `tracing` for easier debugging. Tries to look like the `rustc` setup.
-pub fn init_tracing() {
+fn init_tracing() {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -24,7 +25,7 @@ pub fn init_tracing() {
 /// A simple set of types.
 #[allow(dead_code)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Ty {
+pub(super) enum Ty {
     /// Booleans
     Bool,
     /// 8-bit unsigned integers
@@ -41,7 +42,7 @@ pub enum Ty {
 
 /// The important logic.
 impl Ty {
-    pub fn sub_tys(&self, ctor: &Constructor<Cx>) -> Vec<Self> {
+    pub(super) fn sub_tys(&self, ctor: &Constructor<Cx>) -> Vec<Self> {
         use Constructor::*;
         match (ctor, *self) {
             (Struct, Ty::Tuple(tys)) => tys.iter().copied().collect(),
@@ -63,7 +64,7 @@ impl Ty {
         }
     }
 
-    pub fn ctor_set(&self) -> ConstructorSet<Cx> {
+    fn ctor_set(&self) -> ConstructorSet<Cx> {
         match *self {
             Ty::Bool => ConstructorSet::Bool,
             Ty::U8 => ConstructorSet::Integers {
@@ -104,7 +105,7 @@ impl Ty {
         }
     }
 
-    pub fn write_variant_name(
+    fn write_variant_name(
         &self,
         f: &mut std::fmt::Formatter<'_>,
         ctor: &Constructor<Cx>,
@@ -120,7 +121,7 @@ impl Ty {
 }
 
 /// Compute usefulness in our simple context (and set up tracing for easier debugging).
-pub fn compute_match_usefulness<'p>(
+pub(super) fn compute_match_usefulness<'p>(
     arms: &[MatchArm<'p, Cx>],
     ty: Ty,
     scrut_validity: PlaceValidity,
@@ -137,7 +138,7 @@ pub fn compute_match_usefulness<'p>(
 }
 
 #[derive(Debug)]
-pub struct Cx;
+pub(super) struct Cx;
 
 /// The context for pattern analysis. Forwards anything interesting to `Ty` methods.
 impl PatCx for Cx {
@@ -183,6 +184,14 @@ impl PatCx for Cx {
     /// Abort when reaching the complexity limit. This is what we'll check in tests.
     fn complexity_exceeded(&self) -> Result<(), Self::Error> {
         Err(())
+    }
+
+    fn report_mixed_deref_pat_ctors(
+        &self,
+        _deref_pat: &DeconstructedPat<Self>,
+        _normal_pat: &DeconstructedPat<Self>,
+    ) -> Self::Error {
+        panic!("`rustc_pattern_analysis::tests` currently doesn't test deref pattern errors")
     }
 }
 

@@ -1,4 +1,4 @@
-# Sanitizers Support
+# Sanitizers support
 
 The rustc compiler contains support for following sanitizers:
 
@@ -32,7 +32,7 @@ implementation:
 
 *  The sanitizer runtime libraries are part of the [compiler-rt] project, and
    [will be built][sanitizer-build] on [supported targets][sanitizer-targets]
-   when enabled in `config.toml`:
+   when enabled in `bootstrap.toml`:
 
    ```toml
    [build]
@@ -76,16 +76,16 @@ implementation:
 ## Testing sanitizers
 
 Sanitizers are validated by code generation tests in
-[`tests/codegen/sanitize*.rs`][test-cg] and end-to-end functional tests in
+[`tests/codegen-llvm/sanitize*.rs`][test-cg] and end-to-end functional tests in
 [`tests/ui/sanitizer/`][test-ui] directory.
 
 Testing sanitizer functionality requires the sanitizer runtimes (built when
-`sanitizer = true` in `config.toml`) and target providing support for particular
+`sanitizer = true` in `bootstrap.toml`) and target providing support for particular
 sanitizer. When sanitizer is unsupported on given target, sanitizers tests will
 be ignored. This behaviour is controlled by compiletest `needs-sanitizer-*`
 directives.
 
-[test-cg]: https://github.com/rust-lang/rust/tree/master/tests/codegen
+[test-cg]: https://github.com/rust-lang/rust/tree/master/tests/codegen-llvm
 [test-ui]: https://github.com/rust-lang/rust/tree/master/tests/ui/sanitizer
 
 ## Enabling sanitizer on a new target

@@ -8,10 +8,10 @@ use rustc_span::def_id::LocalDefId;
 /// Create a THIR tree for debugging.
 pub fn thir_tree(tcx: TyCtxt<'_>, owner_def: LocalDefId) -> String {
     match super::cx::thir_body(tcx, owner_def) {
-        Ok((thir, _)) => {
+        Ok((thir, expr)) => {
             let thir = thir.steal();
             let mut printer = ThirPrinter::new(&thir);
-            printer.print();
+            printer.print(expr);
             printer.into_buffer()
         }
         Err(_) => "error".into(),
@@ -58,7 +58,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
         }
     }
 
-    fn print(&mut self) {
+    fn print(&mut self, body_expr: ExprId) {
         print_indented!(self, "params: [", 0);
         for param in self.thir.params.iter() {
             self.print_param(param, 1);
@@ -66,8 +66,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
         print_indented!(self, "]", 0);
 
         print_indented!(self, "body:", 0);
-        let expr = ExprId::from_usize(self.thir.exprs.len() - 1);
-        self.print_expr(expr, 1);
+        self.print_expr(body_expr, 1);
     }
 
     fn into_buffer(self) -> String {
@@ -246,6 +245,13 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
 
                 print_indented!(self, "}", depth_lvl);
             }
+            ByUse { expr, span } => {
+                print_indented!(self, "ByUse {", depth_lvl);
+                print_indented!(self, "expr:", depth_lvl + 1);
+                self.print_expr(*expr, depth_lvl + 2);
+                print_indented!(self, format!("span: {:?}", span), depth_lvl + 1);
+                print_indented!(self, "}", depth_lvl);
+            }
             Deref { arg } => {
                 print_indented!(self, "Deref {", depth_lvl);
                 self.print_expr(*arg, depth_lvl + 1);
@@ -311,6 +317,25 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 print_indented!(self, "body:", depth_lvl + 1);
                 self.print_expr(*body, depth_lvl + 2);
                 print_indented!(self, ")", depth_lvl);
+            }
+            LoopMatch { state, region_scope, match_data } => {
+                print_indented!(self, "LoopMatch {", depth_lvl);
+                print_indented!(self, "state:", depth_lvl + 1);
+                self.print_expr(*state, depth_lvl + 2);
+                print_indented!(self, format!("region_scope: {:?}", region_scope), depth_lvl + 1);
+                print_indented!(self, "match_data:", depth_lvl + 1);
+                print_indented!(self, "LoopMatchMatchData {", depth_lvl + 2);
+                print_indented!(self, format!("span: {:?}", match_data.span), depth_lvl + 3);
+                print_indented!(self, "scrutinee:", depth_lvl + 3);
+                self.print_expr(match_data.scrutinee, depth_lvl + 4);
+
+                print_indented!(self, "arms: [", depth_lvl + 3);
+                for arm_id in match_data.arms.iter() {
+                    self.print_arm(*arm_id, depth_lvl + 4);
+                }
+                print_indented!(self, "]", depth_lvl + 3);
+                print_indented!(self, "}", depth_lvl + 2);
+                print_indented!(self, "}", depth_lvl);
             }
             Let { expr, pat } => {
                 print_indented!(self, "Let {", depth_lvl);
@@ -408,6 +433,13 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 print_indented!(self, "Continue {", depth_lvl);
                 print_indented!(self, format!("label: {:?}", label), depth_lvl + 1);
                 print_indented!(self, "}", depth_lvl);
+            }
+            ConstContinue { label, value } => {
+                print_indented!(self, "ConstContinue (", depth_lvl);
+                print_indented!(self, format!("label: {:?}", label), depth_lvl + 1);
+                print_indented!(self, "value:", depth_lvl + 1);
+                self.print_expr(*value, depth_lvl + 2);
+                print_indented!(self, ")", depth_lvl);
             }
             Return { value } => {
                 print_indented!(self, "Return {", depth_lvl);
@@ -657,6 +689,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
         print_indented!(self, "kind: PatKind {", depth_lvl);
 
         match pat_kind {
+            PatKind::Missing => unreachable!(),
             PatKind::Wild => {
                 print_indented!(self, "Wild", depth_lvl + 1);
             }
@@ -733,10 +766,9 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 print_indented!(self, format!("value: {:?}", value), depth_lvl + 2);
                 print_indented!(self, "}", depth_lvl + 1);
             }
-            PatKind::ExpandedConstant { def_id, is_inline, subpattern } => {
+            PatKind::ExpandedConstant { def_id, subpattern } => {
                 print_indented!(self, "ExpandedConstant {", depth_lvl + 1);
                 print_indented!(self, format!("def_id: {def_id:?}"), depth_lvl + 2);
-                print_indented!(self, format!("is_inline: {is_inline:?}"), depth_lvl + 2);
                 print_indented!(self, "subpattern:", depth_lvl + 2);
                 self.print_pat(subpattern, depth_lvl + 2);
                 print_indented!(self, "}", depth_lvl + 1);

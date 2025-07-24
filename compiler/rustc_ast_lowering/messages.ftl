@@ -127,9 +127,6 @@ ast_lowering_misplaced_impl_trait =
     `impl Trait` is not allowed in {$position}
     .note = `impl Trait` is only allowed in arguments and return types of functions and methods
 
-ast_lowering_misplaced_relax_trait_bound =
-    `?Trait` bounds are only permitted at the point where a type parameter is declared
-
 ast_lowering_never_pattern_with_body =
     a never pattern is always unreachable
     .label = this will never be executed
@@ -140,9 +137,6 @@ ast_lowering_never_pattern_with_guard =
     .suggestion = remove this guard
 
 ast_lowering_no_precise_captures_on_apit = `use<...>` precise capturing syntax not allowed in argument-position `impl Trait`
-
-ast_lowering_no_precise_captures_on_rpitit = `use<...>` precise capturing syntax is currently not allowed in return-position `impl Trait` in traits
-    .note = currently, return-position `impl Trait` in traits and trait implementations capture all lifetimes in scope
 
 ast_lowering_previously_used_here = previously used here
 
@@ -175,18 +169,15 @@ ast_lowering_template_modifier = template modifier
 
 ast_lowering_this_not_async = this is not `async`
 
-ast_lowering_underscore_array_length_unstable =
-    using `_` for array lengths is unstable
-
 ast_lowering_underscore_expr_lhs_assign =
     in expressions, `_` can only be used on the left-hand side of an assignment
     .label = `_` not allowed here
 
+ast_lowering_union_default_field_values = unions cannot have default field values
+
 ast_lowering_unstable_inline_assembly = inline assembly is not stable yet on this architecture
 ast_lowering_unstable_inline_assembly_label_operand_with_outputs =
     using both label and output operands for inline assembly is unstable
-ast_lowering_unstable_inline_assembly_label_operands =
-    label operands for inline assembly are unstable
 ast_lowering_unstable_may_unwind = the `may_unwind` option is unstable
 
 ast_lowering_use_angle_brackets = use angle brackets instead

@@ -60,7 +60,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 if access_place.as_local().is_some() {
                     reason = ", as it is not declared as mutable".to_string();
                 } else {
-                    let name = self.local_names[local].expect("immutable unnamed local");
+                    let name = self.local_name(local).expect("immutable unnamed local");
                     reason = format!(", as `{name}` is not declared as mutable");
                 }
             }
@@ -285,7 +285,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     .body
                     .local_decls
                     .get(local)
-                    .is_some_and(|l| mut_borrow_of_mutable_ref(l, self.local_names[local])) =>
+                    .is_some_and(|l| mut_borrow_of_mutable_ref(l, self.local_name(local))) =>
             {
                 let decl = &self.body.local_decls[local];
                 err.span_label(span, format!("cannot {act}"));
@@ -481,7 +481,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 let (pointer_sigil, pointer_desc) =
                     if local_decl.ty.is_ref() { ("&", "reference") } else { ("*const", "pointer") };
 
-                match self.local_names[local] {
+                match self.local_name(local) {
                     Some(name) if !local_decl.from_compiler_desugaring() => {
                         err.span_label(
                             span,
@@ -681,44 +681,30 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             return (false, false, None);
         }
         let my_def = self.body.source.def_id();
-        let my_hir = self.infcx.tcx.local_def_id_to_hir_id(my_def.as_local().unwrap());
         let Some(td) =
             self.infcx.tcx.impl_of_method(my_def).and_then(|x| self.infcx.tcx.trait_id_of_impl(x))
         else {
             return (false, false, None);
         };
+
+        let implemented_trait_item = self.infcx.tcx.associated_item(my_def).trait_item_def_id;
+
         (
             true,
             td.is_local(),
-            td.as_local().and_then(|tld| match self.infcx.tcx.hir_node_by_def_id(tld) {
-                Node::Item(hir::Item { kind: hir::ItemKind::Trait(_, _, _, _, items), .. }) => {
-                    let mut f_in_trait_opt = None;
-                    for hir::TraitItemRef { id: fi, kind: k, .. } in *items {
-                        let hi = fi.hir_id();
-                        if !matches!(k, hir::AssocItemKind::Fn { .. }) {
-                            continue;
-                        }
-                        if self.infcx.tcx.hir().name(hi) != self.infcx.tcx.hir().name(my_hir) {
-                            continue;
-                        }
-                        f_in_trait_opt = Some(hi);
-                        break;
-                    }
-                    f_in_trait_opt.and_then(|f_in_trait| {
-                        if let Node::TraitItem(ti) = self.infcx.tcx.hir_node(f_in_trait)
-                            && let hir::TraitItemKind::Fn(sig, _) = ti.kind
-                            && let Some(ty) = sig.decl.inputs.get(local.index() - 1)
-                            && let hir::TyKind::Ref(_, mut_ty) = ty.kind
-                            && let hir::Mutability::Not = mut_ty.mutbl
-                            && sig.decl.implicit_self.has_implicit_self()
-                        {
-                            Some(ty.span)
-                        } else {
-                            None
-                        }
-                    })
+            implemented_trait_item.and_then(|f_in_trait| {
+                let f_in_trait = f_in_trait.as_local()?;
+                if let Node::TraitItem(ti) = self.infcx.tcx.hir_node_by_def_id(f_in_trait)
+                    && let hir::TraitItemKind::Fn(sig, _) = ti.kind
+                    && let Some(ty) = sig.decl.inputs.get(local.index() - 1)
+                    && let hir::TyKind::Ref(_, mut_ty) = ty.kind
+                    && let hir::Mutability::Not = mut_ty.mutbl
+                    && sig.decl.implicit_self.has_implicit_self()
+                {
+                    Some(ty.span)
+                } else {
+                    None
                 }
-                _ => None,
             }),
         )
     }
@@ -823,7 +809,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                             ) => {
                                 capture_reason = format!("mutable borrow of `{upvar}`");
                             }
-                            ty::UpvarCapture::ByValue => {
+                            ty::UpvarCapture::ByValue | ty::UpvarCapture::ByUse => {
                                 capture_reason = format!("possible mutation of `{upvar}`");
                             }
                             _ => bug!("upvar `{upvar}` borrowed, but not mutably"),
@@ -838,14 +824,22 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             } else {
                 bug!("not an upvar")
             };
-            err.span_label(
-                *span,
-                format!(
-                    "calling `{}` requires mutable binding due to {}",
-                    self.describe_place(the_place_err).unwrap(),
-                    reason
-                ),
-            );
+            // sometimes we deliberately don't store the name of a place when coming from a macro in
+            // another crate. We generally want to limit those diagnostics a little, to hide
+            // implementation details (such as those from pin!() or format!()). In that case show a
+            // slightly different error message, or none at all if something else happened. In other
+            // cases the message is likely not useful.
+            if let Some(place_name) = self.describe_place(the_place_err) {
+                err.span_label(
+                    *span,
+                    format!("calling `{place_name}` requires mutable binding due to {reason}"),
+                );
+            } else if span.from_expansion() {
+                err.span_label(
+                    *span,
+                    format!("a call in this macro requires a mutable binding due to {reason}",),
+                );
+            }
         }
     }
 
@@ -967,7 +961,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         };
 
-        // If we can detect the expression to be an function or method call where the closure was
+        // If we can detect the expression to be a function or method call where the closure was
         // an argument, we point at the function or method definition argument...
         if let Some((callee_def_id, call_span, call_args)) = get_call_details() {
             let arg_pos = call_args
@@ -980,7 +974,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             let arg = match tcx.hir_get_if_local(callee_def_id) {
                 Some(
                     hir::Node::Item(hir::Item {
-                        ident, kind: hir::ItemKind::Fn { sig, .. }, ..
+                        kind: hir::ItemKind::Fn { ident, sig, .. }, ..
                     })
                     | hir::Node::TraitItem(hir::TraitItem {
                         ident,
@@ -1021,7 +1015,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             // return type.
             match tcx.hir_node_by_def_id(tcx.hir_get_parent_item(fn_call_id).def_id) {
                 hir::Node::Item(hir::Item {
-                    ident, kind: hir::ItemKind::Fn { sig, .. }, ..
+                    kind: hir::ItemKind::Fn { ident, sig, .. }, ..
                 })
                 | hir::Node::TraitItem(hir::TraitItem {
                     ident,
@@ -1158,6 +1152,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                                     _,
                                     mir::Rvalue::Use(mir::Operand::Copy(place)),
                                 )),
+                            ..
                         }) = self.body[location.block].statements.get(location.statement_index)
                         {
                             self.body.local_decls[place.local].source_info.span
@@ -1632,8 +1627,8 @@ fn get_mut_span_in_struct_field<'tcx>(
 /// If possible, suggest replacing `ref` with `ref mut`.
 fn suggest_ref_mut(tcx: TyCtxt<'_>, span: Span) -> Option<Span> {
     let pattern_str = tcx.sess.source_map().span_to_snippet(span).ok()?;
-    if pattern_str.starts_with("ref")
-        && pattern_str["ref".len()..].starts_with(rustc_lexer::is_whitespace)
+    if let Some(rest) = pattern_str.strip_prefix("ref")
+        && rest.starts_with(rustc_lexer::is_whitespace)
     {
         let span = span.with_lo(span.lo() + BytePos(4)).shrink_to_lo();
         Some(span)

@@ -104,6 +104,7 @@ impl RawWaker {
 /// synchronization. This is because [`LocalWaker`] is not thread safe itself, so it cannot
 /// be sent across threads.
 #[stable(feature = "futures_api", since = "1.36.0")]
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(PartialEq, Copy, Clone, Debug)]
 pub struct RawWakerVTable {
     /// This function will be called when the [`RawWaker`] gets cloned, e.g. when
@@ -402,7 +403,7 @@ impl<'a> ContextBuilder<'a> {
 /// [`Wake`]: ../../alloc/task/trait.Wake.html
 #[repr(transparent)]
 #[stable(feature = "futures_api", since = "1.36.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "Waker")]
+#[rustc_diagnostic_item = "Waker"]
 pub struct Waker {
     waker: RawWaker,
 }

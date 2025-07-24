@@ -5,7 +5,7 @@ use rustc_index::IndexVec;
 use rustc_middle::mir::pretty::{
     PassWhere, PrettyPrintMirOptions, create_dump_file, dump_enabled, dump_mir_to_writer,
 };
-use rustc_middle::mir::{Body, ClosureRegionRequirements, Location};
+use rustc_middle::mir::{Body, Location};
 use rustc_middle::ty::{RegionVid, TyCtxt};
 use rustc_mir_dataflow::points::PointIndex;
 use rustc_session::config::MirIncludeSpans;
@@ -17,16 +17,16 @@ use crate::polonius::{
 };
 use crate::region_infer::values::LivenessValues;
 use crate::type_check::Locations;
-use crate::{BorrowckInferCtxt, RegionInferenceContext};
+use crate::{BorrowckInferCtxt, ClosureRegionRequirements, RegionInferenceContext};
 
 /// `-Zdump-mir=polonius` dumps MIR annotated with NLL and polonius specific information.
 pub(crate) fn dump_polonius_mir<'tcx>(
     infcx: &BorrowckInferCtxt<'tcx>,
     body: &Body<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
+    closure_region_requirements: &Option<ClosureRegionRequirements<'tcx>>,
     borrow_set: &BorrowSet<'tcx>,
     polonius_diagnostics: Option<&PoloniusDiagnosticsContext>,
-    closure_region_requirements: &Option<ClosureRegionRequirements<'tcx>>,
 ) {
     let tcx = infcx.tcx;
     if !tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
@@ -116,7 +116,7 @@ fn emit_polonius_dump<'tcx>(
     writeln!(out, "<div>")?;
     writeln!(out, "NLL regions")?;
     writeln!(out, "<pre class='mermaid'>")?;
-    emit_mermaid_nll_regions(regioncx, out)?;
+    emit_mermaid_nll_regions(tcx, regioncx, out)?;
     writeln!(out, "</pre>")?;
     writeln!(out, "</div>")?;
 
@@ -124,7 +124,7 @@ fn emit_polonius_dump<'tcx>(
     writeln!(out, "<div>")?;
     writeln!(out, "NLL SCCs")?;
     writeln!(out, "<pre class='mermaid'>")?;
-    emit_mermaid_nll_sccs(regioncx, out)?;
+    emit_mermaid_nll_sccs(tcx, regioncx, out)?;
     writeln!(out, "</pre>")?;
     writeln!(out, "</div>")?;
 
@@ -306,9 +306,10 @@ fn emit_mermaid_cfg(body: &Body<'_>, out: &mut dyn io::Write) -> io::Result<()> 
 }
 
 /// Emits a region's label: index, universe, external name.
-fn render_region(
+fn render_region<'tcx>(
+    tcx: TyCtxt<'tcx>,
     region: RegionVid,
-    regioncx: &RegionInferenceContext<'_>,
+    regioncx: &RegionInferenceContext<'tcx>,
     out: &mut dyn io::Write,
 ) -> io::Result<()> {
     let def = regioncx.region_definition(region);
@@ -318,7 +319,7 @@ fn render_region(
     if !universe.is_root() {
         write!(out, "/{universe:?}")?;
     }
-    if let Some(name) = def.external_name.and_then(|e| e.get_name()) {
+    if let Some(name) = def.external_name.and_then(|e| e.get_name(tcx)) {
         write!(out, " ({name})")?;
     }
     Ok(())
@@ -327,6 +328,7 @@ fn render_region(
 /// Emits a mermaid flowchart of the NLL regions and the outlives constraints between them, similar
 /// to the graphviz version.
 fn emit_mermaid_nll_regions<'tcx>(
+    tcx: TyCtxt<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
     out: &mut dyn io::Write,
 ) -> io::Result<()> {
@@ -334,9 +336,9 @@ fn emit_mermaid_nll_regions<'tcx>(
     writeln!(out, "flowchart TD")?;
 
     // Emit the region nodes.
-    for region in regioncx.var_infos.indices() {
+    for region in regioncx.definitions.indices() {
         write!(out, "{}[\"", region.as_usize())?;
-        render_region(region, regioncx, out)?;
+        render_region(tcx, region, regioncx, out)?;
         writeln!(out, "\"]")?;
     }
 
@@ -378,6 +380,7 @@ fn emit_mermaid_nll_regions<'tcx>(
 /// Emits a mermaid flowchart of the NLL SCCs and the outlives constraints between them, similar
 /// to the graphviz version.
 fn emit_mermaid_nll_sccs<'tcx>(
+    tcx: TyCtxt<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
     out: &mut dyn io::Write,
 ) -> io::Result<()> {
@@ -387,7 +390,7 @@ fn emit_mermaid_nll_sccs<'tcx>(
     // Gather and emit the SCC nodes.
     let mut nodes_per_scc: IndexVec<_, _> =
         regioncx.constraint_sccs().all_sccs().map(|_| Vec::new()).collect();
-    for region in regioncx.var_infos.indices() {
+    for region in regioncx.definitions.indices() {
         let scc = regioncx.constraint_sccs().scc(region);
         nodes_per_scc[scc].push(region);
     }
@@ -395,7 +398,7 @@ fn emit_mermaid_nll_sccs<'tcx>(
         // The node label: the regions contained in the SCC.
         write!(out, "{scc}[\"SCC({scc}) = {{", scc = scc.as_usize())?;
         for (idx, &region) in regions.iter().enumerate() {
-            render_region(region, regioncx, out)?;
+            render_region(tcx, region, regioncx, out)?;
             if idx < regions.len() - 1 {
                 write!(out, ",")?;
             }

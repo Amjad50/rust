@@ -25,6 +25,11 @@ pub struct Environment {
     prebuilt_rustc_perf: Option<Utf8PathBuf>,
     use_bolt: bool,
     shared_llvm: bool,
+    run_tests: bool,
+    fast_try_build: bool,
+    build_llvm: bool,
+    #[builder(default)]
+    stage0_root: Option<Utf8PathBuf>,
 }
 
 impl Environment {
@@ -45,7 +50,7 @@ impl Environment {
     }
 
     pub fn build_artifacts(&self) -> Utf8PathBuf {
-        self.build_root().join("build").join(&self.host_tuple)
+        self.build_root().join(&self.host_tuple)
     }
 
     pub fn artifact_dir(&self) -> Utf8PathBuf {
@@ -53,17 +58,11 @@ impl Environment {
     }
 
     pub fn cargo_stage_0(&self) -> Utf8PathBuf {
-        self.build_artifacts()
-            .join("stage0")
-            .join("bin")
-            .join(format!("cargo{}", executable_extension()))
+        self.stage0().join("bin").join(format!("cargo{}", executable_extension()))
     }
 
     pub fn rustc_stage_0(&self) -> Utf8PathBuf {
-        self.build_artifacts()
-            .join("stage0")
-            .join("bin")
-            .join(format!("rustc{}", executable_extension()))
+        self.stage0().join("bin").join(format!("rustc{}", executable_extension()))
     }
 
     pub fn rustc_stage_2(&self) -> Utf8PathBuf {
@@ -100,6 +99,22 @@ impl Environment {
 
     pub fn benchmark_cargo_config(&self) -> &[String] {
         &self.benchmark_cargo_config
+    }
+
+    pub fn run_tests(&self) -> bool {
+        self.run_tests
+    }
+
+    pub fn is_fast_try_build(&self) -> bool {
+        self.fast_try_build
+    }
+
+    pub fn build_llvm(&self) -> bool {
+        self.build_llvm
+    }
+
+    pub fn stage0(&self) -> Utf8PathBuf {
+        self.stage0_root.clone().unwrap_or_else(|| self.build_artifacts().join("stage0"))
     }
 }
 

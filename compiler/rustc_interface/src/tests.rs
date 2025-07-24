@@ -1,7 +1,7 @@
 #![allow(rustc::bad_opt_access)]
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::num::NonZero;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use rustc_abi::Align;
@@ -13,21 +13,21 @@ use rustc_session::config::{
     CoverageOptions, DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation,
     Externs, FmtDebug, FunctionReturn, InliningThreshold, Input, InstrumentCoverage,
     InstrumentXRay, LinkSelfContained, LinkerPluginLto, LocationDetail, LtoCli, MirIncludeSpans,
-    NextSolverConfig, OomStrategy, Options, OutFileName, OutputType, OutputTypes, PAuthKey, PacRet,
-    Passes, PatchableFunctionEntry, Polonius, ProcMacroExecutionStrategy, Strip, SwitchWithOptPath,
-    SymbolManglingVersion, WasiExecModel, build_configuration, build_session_options,
-    rustc_optgroups,
+    NextSolverConfig, Offload, OomStrategy, Options, OutFileName, OutputType, OutputTypes,
+    PAuthKey, PacRet, Passes, PatchableFunctionEntry, Polonius, ProcMacroExecutionStrategy, Strip,
+    SwitchWithOptPath, SymbolManglingVersion, WasiExecModel, build_configuration,
+    build_session_options, rustc_optgroups,
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
 use rustc_session::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
-use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, build_session, filesearch, getopts};
+use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, build_session, getopts};
 use rustc_span::edition::{DEFAULT_EDITION, Edition};
 use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
 use rustc_span::{FileName, SourceFileHashAlgorithm, sym};
 use rustc_target::spec::{
     CodeModel, FramePointer, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy,
-    RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel, WasmCAbi,
+    RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel,
 };
 
 use crate::interface::{initialize_checked_jobserver, parse_cfg};
@@ -41,9 +41,11 @@ where
 
     let matches = optgroups().parse(args).unwrap();
     let sessopts = build_session_options(&mut early_dcx, &matches);
-    let sysroot = filesearch::materialize_sysroot(sessopts.maybe_sysroot.clone());
-    let target =
-        rustc_session::config::build_target_config(&early_dcx, &sessopts.target_triple, &sysroot);
+    let target = rustc_session::config::build_target_config(
+        &early_dcx,
+        &sessopts.target_triple,
+        sessopts.sysroot.path(),
+    );
     let hash_kind = sessopts.unstable_opts.src_hash_algorithm(&target);
     let checksum_hash_kind = sessopts.unstable_opts.checksum_hash_algorithm();
     let sm_inputs = Some(SourceMapInputs {
@@ -53,7 +55,7 @@ where
         checksum_hash_kind,
     });
 
-    rustc_span::create_session_globals_then(DEFAULT_EDITION, sm_inputs, || {
+    rustc_span::create_session_globals_then(DEFAULT_EDITION, &[], sm_inputs, || {
         let temps_dir = sessopts.unstable_opts.temps_dir.as_deref().map(PathBuf::from);
         let io = CompilerIO {
             input: Input::Str { name: FileName::Custom(String::new()), input: String::new() },
@@ -72,7 +74,6 @@ where
             vec![],
             Default::default(),
             target,
-            sysroot,
             "",
             None,
             &USING_INTERNAL_FEATURES,
@@ -89,8 +90,8 @@ where
     S: Into<String>,
     I: IntoIterator<Item = S>,
 {
-    let locations: BTreeSet<CanonicalizedPath> =
-        locations.into_iter().map(|s| CanonicalizedPath::new(Path::new(&s.into()))).collect();
+    let locations =
+        locations.into_iter().map(|s| CanonicalizedPath::new(PathBuf::from(s.into()))).collect();
 
     ExternEntry {
         location: ExternLocation::ExactPaths(locations),
@@ -614,6 +615,7 @@ fn test_codegen_options_tracking_hash() {
     tracked!(control_flow_guard, CFGuard::Checks);
     tracked!(debug_assertions, Some(true));
     tracked!(debuginfo, DebugInfo::Limited);
+    tracked!(dwarf_version, Some(5));
     tracked!(embed_bitcode, false);
     tracked!(force_frame_pointers, FramePointer::Always);
     tracked!(force_unwind_tables, Some(true));
@@ -708,18 +710,20 @@ fn test_unstable_options_tracking_hash() {
     untracked!(llvm_time_trace, true);
     untracked!(ls, vec!["all".to_owned()]);
     untracked!(macro_backtrace, true);
+    untracked!(macro_stats, true);
     untracked!(meta_stats, true);
     untracked!(mir_include_spans, MirIncludeSpans::On);
     untracked!(nll_facts, true);
     untracked!(no_analysis, true);
     untracked!(no_leak_check, true);
     untracked!(no_parallel_backend, true);
+    untracked!(no_steal_thir, true);
     untracked!(parse_crate_root_only, true);
     // `pre_link_arg` is omitted because it just forwards to `pre_link_args`.
     untracked!(pre_link_args, vec![String::from("abc"), String::from("def")]);
     untracked!(print_codegen_stats, true);
     untracked!(print_llvm_passes, true);
-    untracked!(print_mono_items, Some(String::from("abc")));
+    untracked!(print_mono_items, true);
     untracked!(print_type_sizes, true);
     untracked!(proc_macro_backtrace, true);
     untracked!(proc_macro_execution_strategy, ProcMacroExecutionStrategy::CrossThread);
@@ -787,6 +791,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(direct_access_external_data, Some(true));
     tracked!(dual_proc_macros, true);
     tracked!(dwarf_version, Some(5));
+    tracked!(embed_metadata, false);
     tracked!(embed_source, true);
     tracked!(emit_thin_lto, false);
     tracked!(emscripten_wasm_eh, true);
@@ -798,6 +803,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(force_unstable_if_unmarked, true);
     tracked!(function_return, FunctionReturn::ThunkExtern);
     tracked!(function_sections, Some(false));
+    tracked!(hint_mostly_unused, true);
     tracked!(human_readable_cgu_names, true);
     tracked!(incremental_ignore_spans, true);
     tracked!(inline_mir, Some(true));
@@ -816,8 +822,8 @@ fn test_unstable_options_tracking_hash() {
     tracked!(min_function_alignment, Some(Align::EIGHT));
     tracked!(mir_emit_retag, true);
     tracked!(mir_enable_passes, vec![("DestProp".to_string(), false)]);
-    tracked!(mir_keep_place_mention, true);
     tracked!(mir_opt_level, Some(4));
+    tracked!(mir_preserve_ub, true);
     tracked!(move_size_limit, Some(4096));
     tracked!(mutable_noalias, false);
     tracked!(next_solver, NextSolverConfig { coherence: true, globally: true });
@@ -827,6 +833,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(no_profiler_runtime, true);
     tracked!(no_trait_vptr, true);
     tracked!(no_unique_section_names, true);
+    tracked!(offload, vec![Offload::Enable]);
     tracked!(on_broken_pipe, OnBrokenPipe::Kill);
     tracked!(oom, OomStrategy::Panic);
     tracked!(osx_rpath_install_name, true);
@@ -852,6 +859,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(sanitizer_cfi_generalize_pointers, Some(true));
     tracked!(sanitizer_cfi_normalize_integers, Some(true));
     tracked!(sanitizer_dataflow_abilist, vec![String::from("/rustc/abc")]);
+    tracked!(sanitizer_kcfi_arity, Some(true));
     tracked!(sanitizer_memory_track_origins, 2);
     tracked!(sanitizer_recover, SanitizerSet::ADDRESS);
     tracked!(saturating_float_casts, Some(true));
@@ -877,7 +885,6 @@ fn test_unstable_options_tracking_hash() {
     tracked!(verify_llvm_ir, true);
     tracked!(virtual_function_elimination, true);
     tracked!(wasi_exec_model, Some(WasiExecModel::Reactor));
-    tracked!(wasm_c_abi, WasmCAbi::Spec);
     // tidy-alphabetical-end
 
     macro_rules! tracked_no_crate_hash {

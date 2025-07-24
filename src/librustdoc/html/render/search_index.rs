@@ -4,6 +4,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 
 use encode::{bitmap_to_string, write_vlqhex_to_string};
+use rustc_ast::join_path_syms;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
@@ -17,7 +18,6 @@ use crate::clean::types::{Function, Generics, ItemId, Type, WherePredicate};
 use crate::clean::{self, utils};
 use crate::formats::cache::{Cache, OrphanImplItem};
 use crate::formats::item_type::ItemType;
-use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
 use crate::html::render::ordered_json::OrderedJson;
 use crate::html::render::{self, IndexItem, IndexItemFunctionType, RenderType, RenderTypeId};
@@ -78,7 +78,7 @@ pub(crate) fn build_index(
                 ty: item.type_(),
                 defid: item.item_id.as_def_id(),
                 name: item.name.unwrap(),
-                path: join_with_double_colon(&fqp[..fqp.len() - 1]),
+                path: join_path_syms(&fqp[..fqp.len() - 1]),
                 desc,
                 parent: Some(parent),
                 parent_idx: None,
@@ -116,7 +116,7 @@ pub(crate) fn build_index(
     // Set up alias indexes.
     for (i, item) in cache.search_index.iter().enumerate() {
         for alias in &item.aliases[..] {
-            aliases.entry(alias.as_str().to_lowercase()).or_default().push(i);
+            aliases.entry(alias.to_string()).or_default().push(i);
         }
     }
 
@@ -416,7 +416,7 @@ pub(crate) fn build_index(
                             if fqp.len() < 2 {
                                 return None;
                             }
-                            join_with_double_colon(&fqp[..fqp.len() - 1])
+                            join_path_syms(&fqp[..fqp.len() - 1])
                         };
                     if path == item.path {
                         return None;
@@ -427,10 +427,10 @@ pub(crate) fn build_index(
                 let i = <isize as TryInto<usize>>::try_into(parent_idx).unwrap();
                 item.path = {
                     let p = &crate_paths[i].1;
-                    join_with_double_colon(&p[..p.len() - 1])
+                    join_path_syms(&p[..p.len() - 1])
                 };
                 item.exact_path =
-                    crate_paths[i].2.as_ref().map(|xp| join_with_double_colon(&xp[..xp.len() - 1]));
+                    crate_paths[i].2.as_ref().map(|xp| join_path_syms(&xp[..xp.len() - 1]));
             }
 
             // Omit the parent path if it is same to that of the prior item.
@@ -549,11 +549,11 @@ pub(crate) fn build_index(
                     });
                     continue;
                 }
-                let full_path = join_with_double_colon(&path[..path.len() - 1]);
+                let full_path = join_path_syms(&path[..path.len() - 1]);
                 let full_exact_path = exact
                     .as_ref()
                     .filter(|exact| exact.last() == path.last() && exact.len() >= 2)
-                    .map(|exact| join_with_double_colon(&exact[..exact.len() - 1]));
+                    .map(|exact| join_path_syms(&exact[..exact.len() - 1]));
                 let exact_path = extra_paths.len() + self.items.len();
                 let exact_path = full_exact_path.as_ref().map(|full_exact_path| match extra_paths
                     .entry(full_exact_path.clone())
@@ -709,8 +709,11 @@ pub(crate) fn build_index(
                 let mut result = Vec::new();
                 for (index, item) in self.items.iter().enumerate() {
                     if let Some(ty) = &item.search_type
-                        && let my =
-                            ty.param_names.iter().map(|sym| sym.as_str()).collect::<Vec<_>>()
+                        && let my = ty
+                            .param_names
+                            .iter()
+                            .filter_map(|sym| sym.map(|sym| sym.to_string()))
+                            .collect::<Vec<_>>()
                         && my != prev
                     {
                         result.push((index, my.join(",")));
@@ -842,10 +845,7 @@ pub(crate) fn get_function_type_for_search(
         }
         clean::ConstantItem(ref c) => make_nullary_fn(&c.type_),
         clean::StaticItem(ref s) => make_nullary_fn(&s.type_),
-        clean::StructFieldItem(ref t) => {
-            let Some(parent) = parent else {
-                return None;
-            };
+        clean::StructFieldItem(ref t) if let Some(parent) = parent => {
             let mut rgen: FxIndexMap<SimplifiedParam, (isize, Vec<RenderType>)> =
                 Default::default();
             let output = get_index_type(t, vec![], &mut rgen);
@@ -1112,7 +1112,7 @@ fn simplify_fn_type<'a, 'tcx>(
         }
         Type::BareFunction(ref bf) => {
             let mut ty_generics = Vec::new();
-            for ty in bf.decl.inputs.values.iter().map(|arg| &arg.type_) {
+            for ty in bf.decl.inputs.iter().map(|arg| &arg.type_) {
                 simplify_fn_type(
                     self_,
                     generics,
@@ -1375,7 +1375,7 @@ fn simplify_fn_constraint<'a>(
 /// Used to allow type-based search on constants and statics.
 fn make_nullary_fn(
     clean_type: &clean::Type,
-) -> (Vec<RenderType>, Vec<RenderType>, Vec<Symbol>, Vec<Vec<RenderType>>) {
+) -> (Vec<RenderType>, Vec<RenderType>, Vec<Option<Symbol>>, Vec<Vec<RenderType>>) {
     let mut rgen: FxIndexMap<SimplifiedParam, (isize, Vec<RenderType>)> = Default::default();
     let output = get_index_type(clean_type, vec![], &mut rgen);
     (vec![], vec![output], vec![], vec![])
@@ -1390,7 +1390,7 @@ fn get_fn_inputs_and_outputs(
     tcx: TyCtxt<'_>,
     impl_or_trait_generics: Option<&(clean::Type, clean::Generics)>,
     cache: &Cache,
-) -> (Vec<RenderType>, Vec<RenderType>, Vec<Symbol>, Vec<Vec<RenderType>>) {
+) -> (Vec<RenderType>, Vec<RenderType>, Vec<Option<Symbol>>, Vec<Vec<RenderType>>) {
     let decl = &func.decl;
 
     let mut rgen: FxIndexMap<SimplifiedParam, (isize, Vec<RenderType>)> = Default::default();
@@ -1418,15 +1418,15 @@ fn get_fn_inputs_and_outputs(
         (None, &func.generics)
     };
 
-    let mut arg_types = Vec::new();
-    for arg in decl.inputs.values.iter() {
+    let mut param_types = Vec::new();
+    for param in decl.inputs.iter() {
         simplify_fn_type(
             self_,
             generics,
-            &arg.type_,
+            &param.type_,
             tcx,
             0,
-            &mut arg_types,
+            &mut param_types,
             &mut rgen,
             false,
             cache,
@@ -1439,15 +1439,15 @@ fn get_fn_inputs_and_outputs(
     let mut simplified_params = rgen.into_iter().collect::<Vec<_>>();
     simplified_params.sort_by_key(|(_, (idx, _))| -idx);
     (
-        arg_types,
+        param_types,
         ret_types,
         simplified_params
             .iter()
             .map(|(name, (_idx, _traits))| match name {
-                SimplifiedParam::Symbol(name) => *name,
-                SimplifiedParam::Anonymous(_) => kw::Empty,
+                SimplifiedParam::Symbol(name) => Some(*name),
+                SimplifiedParam::Anonymous(_) => None,
                 SimplifiedParam::AssociatedType(def_id, name) => {
-                    Symbol::intern(&format!("{}::{}", tcx.item_name(*def_id), name))
+                    Some(Symbol::intern(&format!("{}::{}", tcx.item_name(*def_id), name)))
                 }
             })
             .collect(),

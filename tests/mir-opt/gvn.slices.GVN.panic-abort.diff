@@ -87,22 +87,24 @@
           _1 = const "my favourite slice";
           StorageLive(_2);
           StorageLive(_3);
-          _3 = copy _1;
+-         _3 = copy _1;
 -         _2 = opaque::<&str>(move _3) -> [return: bb1, unwind unreachable];
-+         _2 = opaque::<&str>(copy _1) -> [return: bb1, unwind unreachable];
++         _3 = const "my favourite slice";
++         _2 = opaque::<&str>(const "my favourite slice") -> [return: bb1, unwind unreachable];
       }
   
       bb1: {
           StorageDead(_3);
           StorageDead(_2);
           StorageLive(_4);
-          _4 = copy _1;
+-         _4 = copy _1;
++         _4 = const "my favourite slice";
           StorageLive(_5);
           StorageLive(_6);
 -         _6 = copy _4;
 -         _5 = opaque::<&str>(move _6) -> [return: bb2, unwind unreachable];
-+         _6 = copy _1;
-+         _5 = opaque::<&str>(copy _1) -> [return: bb2, unwind unreachable];
++         _6 = const "my favourite slice";
++         _5 = opaque::<&str>(const "my favourite slice") -> [return: bb2, unwind unreachable];
       }
   
       bb2: {
@@ -111,8 +113,9 @@
           StorageLive(_7);
           StorageLive(_8);
 -         StorageLive(_9);
+-         StorageLive(_10);
 +         nop;
-          StorageLive(_10);
++         nop;
           StorageLive(_11);
           _11 = &(*_1);
           _10 = core::str::<impl str>::as_ptr(move _11) -> [return: bb3, unwind unreachable];
@@ -122,8 +125,9 @@
           StorageDead(_11);
           _9 = &_10;
 -         StorageLive(_12);
+-         StorageLive(_13);
 +         nop;
-          StorageLive(_13);
++         nop;
           StorageLive(_14);
 -         _14 = &(*_4);
 +         _14 = &(*_1);
@@ -148,11 +152,12 @@
           StorageLive(_17);
           StorageLive(_18);
 -         _18 = copy (*_15);
-+         _18 = copy (*_9);
++         _18 = copy _10;
           StorageLive(_19);
 -         _19 = copy (*_16);
-+         _19 = copy (*_12);
-          _17 = Eq(move _18, move _19);
+-         _17 = Eq(move _18, move _19);
++         _19 = copy _13;
++         _17 = Eq(copy _10, copy _13);
           switchInt(move _17) -> [0: bb6, otherwise: bb5];
       }
   
@@ -163,8 +168,10 @@
           StorageDead(_17);
           StorageDead(_16);
           StorageDead(_15);
-          StorageDead(_13);
-          StorageDead(_10);
+-         StorageDead(_13);
+-         StorageDead(_10);
++         nop;
++         nop;
           StorageDead(_8);
           StorageDead(_7);
 -         StorageLive(_29);
@@ -213,8 +220,9 @@
           StorageLive(_33);
           StorageLive(_34);
 -         StorageLive(_35);
+-         StorageLive(_36);
 +         nop;
-          StorageLive(_36);
++         nop;
           StorageLive(_37);
           _37 = &(*_1);
           _36 = core::str::<impl str>::as_ptr(move _37) -> [return: bb8, unwind unreachable];
@@ -224,8 +232,9 @@
           StorageDead(_37);
           _35 = &_36;
 -         StorageLive(_38);
+-         StorageLive(_39);
 +         nop;
-          StorageLive(_39);
++         nop;
           StorageLive(_40);
           _40 = &(*_29);
           _39 = core::slice::<impl [u8]>::as_ptr(move _40) -> [return: bb9, unwind unreachable];
@@ -249,11 +258,12 @@
           StorageLive(_43);
           StorageLive(_44);
 -         _44 = copy (*_41);
-+         _44 = copy (*_35);
++         _44 = copy _36;
           StorageLive(_45);
 -         _45 = copy (*_42);
-+         _45 = copy (*_38);
-          _43 = Eq(move _44, move _45);
+-         _43 = Eq(move _44, move _45);
++         _45 = copy _39;
++         _43 = Eq(copy _36, copy _39);
           switchInt(move _43) -> [0: bb11, otherwise: bb10];
       }
   
@@ -264,8 +274,10 @@
           StorageDead(_43);
           StorageDead(_42);
           StorageDead(_41);
-          StorageDead(_39);
-          StorageDead(_36);
+-         StorageDead(_39);
+-         StorageDead(_36);
++         nop;
++         nop;
           StorageDead(_34);
           StorageDead(_33);
           _0 = const ();
@@ -304,4 +316,6 @@
 +         _48 = assert_failed::<*const u8, *const u8>(const core::panicking::AssertKind::Eq, move _50, move _52, move _54) -> unwind unreachable;
       }
   }
+  
+  ALLOC0 (size: 18, align: 1) { .. }
   

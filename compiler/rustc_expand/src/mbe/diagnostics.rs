@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use rustc_ast::token::{self, Delimiter, Token, TokenKind};
+use rustc_ast::token::{self, Token};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_errors::{Applicability, Diag, DiagCtxtHandle, DiagMessage};
 use rustc_macros::Subdiagnostic;
@@ -10,7 +10,7 @@ use rustc_span::source_map::SourceMap;
 use rustc_span::{ErrorGuaranteed, Ident, Span};
 use tracing::debug;
 
-use super::macro_rules::{NoopTracker, parser_from_cx};
+use super::macro_rules::{MacroRule, NoopTracker, parser_from_cx};
 use crate::expand::{AstFragmentKind, parse_ast_fragment};
 use crate::mbe::macro_parser::ParseResult::*;
 use crate::mbe::macro_parser::{MatcherLoc, NamedParseResult, TtParser};
@@ -22,13 +22,14 @@ pub(super) fn failed_to_match_macro(
     def_span: Span,
     name: Ident,
     arg: TokenStream,
-    lhses: &[Vec<MatcherLoc>],
+    rules: &[MacroRule],
 ) -> (Span, ErrorGuaranteed) {
+    debug!("failed to match macro");
     // An error occurred, try the expansion again, tracking the expansion closely for better
     // diagnostics.
     let mut tracker = CollectTrackerAndEmitter::new(psess.dcx(), sp);
 
-    let try_success_result = try_match_macro(psess, name, &arg, lhses, &mut tracker);
+    let try_success_result = try_match_macro(psess, name, &arg, rules, &mut tracker);
 
     if try_success_result.is_ok() {
         // Nonterminal parser recovery might turn failed matches into successful ones,
@@ -66,10 +67,8 @@ pub(super) fn failed_to_match_macro(
     }
 
     if let MatcherLoc::Token { token: expected_token } = &remaining_matcher
-        && (matches!(expected_token.kind, TokenKind::Interpolated(_))
-            || matches!(token.kind, TokenKind::Interpolated(_))
-            || matches!(expected_token.kind, TokenKind::OpenDelim(Delimiter::Invisible(_)))
-            || matches!(token.kind, TokenKind::OpenDelim(Delimiter::Invisible(_))))
+        && (matches!(expected_token.kind, token::OpenInvisible(_))
+            || matches!(token.kind, token::OpenInvisible(_)))
     {
         err.note("captured metavariables except for `:tt`, `:ident` and `:lifetime` cannot be compared to other tokens");
         err.note("see <https://doc.rust-lang.org/nightly/reference/macros-by-example.html#forwarding-a-matched-fragment> for more information");
@@ -81,12 +80,12 @@ pub(super) fn failed_to_match_macro(
 
     // Check whether there's a missing comma in this macro call, like `println!("{}" a);`
     if let Some((arg, comma_span)) = arg.add_comma() {
-        for lhs in lhses {
+        for rule in rules {
             let parser = parser_from_cx(psess, arg.clone(), Recovery::Allowed);
             let mut tt_parser = TtParser::new(name);
 
             if let Success(_) =
-                tt_parser.parse_tt(&mut Cow::Borrowed(&parser), lhs, &mut NoopTracker)
+                tt_parser.parse_tt(&mut Cow::Borrowed(&parser), &rule.lhs, &mut NoopTracker)
             {
                 if comma_span.is_dummy() {
                     err.note("you might be missing a comma");
@@ -162,7 +161,7 @@ impl<'dcx, 'matcher> Tracker<'matcher> for CollectTrackerAndEmitter<'dcx, 'match
                     .is_none_or(|failure| failure.is_better_position(*approx_position))
                 {
                     self.best_failure = Some(BestFailure {
-                        token: token.clone(),
+                        token: *token,
                         position_in_tokenstream: *approx_position,
                         msg,
                         remaining_matcher: self
@@ -193,38 +192,6 @@ impl<'dcx, 'matcher> Tracker<'matcher> for CollectTrackerAndEmitter<'dcx, 'match
 impl<'dcx> CollectTrackerAndEmitter<'dcx, '_> {
     fn new(dcx: DiagCtxtHandle<'dcx>, root_span: Span) -> Self {
         Self { dcx, remaining_matcher: None, best_failure: None, root_span, result: None }
-    }
-}
-
-/// Currently used by macro_rules! compilation to extract a little information from the `Failure`
-/// case.
-pub(crate) struct FailureForwarder<'matcher> {
-    expected_token: Option<&'matcher Token>,
-}
-
-impl<'matcher> FailureForwarder<'matcher> {
-    pub(crate) fn new() -> Self {
-        Self { expected_token: None }
-    }
-}
-
-impl<'matcher> Tracker<'matcher> for FailureForwarder<'matcher> {
-    type Failure = (Token, u32, &'static str);
-
-    fn build_failure(tok: Token, position: u32, msg: &'static str) -> Self::Failure {
-        (tok, position, msg)
-    }
-
-    fn description() -> &'static str {
-        "failure-forwarder"
-    }
-
-    fn set_expected_token(&mut self, tok: &'matcher Token) {
-        self.expected_token = Some(tok);
-    }
-
-    fn get_expected_token(&self) -> Option<&'matcher Token> {
-        self.expected_token
     }
 }
 
@@ -322,7 +289,7 @@ enum ExplainDocComment {
     },
 }
 
-pub(super) fn annotate_doc_comment(err: &mut Diag<'_>, sm: &SourceMap, span: Span) {
+fn annotate_doc_comment(err: &mut Diag<'_>, sm: &SourceMap, span: Span) {
     if let Ok(src) = sm.span_to_snippet(span) {
         if src.starts_with("///") || src.starts_with("/**") {
             err.subdiagnostic(ExplainDocComment::Outer { span });
@@ -334,7 +301,7 @@ pub(super) fn annotate_doc_comment(err: &mut Diag<'_>, sm: &SourceMap, span: Spa
 
 /// Generates an appropriate parsing failure message. For EOF, this is "unexpected end...". For
 /// other tokens, this is "unexpected token...".
-pub(super) fn parse_failure_msg(tok: &Token, expected_token: Option<&Token>) -> Cow<'static, str> {
+fn parse_failure_msg(tok: &Token, expected_token: Option<&Token>) -> Cow<'static, str> {
     if let Some(expected_token) = expected_token {
         Cow::from(format!("expected {}, found {}", token_descr(expected_token), token_descr(tok)))
     } else {

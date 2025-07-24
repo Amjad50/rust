@@ -3,14 +3,14 @@
 use hir::HirDisplay;
 use ide_db::FxHashMap;
 use syntax::{
-    algo,
+    AstNode, Direction, SyntaxKind, TextRange, TextSize, algo,
     ast::{self, HasModuleItem},
-    match_ast, AstNode, Direction, SyntaxKind, TextRange, TextSize,
+    match_ast,
 };
 
 use crate::{
-    context::{ParamContext, ParamKind, PatternContext},
     CompletionContext, CompletionItem, CompletionItemKind, Completions,
+    context::{ParamContext, ParamKind, PatternContext},
 };
 
 // FIXME: Make this a submodule of [`pattern`]
@@ -195,5 +195,5 @@ fn comma_wrapper(ctx: &CompletionContext<'_>) -> Option<(impl Fn(&str) -> String
         matches!(prev_token_kind, SyntaxKind::COMMA | SyntaxKind::L_PAREN | SyntaxKind::PIPE);
     let leading = if has_leading_comma { "" } else { ", " };
 
-    Some((move |label: &_| (format!("{leading}{label}{trailing}")), param.text_range()))
+    Some((move |label: &_| format!("{leading}{label}{trailing}"), param.text_range()))
 }

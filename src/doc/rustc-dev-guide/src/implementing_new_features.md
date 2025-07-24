@@ -44,7 +44,7 @@ like this; for example, the compiler team recommends
 filing a Major Change Proposal ([MCP][mcp]) as a lightweight way to
 garner support and feedback without requiring full consensus.
 
-[mcp]: https://forge.rust-lang.org/compiler/mcp.html#public-facing-changes-require-rfcbot-fcp
+[mcp]: https://forge.rust-lang.org/compiler/proposals-and-stabilization.html#how-do-i-submit-an-mcp
 
 You don't need to have the implementation fully ready for r+ to propose an FCP,
 but it is generally a good idea to have at least a proof
@@ -156,8 +156,8 @@ a new unstable feature:
    [`incomplete_features` lint]: https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#incomplete-features
 
    ```rust ignore
-   /// Allows unsized rvalues at arguments and parameters.
-   (incomplete, unsized_locals, "CURRENT_RUSTC_VERSION", Some(48055), None),
+   /// Allows deref patterns.
+   (incomplete, deref_patterns, "CURRENT_RUSTC_VERSION", Some(87121), None),
    ```
 
    To avoid [semantic merge conflicts], please use `CURRENT_RUSTC_VERSION` instead of `1.70` or

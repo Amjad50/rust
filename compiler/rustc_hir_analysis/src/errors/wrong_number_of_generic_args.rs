@@ -4,7 +4,7 @@ use GenericArgsInfo::*;
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, Diag, Diagnostic, EmissionGuarantee, MultiSpan, pluralize};
 use rustc_hir as hir;
-use rustc_middle::ty::{self as ty, AssocItems, AssocKind, TyCtxt};
+use rustc_middle::ty::{self as ty, AssocItems, TyCtxt};
 use rustc_span::def_id::DefId;
 use tracing::debug;
 
@@ -393,9 +393,9 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
             let params = if let Some(generics) = node.generics() {
                 generics.params
             } else if let hir::Node::Ty(ty) = node
-                && let hir::TyKind::BareFn(bare_fn) = ty.kind
+                && let hir::TyKind::FnPtr(fn_ptr) = ty.kind
             {
-                bare_fn.generic_params
+                fn_ptr.generic_params
             } else {
                 &[]
             };
@@ -486,15 +486,15 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
             let items: &AssocItems = self.tcx.associated_items(self.def_id);
             items
                 .in_definition_order()
-                .filter(|item| item.kind == AssocKind::Type)
                 .filter(|item| {
-                    !self
-                        .gen_args
-                        .constraints
-                        .iter()
-                        .any(|constraint| constraint.ident.name == item.name)
+                    item.is_type()
+                        && !item.is_impl_trait_in_trait()
+                        && !self
+                            .gen_args
+                            .constraints
+                            .iter()
+                            .any(|constraint| constraint.ident.name == item.name())
                 })
-                .filter(|item| !item.is_impl_trait_in_trait())
                 .map(|item| self.tcx.item_ident(item.def_id).to_string())
                 .collect()
         } else {
@@ -635,7 +635,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
                 self.suggest_adding_type_and_const_args(err);
             }
             ExcessTypesOrConsts { .. } => {
-                // this can happen with `~const T` where T isn't a const_trait.
+                // this can happen with `[const] T` where T isn't a `const trait`.
             }
             _ => unreachable!(),
         }

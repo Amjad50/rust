@@ -7,12 +7,8 @@
 #![feature(file_buffered)]
 #![feature(if_let_guard)]
 #![feature(impl_trait_in_assoc_type)]
-#![feature(let_chains)]
-#![feature(map_try_insert)]
-#![feature(never_type)]
 #![feature(try_blocks)]
 #![feature(yeet_expr)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 use hir::ConstContext;
@@ -121,10 +117,10 @@ declare_passes! {
     mod check_inline : CheckForceInline;
     mod check_call_recursion : CheckCallRecursion, CheckDropRecursion;
     mod check_alignment : CheckAlignment;
+    mod check_enums : CheckEnums;
     mod check_const_item_mutation : CheckConstItemMutation;
     mod check_null : CheckNull;
     mod check_packed_ref : CheckPackedRef;
-    mod check_undefined_transmutes : CheckUndefinedTransmutes;
     // This pass is public to allow external drivers to perform MIR cleanup
     pub mod cleanup_post_borrowck : CleanupPostBorrowck;
 
@@ -220,7 +216,7 @@ pub fn provide(providers: &mut Providers) {
         optimized_mir,
         is_mir_available,
         is_ctfe_mir_available: is_mir_available,
-        mir_callgraph_reachable: inline::cycle::mir_callgraph_reachable,
+        mir_callgraph_cyclic: inline::cycle::mir_callgraph_cyclic,
         mir_inliner_callees: inline::cycle::mir_inliner_callees,
         promoted_mir,
         deduced_param_attrs: deduce_param_attrs::deduced_param_attrs,
@@ -263,13 +259,13 @@ fn remap_mir_for_const_eval_select<'tcx>(
                             // (const generic stuff) so we just create a temporary and deconstruct
                             // that.
                             let local = body.local_decls.push(LocalDecl::new(ty, fn_span));
-                            bb.statements.push(Statement {
-                                source_info: SourceInfo::outermost(fn_span),
-                                kind: StatementKind::Assign(Box::new((
+                            bb.statements.push(Statement::new(
+                                SourceInfo::outermost(fn_span),
+                                StatementKind::Assign(Box::new((
                                     local.into(),
                                     Rvalue::Use(tupled_args.node.clone()),
                                 ))),
-                            });
+                            ));
                             (Operand::Move, local.into())
                         }
                         Operand::Move(place) => (Operand::Move, place),
@@ -315,6 +311,10 @@ fn is_mir_available(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
 fn mir_keys(tcx: TyCtxt<'_>, (): ()) -> FxIndexSet<LocalDefId> {
     // All body-owners have MIR associated with them.
     let mut set: FxIndexSet<_> = tcx.hir_body_owners().collect();
+
+    // Remove the fake bodies for `global_asm!`, since they're not useful
+    // to be emitted (`--emit=mir`) or encoded (in metadata).
+    set.retain(|&def_id| !matches!(tcx.def_kind(def_id), DefKind::GlobalAsm));
 
     // Coroutine-closures (e.g. async closures) have an additional by-move MIR
     // body that isn't in the HIR.
@@ -386,7 +386,6 @@ fn mir_built(tcx: TyCtxt<'_>, def: LocalDefId) -> &Steal<Body<'_>> {
             &Lint(check_packed_ref::CheckPackedRef),
             &Lint(check_const_item_mutation::CheckConstItemMutation),
             &Lint(function_item_references::FunctionItemReferences),
-            &Lint(check_undefined_transmutes::CheckUndefinedTransmutes),
             // What we need to do constant evaluation.
             &simplify::SimplifyCfg::Initial,
             &Lint(sanity_check::SanityCheck),
@@ -493,8 +492,11 @@ fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &
     }
 
     // We only need to borrowck non-synthetic MIR.
-    let tainted_by_errors =
-        if !tcx.is_synthetic_mir(def) { tcx.mir_borrowck(def).tainted_by_errors } else { None };
+    let tainted_by_errors = if !tcx.is_synthetic_mir(def) {
+        tcx.mir_borrowck(tcx.typeck_root_def_id(def.to_def_id()).expect_local()).err()
+    } else {
+        None
+    };
 
     let is_fn_like = tcx.def_kind(def).is_fn_like();
     if is_fn_like {
@@ -524,7 +526,7 @@ fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &
         | DefKind::Static { .. }
         | DefKind::Const
         | DefKind::AssocConst => {
-            if let Err(guar) = tcx.check_well_formed(root.expect_local()) {
+            if let Err(guar) = tcx.ensure_ok().check_well_formed(root.expect_local()) {
                 body.tainted_by_errors = Some(guar);
             }
         }
@@ -643,7 +645,7 @@ fn run_runtime_cleanup_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     }
 }
 
-fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
+pub(crate) fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     fn o1<T>(x: T) -> WithMinOptLevel<T> {
         WithMinOptLevel(1, x)
     }
@@ -665,6 +667,7 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
             // Add some UB checks before any UB gets optimized away.
             &check_alignment::CheckAlignment,
             &check_null::CheckNull,
+            &check_enums::CheckEnums,
             // Before inlining: trim down MIR with passes to reduce inlining work.
 
             // Has to be done before inlining, otherwise actual call will be almost always inlined.
@@ -692,8 +695,6 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
             // Now, we need to shrink the generated MIR.
             &ref_prop::ReferencePropagation,
             &sroa::ScalarReplacementOfAggregates,
-            &match_branches::MatchBranchSimplification,
-            // inst combine is after MatchBranchSimplification to clean up Ne(_1, false)
             &multiple_return_terminators::MultipleReturnTerminators,
             // After simplifycfg, it allows us to discover new opportunities for peephole
             // optimizations.
@@ -702,6 +703,7 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
             &dead_store_elimination::DeadStoreElimination::Initial,
             &gvn::GVN,
             &simplify::SimplifyLocals::AfterGVN,
+            &match_branches::MatchBranchSimplification,
             &dataflow_const_prop::DataflowConstProp,
             &single_use_consts::SingleUseConsts,
             &o1(simplify_branches::SimplifyConstCondition::AfterConstProp),
@@ -790,7 +792,7 @@ fn promoted_mir(tcx: TyCtxt<'_>, def: LocalDefId) -> &IndexVec<Promoted, Body<'_
     }
 
     if !tcx.is_synthetic_mir(def) {
-        tcx.ensure_done().mir_borrowck(def);
+        tcx.ensure_done().mir_borrowck(tcx.typeck_root_def_id(def.to_def_id()).expect_local());
     }
     let mut promoted = tcx.mir_promoted(def).1.steal();
 

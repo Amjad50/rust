@@ -253,7 +253,9 @@ impl DefKind {
         }
     }
 
-    pub fn def_path_data(self, name: Symbol) -> DefPathData {
+    // Some `DefKind`s require a name, some don't. Panics if one is needed but
+    // not provided. (`AssocTy` is an exception, see below.)
+    pub fn def_path_data(self, name: Option<Symbol>) -> DefPathData {
         match self {
             DefKind::Mod
             | DefKind::Struct
@@ -264,21 +266,22 @@ impl DefKind {
             | DefKind::TyAlias
             | DefKind::ForeignTy
             | DefKind::TraitAlias
-            | DefKind::AssocTy
             | DefKind::TyParam
-            | DefKind::ExternCrate => DefPathData::TypeNs(name),
-            // It's not exactly an anon const, but wrt DefPathData, there
-            // is no difference.
-            DefKind::Static { nested: true, .. } => DefPathData::AnonConst,
+            | DefKind::ExternCrate => DefPathData::TypeNs(name.unwrap()),
+
+            // An associated type name will be missing for an RPITIT (DefPathData::AnonAssocTy),
+            // but those provide their own DefPathData.
+            DefKind::AssocTy => DefPathData::TypeNs(name.unwrap()),
+
             DefKind::Fn
             | DefKind::Const
             | DefKind::ConstParam
             | DefKind::Static { .. }
             | DefKind::AssocFn
             | DefKind::AssocConst
-            | DefKind::Field => DefPathData::ValueNs(name),
-            DefKind::Macro(..) => DefPathData::MacroNs(name),
-            DefKind::LifetimeParam => DefPathData::LifetimeNs(name),
+            | DefKind::Field => DefPathData::ValueNs(name.unwrap()),
+            DefKind::Macro(..) => DefPathData::MacroNs(name.unwrap()),
+            DefKind::LifetimeParam => DefPathData::LifetimeNs(name.unwrap()),
             DefKind::Ctor(..) => DefPathData::Ctor,
             DefKind::Use => DefPathData::Use,
             DefKind::ForeignMod => DefPathData::ForeignMod,
@@ -288,8 +291,14 @@ impl DefKind {
             DefKind::GlobalAsm => DefPathData::GlobalAsm,
             DefKind::Impl { .. } => DefPathData::Impl,
             DefKind::Closure => DefPathData::Closure,
-            DefKind::SyntheticCoroutineBody => DefPathData::Closure,
+            DefKind::SyntheticCoroutineBody => DefPathData::SyntheticCoroutineBody,
         }
+    }
+
+    /// This is a "module" in name resolution sense.
+    #[inline]
+    pub fn is_module_like(self) -> bool {
+        matches!(self, DefKind::Mod | DefKind::Enum | DefKind::Trait)
     }
 
     #[inline]
@@ -429,7 +438,7 @@ pub enum Res<Id = hir::HirId> {
         /// mention any generic parameters to allow the following with `min_const_generics`:
         /// ```
         /// # struct Foo;
-        /// impl Foo { fn test() -> [u8; std::mem::size_of::<Self>()] { todo!() } }
+        /// impl Foo { fn test() -> [u8; size_of::<Self>()] { todo!() } }
         ///
         /// struct Bar([u8; baz::<Self>()]);
         /// const fn baz<T>() -> usize { 10 }
@@ -439,7 +448,7 @@ pub enum Res<Id = hir::HirId> {
         /// compat lint:
         /// ```
         /// fn foo<T>() {
-        ///     let _bar = [1_u8; std::mem::size_of::<*mut T>()];
+        ///     let _bar = [1_u8; size_of::<*mut T>()];
         /// }
         /// ```
         // FIXME(generic_const_exprs): Remove this bodge once that feature is stable.
@@ -581,7 +590,7 @@ impl<CTX: crate::HashStableContext> ToStableHashKey<CTX> for Namespace {
 }
 
 /// Just a helper ‒ separate structure for each namespace.
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, HashStable_Generic)]
 pub struct PerNS<T> {
     pub value_ns: T,
     pub type_ns: T,
@@ -593,10 +602,16 @@ impl<T> PerNS<T> {
         PerNS { value_ns: f(self.value_ns), type_ns: f(self.type_ns), macro_ns: f(self.macro_ns) }
     }
 
+    /// Note: Do you really want to use this? Often you know which namespace a
+    /// name will belong in, and you can consider just that namespace directly,
+    /// rather than iterating through all of them.
     pub fn into_iter(self) -> IntoIter<T, 3> {
         [self.value_ns, self.type_ns, self.macro_ns].into_iter()
     }
 
+    /// Note: Do you really want to use this? Often you know which namespace a
+    /// name will belong in, and you can consider just that namespace directly,
+    /// rather than iterating through all of them.
     pub fn iter(&self) -> IntoIter<&T, 3> {
         [&self.value_ns, &self.type_ns, &self.macro_ns].into_iter()
     }
@@ -631,6 +646,10 @@ impl<T> PerNS<Option<T>> {
     }
 
     /// Returns an iterator over the items which are `Some`.
+    ///
+    /// Note: Do you really want to use this? Often you know which namespace a
+    /// name will belong in, and you can consider just that namespace directly,
+    /// rather than iterating through all of them.
     pub fn present_items(self) -> impl Iterator<Item = T> {
         [self.type_ns, self.value_ns, self.macro_ns].into_iter().flatten()
     }
@@ -703,6 +722,15 @@ impl<Id> Res<Id> {
     pub fn mod_def_id(&self) -> Option<DefId> {
         match *self {
             Res::Def(DefKind::Mod, id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// If this is a "module" in name resolution sense, return its `DefId`.
+    #[inline]
+    pub fn module_like_def_id(&self) -> Option<DefId> {
+        match self {
+            Res::Def(def_kind, def_id) if def_kind.is_module_like() => Some(*def_id),
             _ => None,
         }
     }
@@ -818,7 +846,7 @@ pub enum LifetimeRes {
         /// Id of the introducing place. That can be:
         /// - an item's id, for the item's generic parameters;
         /// - a TraitRef's ref_id, identifying the `for<...>` binder;
-        /// - a BareFn type's id.
+        /// - a FnPtr type's id.
         ///
         /// This information is used for impl-trait lifetime captures, to know when to or not to
         /// capture any given lifetime.
@@ -839,12 +867,7 @@ pub enum LifetimeRes {
     /// late resolution. Those lifetimes will be inferred by typechecking.
     Infer,
     /// `'static` lifetime.
-    Static {
-        /// We do not want to emit `elided_named_lifetimes`
-        /// when we are inside of a const item or a static,
-        /// because it would get too annoying.
-        suppress_elision_warning: bool,
-    },
+    Static,
     /// Resolution failure.
     Error,
     /// HACK: This is used to recover the NodeId of an elided lifetime.

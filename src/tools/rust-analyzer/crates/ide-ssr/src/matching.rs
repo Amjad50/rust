@@ -2,17 +2,16 @@
 //! process of matching, placeholder values are recorded.
 
 use crate::{
+    SsrMatches,
     parsing::{Constraint, NodeKind, Placeholder, Var},
     resolving::{ResolvedPattern, ResolvedRule, UfcsCallInfo},
-    SsrMatches,
 };
 use hir::{FileRange, ImportPathConfig, Semantics};
-use ide_db::FxHashMap;
-use parser::Edition;
+use ide_db::{FxHashMap, base_db::RootQueryDb};
 use std::{cell::Cell, iter::Peekable};
 use syntax::{
-    ast::{self, AstNode, AstToken, HasGenericArgs},
     SmolStr, SyntaxElement, SyntaxElementChildren, SyntaxKind, SyntaxNode, SyntaxToken,
+    ast::{self, AstNode, AstToken, HasGenericArgs},
 };
 
 // Creates a match error. If we're currently attempting to match some code that we thought we were
@@ -85,12 +84,12 @@ pub(crate) struct MatchFailed {
 /// Checks if `code` matches the search pattern found in `search_scope`, returning information about
 /// the match, if it does. Since we only do matching in this module and searching is done by the
 /// parent module, we don't populate nested matches.
-pub(crate) fn get_match(
+pub(crate) fn get_match<'db>(
     debug_active: bool,
-    rule: &ResolvedRule,
+    rule: &ResolvedRule<'db>,
     code: &SyntaxNode,
     restrict_range: &Option<FileRange>,
-    sema: &Semantics<'_, ide_db::RootDatabase>,
+    sema: &Semantics<'db, ide_db::RootDatabase>,
 ) -> Result<Match, MatchFailed> {
     record_match_fails_reasons_scope(debug_active, || {
         Matcher::try_match(rule, code, restrict_range, sema)
@@ -103,7 +102,7 @@ struct Matcher<'db, 'sema> {
     /// If any placeholders come from anywhere outside of this range, then the match will be
     /// rejected.
     restrict_range: Option<FileRange>,
-    rule: &'sema ResolvedRule,
+    rule: &'sema ResolvedRule<'db>,
 }
 
 /// Which phase of matching we're currently performing. We do two phases because most attempted
@@ -118,7 +117,7 @@ enum Phase<'a> {
 
 impl<'db, 'sema> Matcher<'db, 'sema> {
     fn try_match(
-        rule: &ResolvedRule,
+        rule: &ResolvedRule<'db>,
         code: &SyntaxNode,
         restrict_range: &Option<FileRange>,
         sema: &'sema Semantics<'db, ide_db::RootDatabase>,
@@ -536,7 +535,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
     fn attempt_match_ufcs_to_method_call(
         &self,
         phase: &mut Phase<'_>,
-        pattern_ufcs: &UfcsCallInfo,
+        pattern_ufcs: &UfcsCallInfo<'db>,
         code: &ast::MethodCallExpr,
     ) -> Result<(), MatchFailed> {
         use ast::HasArgList;
@@ -598,7 +597,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
     fn attempt_match_ufcs_to_ufcs(
         &self,
         phase: &mut Phase<'_>,
-        pattern_ufcs: &UfcsCallInfo,
+        pattern_ufcs: &UfcsCallInfo<'db>,
         code: &ast::CallExpr,
     ) -> Result<(), MatchFailed> {
         use ast::HasArgList;
@@ -616,7 +615,7 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
     /// times. Returns the number of times it needed to be dereferenced.
     fn check_expr_type(
         &self,
-        pattern_type: &hir::Type,
+        pattern_type: &hir::Type<'db>,
         expr: &ast::Expr,
     ) -> Result<usize, MatchFailed> {
         use hir::HirDisplay;
@@ -627,25 +626,24 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
                 match_error!("Failed to get receiver type for `{}`", expr.syntax().text())
             })?
             .original;
-        let edition = self
-            .sema
-            .scope(expr.syntax())
-            .map(|it| it.krate().edition(self.sema.db))
-            .unwrap_or(Edition::CURRENT);
-        // Temporary needed to make the borrow checker happy.
-        let res = code_type
+        let krate = self.sema.scope(expr.syntax()).map(|it| it.krate()).unwrap_or_else(|| {
+            hir::Crate::from(*self.sema.db.all_crates().last().expect("no crate graph present"))
+        });
+
+        code_type
             .autoderef(self.sema.db)
             .enumerate()
             .find(|(_, deref_code_type)| pattern_type == deref_code_type)
             .map(|(count, _)| count)
             .ok_or_else(|| {
+                let display_target = krate.to_display_target(self.sema.db);
+                // Temporary needed to make the borrow checker happy.
                 match_error!(
                     "Pattern type `{}` didn't match code type `{}`",
-                    pattern_type.display(self.sema.db, edition),
-                    code_type.display(self.sema.db, edition)
+                    pattern_type.display(self.sema.db, display_target),
+                    code_type.display(self.sema.db, display_target)
                 )
-            });
-        res
+            })
     }
 
     fn get_placeholder_for_node(&self, node: &SyntaxNode) -> Option<&Placeholder> {
@@ -658,10 +656,10 @@ impl<'db, 'sema> Matcher<'db, 'sema> {
 }
 
 impl Match {
-    fn render_template_paths(
+    fn render_template_paths<'db>(
         &mut self,
-        template: &ResolvedPattern,
-        sema: &Semantics<'_, ide_db::RootDatabase>,
+        template: &ResolvedPattern<'db>,
+        sema: &Semantics<'db, ide_db::RootDatabase>,
     ) -> Result<(), MatchFailed> {
         let module = sema
             .scope(&self.matched_node)
@@ -808,10 +806,20 @@ mod tests {
         let input = "fn foo() {} fn bar() {} fn main() { foo(1+2); }";
 
         let (db, position, selections) = crate::tests::single_file(input);
+        let position = ide_db::FilePosition {
+            file_id: position.file_id.file_id(&db),
+            offset: position.offset,
+        };
         let mut match_finder = MatchFinder::in_context(
             &db,
-            position.into(),
-            selections.into_iter().map(Into::into).collect(),
+            position,
+            selections
+                .into_iter()
+                .map(|frange| ide_db::FileRange {
+                    file_id: frange.file_id.file_id(&db),
+                    range: frange.range,
+                })
+                .collect(),
         )
         .unwrap();
         match_finder.add_rule(rule).unwrap();
@@ -822,7 +830,7 @@ mod tests {
 
         let edits = match_finder.edits();
         assert_eq!(edits.len(), 1);
-        let edit = &edits[&position.file_id.into()];
+        let edit = &edits[&position.file_id];
         let mut after = input.to_owned();
         edit.apply(&mut after);
         assert_eq!(after, "fn foo() {} fn bar() {} fn main() { bar(1+2); }");

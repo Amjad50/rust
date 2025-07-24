@@ -338,6 +338,16 @@ pub(crate) struct ForwardDeclaredGenericParam {
     #[primary_span]
     #[label]
     pub(crate) span: Span,
+    pub(crate) param: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_forward_declared_generic_in_const_param_ty)]
+pub(crate) struct ForwardDeclaredGenericInConstParamTy {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    pub(crate) param: Symbol,
 }
 
 #[derive(Diagnostic)]
@@ -353,7 +363,13 @@ pub(crate) struct ParamInTyOfConstParam {
 #[diag(resolve_self_in_generic_param_default, code = E0735)]
 pub(crate) struct SelfInGenericParamDefault {
     #[primary_span]
-    #[label]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_self_in_const_generic_ty)]
+pub(crate) struct SelfInConstGenericTy {
+    #[primary_span]
     pub(crate) span: Span,
 }
 
@@ -765,22 +781,6 @@ pub(crate) struct CannotGlobImportAllCrates {
     pub(crate) span: Span,
 }
 
-#[derive(Diagnostic)]
-#[diag(resolve_items_in_traits_are_not_importable)]
-pub(crate) struct ItemsInTraitsAreNotImportable {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(resolve_is_not_directly_importable, code = E0253)]
-pub(crate) struct IsNotDirectlyImportable {
-    #[primary_span]
-    #[label]
-    pub(crate) span: Span,
-    pub(crate) target: Ident,
-}
-
 #[derive(Subdiagnostic)]
 #[suggestion(
     resolve_unexpected_res_change_ty_to_const_param_sugg,
@@ -811,13 +811,6 @@ pub(crate) struct UnexpectedResUseAtOpInSlicePatWithRangeSugg {
 #[derive(Diagnostic)]
 #[diag(resolve_extern_crate_loading_macro_not_at_crate_root, code = E0468)]
 pub(crate) struct ExternCrateLoadingMacroNotAtCrateRoot {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(resolve_bad_macro_import, code = E0466)]
-pub(crate) struct BadMacroImport {
     #[primary_span]
     pub(crate) span: Span,
 }
@@ -878,12 +871,12 @@ pub(crate) struct MacroExpandedExternCrateCannotShadowExternArguments {
 
 #[derive(Diagnostic)]
 #[diag(resolve_elided_anonymous_lifetime_report_error, code = E0637)]
-pub(crate) struct ElidedAnonymousLivetimeReportError {
+pub(crate) struct ElidedAnonymousLifetimeReportError {
     #[primary_span]
     #[label]
     pub(crate) span: Span,
     #[subdiagnostic]
-    pub(crate) suggestion: Option<ElidedAnonymousLivetimeReportErrorSuggestion>,
+    pub(crate) suggestion: Option<ElidedAnonymousLifetimeReportErrorSuggestion>,
 }
 
 #[derive(Diagnostic)]
@@ -897,7 +890,7 @@ pub(crate) struct LendingIteratorReportError {
 
 #[derive(Diagnostic)]
 #[diag(resolve_anonymous_lifetime_non_gat_report_error)]
-pub(crate) struct AnonymousLivetimeNonGatReportError {
+pub(crate) struct AnonymousLifetimeNonGatReportError {
     #[primary_span]
     #[label]
     pub(crate) lifetime: Span,
@@ -908,7 +901,7 @@ pub(crate) struct AnonymousLivetimeNonGatReportError {
     resolve_elided_anonymous_lifetime_report_error_suggestion,
     applicability = "machine-applicable"
 )]
-pub(crate) struct ElidedAnonymousLivetimeReportErrorSuggestion {
+pub(crate) struct ElidedAnonymousLifetimeReportErrorSuggestion {
     #[suggestion_part(code = "for<'a> ")]
     pub(crate) lo: Span,
     #[suggestion_part(code = "'a ")]
@@ -917,7 +910,7 @@ pub(crate) struct ElidedAnonymousLivetimeReportErrorSuggestion {
 
 #[derive(Diagnostic)]
 #[diag(resolve_explicit_anonymous_lifetime_report_error, code = E0637)]
-pub(crate) struct ExplicitAnonymousLivetimeReportError {
+pub(crate) struct ExplicitAnonymousLifetimeReportError {
     #[primary_span]
     #[label]
     pub(crate) span: Span,
@@ -934,6 +927,7 @@ pub(crate) struct ImplicitElidedLifetimeNotAllowedHere {
 
 #[derive(Diagnostic)]
 #[diag(resolve_underscore_lifetime_is_reserved, code = E0637)]
+#[help]
 pub(crate) struct UnderscoreLifetimeIsReserved {
     #[primary_span]
     #[label]
@@ -947,15 +941,6 @@ pub(crate) struct StaticLifetimeIsReserved {
     #[label]
     pub(crate) span: Span,
     pub(crate) lifetime: Ident,
-}
-
-#[derive(Diagnostic)]
-#[diag(resolve_attempt_to_define_builtin_macro_twice, code = E0773)]
-pub(crate) struct AttemptToDefineBuiltinMacroTwice {
-    #[primary_span]
-    pub(crate) span: Span,
-    #[note]
-    pub(crate) note_span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -987,6 +972,7 @@ pub(crate) struct VariableNotInAllPatterns {
 pub(crate) struct NameDefinedMultipleTime {
     #[primary_span]
     pub(crate) span: Span,
+    pub(crate) name: Symbol,
     pub(crate) descr: &'static str,
     pub(crate) container: &'static str,
     #[subdiagnostic]
@@ -1001,13 +987,11 @@ pub(crate) enum NameDefinedMultipleTimeLabel {
     Reimported {
         #[primary_span]
         span: Span,
-        name: Symbol,
     },
     #[label(resolve_name_defined_multiple_time_redefined)]
     Redefined {
         #[primary_span]
         span: Span,
-        name: Symbol,
     },
 }
 
@@ -1017,14 +1001,12 @@ pub(crate) enum NameDefinedMultipleTimeOldBindingLabel {
     Import {
         #[primary_span]
         span: Span,
-        name: Symbol,
         old_kind: &'static str,
     },
     #[label(resolve_name_defined_multiple_time_old_binding_definition)]
     Definition {
         #[primary_span]
         span: Span,
-        name: Symbol,
         old_kind: &'static str,
     },
 }

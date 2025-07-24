@@ -7,7 +7,6 @@
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/borrow_check.html
 
 use std::fmt;
-use std::ops::Deref;
 
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::unord::UnordMap;
@@ -175,7 +174,7 @@ impl Scope {
         let Some(hir_id) = self.hir_id(scope_tree) else {
             return DUMMY_SP;
         };
-        let span = tcx.hir().span(hir_id);
+        let span = tcx.hir_span(hir_id);
         if let ScopeData::Remainder(first_statement_index) = self.data {
             if let Node::Block(blk) = tcx.hir_node(hir_id) {
                 // Want span for scope starting after the
@@ -199,8 +198,6 @@ impl Scope {
     }
 }
 
-pub type ScopeDepth = u32;
-
 /// The region scope tree encodes information about region relationships.
 #[derive(Default, Debug, HashStable)]
 pub struct ScopeTree {
@@ -213,7 +210,7 @@ pub struct ScopeTree {
     /// conditional expression or repeating block. (Note that the
     /// enclosing scope ID for the block associated with a closure is
     /// the closure itself.)
-    pub parent_map: FxIndexMap<Scope, (Scope, ScopeDepth)>,
+    pub parent_map: FxIndexMap<Scope, Scope>,
 
     /// Maps from a variable or binding ID to the block in which that
     /// variable is declared.
@@ -224,112 +221,26 @@ pub struct ScopeTree {
     /// and not the enclosing *statement*. Expressions that are not present in this
     /// table are not rvalue candidates. The set of rvalue candidates is computed
     /// during type check based on a traversal of the AST.
-    pub rvalue_candidates: HirIdMap<RvalueCandidateType>,
+    pub rvalue_candidates: HirIdMap<RvalueCandidate>,
 
     /// Backwards incompatible scoping that will be introduced in future editions.
     /// This information is used later for linting to identify locals and
     /// temporary values that will receive backwards-incompatible drop orders.
     pub backwards_incompatible_scope: UnordMap<hir::ItemLocalId, Scope>,
-
-    /// If there are any `yield` nested within a scope, this map
-    /// stores the `Span` of the last one and its index in the
-    /// postorder of the Visitor traversal on the HIR.
-    ///
-    /// HIR Visitor postorder indexes might seem like a peculiar
-    /// thing to care about. but it turns out that HIR bindings
-    /// and the temporary results of HIR expressions are never
-    /// storage-live at the end of HIR nodes with postorder indexes
-    /// lower than theirs, and therefore don't need to be suspended
-    /// at yield-points at these indexes.
-    ///
-    /// For an example, suppose we have some code such as:
-    /// ```rust,ignore (example)
-    ///     foo(f(), yield y, bar(g()))
-    /// ```
-    ///
-    /// With the HIR tree (calls numbered for expository purposes)
-    ///
-    /// ```text
-    ///     Call#0(foo, [Call#1(f), Yield(y), Call#2(bar, Call#3(g))])
-    /// ```
-    ///
-    /// Obviously, the result of `f()` was created before the yield
-    /// (and therefore needs to be kept valid over the yield) while
-    /// the result of `g()` occurs after the yield (and therefore
-    /// doesn't). If we want to infer that, we can look at the
-    /// postorder traversal:
-    /// ```plain,ignore
-    ///     `foo` `f` Call#1 `y` Yield `bar` `g` Call#3 Call#2 Call#0
-    /// ```
-    ///
-    /// In which we can easily see that `Call#1` occurs before the yield,
-    /// and `Call#3` after it.
-    ///
-    /// To see that this method works, consider:
-    ///
-    /// Let `D` be our binding/temporary and `U` be our other HIR node, with
-    /// `HIR-postorder(U) < HIR-postorder(D)`. Suppose, as in our example,
-    /// U is the yield and D is one of the calls.
-    /// Let's show that `D` is storage-dead at `U`.
-    ///
-    /// Remember that storage-live/storage-dead refers to the state of
-    /// the *storage*, and does not consider moves/drop flags.
-    ///
-    /// Then:
-    ///
-    ///   1. From the ordering guarantee of HIR visitors (see
-    ///   `rustc_hir::intravisit`), `D` does not dominate `U`.
-    ///
-    ///   2. Therefore, `D` is *potentially* storage-dead at `U` (because
-    ///   we might visit `U` without ever getting to `D`).
-    ///
-    ///   3. However, we guarantee that at each HIR point, each
-    ///   binding/temporary is always either always storage-live
-    ///   or always storage-dead. This is what is being guaranteed
-    ///   by `terminating_scopes` including all blocks where the
-    ///   count of executions is not guaranteed.
-    ///
-    ///   4. By `2.` and `3.`, `D` is *statically* storage-dead at `U`,
-    ///   QED.
-    ///
-    /// This property ought to not on (3) in an essential way -- it
-    /// is probably still correct even if we have "unrestricted" terminating
-    /// scopes. However, why use the complicated proof when a simple one
-    /// works?
-    ///
-    /// A subtle thing: `box` expressions, such as `box (&x, yield 2, &y)`. It
-    /// might seem that a `box` expression creates a `Box<T>` temporary
-    /// when it *starts* executing, at `HIR-preorder(BOX-EXPR)`. That might
-    /// be true in the MIR desugaring, but it is not important in the semantics.
-    ///
-    /// The reason is that semantically, until the `box` expression returns,
-    /// the values are still owned by their containing expressions. So
-    /// we'll see that `&x`.
-    pub yield_in_scope: UnordMap<Scope, Vec<YieldData>>,
 }
 
-/// Identifies the reason that a given expression is an rvalue candidate
-/// (see the `rvalue_candidates` field for more information what rvalue
-/// candidates in general). In constants, the `lifetime` field is None
-/// to indicate that certain expressions escape into 'static and
-/// should have no local cleanup scope.
+/// See the `rvalue_candidates` field for more information on rvalue
+/// candidates in general.
+/// The `lifetime` field is None to indicate that certain expressions escape
+/// into 'static and should have no local cleanup scope.
 #[derive(Debug, Copy, Clone, HashStable)]
-pub enum RvalueCandidateType {
-    Borrow { target: hir::ItemLocalId, lifetime: Option<Scope> },
-    Pattern { target: hir::ItemLocalId, lifetime: Option<Scope> },
-}
-
-#[derive(Debug, Copy, Clone, HashStable)]
-pub struct YieldData {
-    /// The `Span` of the yield.
-    pub span: Span,
-    /// The number of expressions and patterns appearing before the `yield` in the body, plus one.
-    pub expr_and_pat_count: usize,
-    pub source: hir::YieldSource,
+pub struct RvalueCandidate {
+    pub target: hir::ItemLocalId,
+    pub lifetime: Option<Scope>,
 }
 
 impl ScopeTree {
-    pub fn record_scope_parent(&mut self, child: Scope, parent: Option<(Scope, ScopeDepth)>) {
+    pub fn record_scope_parent(&mut self, child: Scope, parent: Option<Scope>) {
         debug!("{:?}.parent = {:?}", child, parent);
 
         if let Some(p) = parent {
@@ -344,21 +255,17 @@ impl ScopeTree {
         self.var_map.insert(var, lifetime);
     }
 
-    pub fn record_rvalue_candidate(&mut self, var: HirId, candidate_type: RvalueCandidateType) {
-        debug!("record_rvalue_candidate(var={var:?}, type={candidate_type:?})");
-        match &candidate_type {
-            RvalueCandidateType::Borrow { lifetime: Some(lifetime), .. }
-            | RvalueCandidateType::Pattern { lifetime: Some(lifetime), .. } => {
-                assert!(var.local_id != lifetime.local_id)
-            }
-            _ => {}
+    pub fn record_rvalue_candidate(&mut self, var: HirId, candidate: RvalueCandidate) {
+        debug!("record_rvalue_candidate(var={var:?}, candidate={candidate:?})");
+        if let Some(lifetime) = &candidate.lifetime {
+            assert!(var.local_id != lifetime.local_id)
         }
-        self.rvalue_candidates.insert(var, candidate_type);
+        self.rvalue_candidates.insert(var, candidate);
     }
 
     /// Returns the narrowest scope that encloses `id`, if any.
     pub fn opt_encl_scope(&self, id: Scope) -> Option<Scope> {
-        self.parent_map.get(&id).cloned().map(|(p, _)| p)
+        self.parent_map.get(&id).cloned()
     }
 
     /// Returns the lifetime of the local variable `var_id`, if any.
@@ -386,11 +293,5 @@ impl ScopeTree {
         debug!("is_subscope_of({:?}, {:?})=true", subscope, superscope);
 
         true
-    }
-
-    /// Checks whether the given scope contains a `yield`. If so,
-    /// returns `Some(YieldData)`. If not, returns `None`.
-    pub fn yield_in_scope(&self, scope: Scope) -> Option<&[YieldData]> {
-        self.yield_in_scope.get(&scope).map(Deref::deref)
     }
 }

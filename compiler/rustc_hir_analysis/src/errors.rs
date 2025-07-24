@@ -11,8 +11,6 @@ use rustc_middle::ty::Ty;
 use rustc_span::{Ident, Span, Symbol};
 
 use crate::fluent_generated as fluent;
-mod pattern_types;
-pub(crate) use pattern_types::*;
 pub(crate) mod wrong_number_of_generic_args;
 
 mod precise_captures;
@@ -25,7 +23,7 @@ pub(crate) struct AmbiguousAssocItem<'a> {
     #[label]
     pub span: Span,
     pub assoc_kind: &'static str,
-    pub assoc_name: Ident,
+    pub assoc_ident: Ident,
     pub qself: &'a str,
 }
 
@@ -77,13 +75,15 @@ pub(crate) struct AssocItemIsPrivate {
 pub(crate) struct AssocItemNotFound<'a> {
     #[primary_span]
     pub span: Span,
-    pub assoc_name: Ident,
+    pub assoc_ident: Ident,
     pub assoc_kind: &'static str,
     pub qself: &'a str,
     #[subdiagnostic]
     pub label: Option<AssocItemNotFoundLabel<'a>>,
     #[subdiagnostic]
     pub sugg: Option<AssocItemNotFoundSugg<'a>>,
+    #[label(hir_analysis_within_macro)]
+    pub within_macro_span: Option<Span>,
 }
 
 #[derive(Subdiagnostic)]
@@ -127,6 +127,7 @@ pub(crate) enum AssocItemNotFoundSugg<'a> {
     SimilarInOtherTrait {
         #[primary_span]
         span: Span,
+        trait_name: &'a str,
         assoc_kind: &'static str,
         suggested_name: Symbol,
     },
@@ -159,15 +160,6 @@ pub(crate) enum AssocItemNotFoundSugg<'a> {
         assoc_kind: &'static str,
         suggested_name: Symbol,
     },
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_unrecognized_atomic_operation, code = E0092)]
-pub(crate) struct UnrecognizedAtomicOperation<'a> {
-    #[primary_span]
-    #[label]
-    pub span: Span,
-    pub op: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -213,6 +205,7 @@ pub(crate) struct DropImplOnWrongItem {
     #[primary_span]
     #[label]
     pub span: Span,
+    pub trait_: Symbol,
 }
 
 #[derive(Diagnostic)]
@@ -284,13 +277,6 @@ pub(crate) struct CopyImplOnTypeWithDtor {
     #[primary_span]
     #[label]
     pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_multiple_relaxed_default_bounds, code = E0203)]
-pub(crate) struct MultipleRelaxedDefaultBounds {
-    #[primary_span]
-    pub spans: Vec<Span>,
 }
 
 #[derive(Diagnostic)]
@@ -425,16 +411,6 @@ pub(crate) struct UnconstrainedOpaqueType {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_tait_forward_compat)]
-#[note]
-pub(crate) struct TaitForwardCompat {
-    #[primary_span]
-    pub span: Span,
-    #[note]
-    pub item_span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(hir_analysis_tait_forward_compat2)]
 #[note]
 pub(crate) struct TaitForwardCompat2 {
@@ -536,6 +512,7 @@ pub(crate) struct ConstImplForNonConstTrait {
     pub trait_name: String,
     #[suggestion(
         applicability = "machine-applicable",
+        // FIXME(const_trait_impl) fix this suggestion
         code = "#[const_trait] ",
         style = "verbose"
     )]
@@ -559,6 +536,7 @@ pub(crate) struct ConstBoundForNonConstTrait {
     pub suggestion_pre: &'static str,
     #[suggestion(
         applicability = "machine-applicable",
+        // FIXME(const_trait_impl) fix this suggestion
         code = "#[const_trait] ",
         style = "verbose"
     )]
@@ -652,7 +630,7 @@ pub(crate) struct VariadicFunctionCompatibleConvention<'a> {
     #[primary_span]
     #[label]
     pub span: Span,
-    pub conventions: &'a str,
+    pub convention: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -711,17 +689,6 @@ pub(crate) struct InvalidUnionField {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_invalid_unsafe_field, code = E0740)]
-pub(crate) struct InvalidUnsafeField {
-    #[primary_span]
-    pub field_span: Span,
-    #[subdiagnostic]
-    pub sugg: InvalidUnsafeFieldSuggestion,
-    #[note]
-    pub note: (),
-}
-
-#[derive(Diagnostic)]
 #[diag(hir_analysis_return_type_notation_on_non_rpitit)]
 pub(crate) struct ReturnTypeNotationOnNonRpitit<'tcx> {
     #[primary_span]
@@ -736,18 +703,6 @@ pub(crate) struct ReturnTypeNotationOnNonRpitit<'tcx> {
 #[derive(Subdiagnostic)]
 #[multipart_suggestion(hir_analysis_invalid_union_field_sugg, applicability = "machine-applicable")]
 pub(crate) struct InvalidUnionFieldSuggestion {
-    #[suggestion_part(code = "std::mem::ManuallyDrop<")]
-    pub lo: Span,
-    #[suggestion_part(code = ">")]
-    pub hi: Span,
-}
-
-#[derive(Subdiagnostic)]
-#[multipart_suggestion(
-    hir_analysis_invalid_unsafe_field_sugg,
-    applicability = "machine-applicable"
-)]
-pub(crate) struct InvalidUnsafeFieldSuggestion {
     #[suggestion_part(code = "std::mem::ManuallyDrop<")]
     pub lo: Span,
     #[suggestion_part(code = ">")]
@@ -1360,7 +1315,7 @@ pub(crate) struct ImplForTyRequires {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_traits_with_defualt_impl, code = E0321)]
+#[diag(hir_analysis_traits_with_default_impl, code = E0321)]
 #[note]
 pub(crate) struct TraitsWithDefaultImpl<'a> {
     #[primary_span]
@@ -1708,14 +1663,6 @@ pub(crate) struct CmseEntryGeneric {
     pub span: Span,
 }
 
-#[derive(Diagnostic)]
-#[diag(hir_analysis_register_type_unstable)]
-pub(crate) struct RegisterTypeUnstable<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub ty: Ty<'a>,
-}
-
 #[derive(LintDiagnostic)]
 #[diag(hir_analysis_supertrait_item_shadowing)]
 pub(crate) struct SupertraitItemShadowing {
@@ -1739,4 +1686,34 @@ pub(crate) enum SupertraitItemShadowee {
         spans: MultiSpan,
         traits: DiagSymbolList,
     },
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_self_in_type_alias, code = E0411)]
+pub(crate) struct SelfInTypeAlias {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_abi_custom_clothed_function)]
+pub(crate) struct AbiCustomClothedFunction {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(
+        hir_analysis_suggestion,
+        applicability = "maybe-incorrect",
+        code = "#[unsafe(naked)]\n",
+        style = "short"
+    )]
+    pub naked_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_async_drop_without_sync_drop)]
+#[help]
+pub(crate) struct AsyncDropWithoutSyncDrop {
+    #[primary_span]
+    pub span: Span,
 }

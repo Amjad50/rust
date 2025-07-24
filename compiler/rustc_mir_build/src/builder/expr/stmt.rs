@@ -78,8 +78,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // because AssignOp is only legal for Copy types
                 // (overloaded ops should be desugared into a call).
                 let result = unpack!(
-                    block =
-                        this.build_binary_op(block, op, expr_span, lhs_ty, Operand::Copy(lhs), rhs)
+                    block = this.build_binary_op(
+                        block,
+                        op.into(),
+                        expr_span,
+                        lhs_ty,
+                        Operand::Copy(lhs),
+                        rhs
+                    )
                 );
                 this.cfg.push_assign(block, source_info, lhs, result);
 
@@ -91,6 +97,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
             ExprKind::Break { label, value } => {
                 this.break_scope(block, value, BreakableTarget::Break(label), source_info)
+            }
+            ExprKind::ConstContinue { label, value } => {
+                this.break_const_continuable_scope(block, value, label, source_info)
             }
             ExprKind::Return { value } => {
                 this.break_scope(block, value, BreakableTarget::Return, source_info)

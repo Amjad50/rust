@@ -1,3 +1,5 @@
+//@ ignore-cross-compile (needs to run doctests)
+
 use std::path::Path;
 
 use run_make_support::{cwd, diff, rustc, rustdoc};
@@ -8,7 +10,6 @@ fn test_and_compare(input_file: &str, stdout_file: &str, edition: &str, dep: &Pa
     let output = cmd
         .input(input_file)
         .arg("--test")
-        .arg("-Zunstable-options")
         .edition(edition)
         .arg("--test-args=--test-threads=1")
         .extern_("foo", dep.display().to_string())

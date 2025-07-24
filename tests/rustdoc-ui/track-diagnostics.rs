@@ -1,5 +1,4 @@
 //@ compile-flags: -Z track-diagnostics
-//@ error-pattern: created at
 
 // Normalize the emitted location so this doesn't need
 // updating everytime someone adds or removes a line.
@@ -9,3 +8,6 @@ struct A;
 struct B;
 
 pub const S: A = B;
+//~^ ERROR mismatched types
+//~| NOTE created at
+//~| NOTE expected `A`, found `B`

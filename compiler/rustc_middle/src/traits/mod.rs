@@ -332,7 +332,11 @@ pub enum ObligationCauseCode<'tcx> {
     },
 
     /// Computing common supertype in an if expression
-    IfExpression(Box<IfExpressionCause<'tcx>>),
+    IfExpression {
+        expr_id: HirId,
+        // Is the expectation of this match expression an RPIT?
+        tail_defines_return_position_impl_trait: Option<LocalDefId>,
+    },
 
     /// Computing common supertype of an if expression with no else counter-part
     IfExpressionWithNoElse,
@@ -397,15 +401,21 @@ pub enum ObligationCauseCode<'tcx> {
 
     RustCall,
 
-    /// Obligations to prove that a `std::ops::Drop` impl is not stronger than
+    DynCompatible(Span),
+
+    /// Obligations to prove that a `Drop` or negative auto trait impl is not stronger than
     /// the ADT it's being implemented for.
-    DropImpl,
+    AlwaysApplicableImpl,
 
     /// Requirement for a `const N: Ty` to implement `Ty: ConstParamTy`
     ConstParam(Ty<'tcx>),
 
-    /// Obligations emitted during the normalization of a weak type alias.
+    /// Obligations emitted during the normalization of a free type alias.
     TypeAlias(ObligationCauseCodeHandle<'tcx>, Span, DefId),
+
+    /// Only reachable if the `unsized_fn_params` feature is used. Unsized function arguments must
+    /// be place expressions because we can't store them in MIR locals as temporaries.
+    UnsizedNonPlaceExpr(Span),
 }
 
 /// Whether a value can be extracted into a const.
@@ -546,18 +556,6 @@ pub struct PatternOriginExpr {
     /// Does the peeled expression need to be wrapped in parentheses for
     /// a prefix suggestion (i.e., dereference) to be valid.
     pub peeled_prefix_suggestion_parentheses: bool,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[derive(TypeFoldable, TypeVisitable, HashStable, TyEncodable, TyDecodable)]
-pub struct IfExpressionCause<'tcx> {
-    pub then_id: HirId,
-    pub else_id: HirId,
-    pub then_ty: Ty<'tcx>,
-    pub else_ty: Ty<'tcx>,
-    pub outer_span: Option<Span>,
-    // Is the expectation of this match expression an RPIT?
-    pub tail_defines_return_position_impl_trait: Option<LocalDefId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, HashStable, TyEncodable, TyDecodable)]
@@ -980,12 +978,9 @@ pub enum CodegenObligationError {
     /// overflow bug, since I believe this is the only case
     /// where ambiguity can result.
     Ambiguity,
-    /// This can trigger when we probe for the source of a `'static` lifetime requirement
-    /// on a trait object: `impl Foo for dyn Trait {}` has an implicit `'static` bound.
-    /// This can also trigger when we have a global bound that is not actually satisfied,
-    /// but was included during typeck due to the trivial_bounds feature.
+    /// This can trigger when we have a global bound that is not actually satisfied
+    /// due to trivial bounds.
     Unimplemented,
-    FulfillmentError,
     /// The selected impl has unconstrained generic parameters. This will emit an error
     /// during impl WF checking.
     UnconstrainedParam(ErrorGuaranteed),

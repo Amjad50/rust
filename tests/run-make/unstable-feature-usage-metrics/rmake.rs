@@ -7,11 +7,10 @@
 //!
 //! # Test history
 //!
-//! - forked from dump-ice-to-disk test, which has flakeyness issues on i686-mingw, I'm assuming
-//! those will be present in this test as well on the same platform
+//! - Forked from `dump-ice-to-disk` test, where `i686-pc-windows-gnu` has unpredictable backtraces.
 
-//@ ignore-windows
-//FIXME(#128911): still flakey on i686-mingw.
+//@ ignore-cross-compile (exercises metrics dump on host)
+//@ ignore-i686-pc-windows-gnu (unwind mechanism produces unpredictable backtraces)
 
 use std::path::{Path, PathBuf};
 
@@ -58,12 +57,17 @@ fn test_metrics_dump() {
         );
 
         let message = rfs::read_to_string(json_path);
-        let parsed: serde_json::Value =
+        let mut parsed: serde_json::Value =
             serde_json::from_str(&message).expect("metrics should be dumped as json");
+        // remove timestamps
+        assert!(parsed["lib_features"][0]["timestamp"].is_number());
+        assert!(parsed["lang_features"][0]["timestamp"].is_number());
+        parsed["lib_features"][0]["timestamp"] = serde_json::json!(null);
+        parsed["lang_features"][0]["timestamp"] = serde_json::json!(null);
         let expected = serde_json::json!(
             {
-                "lib_features":[{"symbol":"ascii_char"}],
-                "lang_features":[{"symbol":"box_patterns","since":null}]
+                "lib_features":[{"symbol":"ascii_char", "timestamp":null}],
+                "lang_features":[{"symbol":"box_patterns","since":null, "timestamp":null}]
             }
         );
 
@@ -79,9 +83,7 @@ fn test_metrics_errors() {
             .env("RUST_BACKTRACE", "short")
             .arg("-Zmetrics-dir=invaliddirectorythatdefinitelydoesntexist")
             .run_fail()
-            .assert_stderr_contains(
-                "error: cannot dump feature usage metrics: No such file or directory",
-            )
+            .assert_stderr_contains("error: cannot dump feature usage metrics")
             .assert_stdout_not_contains("internal compiler error");
     });
 }

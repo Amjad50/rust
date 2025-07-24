@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use super::{Emit, TestCx, WillExecute};
-use crate::errors;
 use crate::util::static_regex;
+use crate::{errors, fatal};
 
 impl TestCx<'_> {
     pub(super) fn run_codegen_units_test(&self) {
@@ -26,9 +26,7 @@ impl TestCx<'_> {
             .stdout
             .lines()
             .filter(|line| line.starts_with(PREFIX))
-            .map(|line| {
-                line.replace(&self.testpaths.file.display().to_string(), "TEST_PATH").to_string()
-            })
+            .map(|line| line.replace(&self.testpaths.file.as_str(), "TEST_PATH").to_string())
             .map(|line| str_to_mono_item(&line, true))
             .collect();
 
@@ -102,7 +100,7 @@ impl TestCx<'_> {
         }
 
         if !(missing.is_empty() && unexpected.is_empty() && wrong_cgus.is_empty()) {
-            panic!();
+            fatal!("!(missing.is_empty() && unexpected.is_empty() && wrong_cgus.is_empty())");
         }
 
         #[derive(Clone, Eq, PartialEq)]

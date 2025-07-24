@@ -39,19 +39,20 @@ impl<'tcx> LateLintPass<'tcx> for MultipleSupertraitUpcastable {
         let def_id = item.owner_id.to_def_id();
         // NOTE(nbdd0121): use `dyn_compatibility_violations` instead of `is_dyn_compatible` because
         // the latter will report `where_clause_object_safety` lint.
-        if let hir::ItemKind::Trait(_, _, _, _, _) = item.kind
+        if let hir::ItemKind::Trait(_, _, _, ident, ..) = item.kind
             && cx.tcx.is_dyn_compatible(def_id)
         {
             let direct_super_traits_iter = cx
                 .tcx
                 .explicit_super_predicates_of(def_id)
                 .iter_identity_copied()
-                .filter_map(|(pred, _)| pred.as_trait_clause());
+                .filter_map(|(pred, _)| pred.as_trait_clause())
+                .filter(|pred| !cx.tcx.is_lang_item(pred.def_id(), hir::LangItem::MetaSized));
             if direct_super_traits_iter.count() > 1 {
                 cx.emit_span_lint(
                     MULTIPLE_SUPERTRAIT_UPCASTABLE,
                     cx.tcx.def_span(def_id),
-                    crate::lints::MultipleSupertraitUpcastable { ident: item.ident },
+                    crate::lints::MultipleSupertraitUpcastable { ident },
                 );
             }
         }

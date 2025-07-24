@@ -13,14 +13,14 @@ pub(crate) fn target() -> Target {
 
         options: TargetOptions {
             endian: Endian::Little,
-            c_int_width: "32".into(),
+            c_int_width: 32,
             families: cvs!["unix"],
             os: "espidf".into(),
             env: "newlib".into(),
             vendor: "espressif".into(),
 
             executables: true,
-            cpu: "esp32-s2".into(),
+            cpu: "esp32s2".into(),
             linker: Some("xtensa-esp32s2-elf-gcc".into()),
 
             // See https://github.com/espressif/rust-esp32-example/issues/3#issuecomment-861054477

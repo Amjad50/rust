@@ -13,8 +13,8 @@ use crate::{cmp, fmt, hash, mem, num};
 pub struct Alignment(AlignmentEnum);
 
 // Alignment is `repr(usize)`, but via extra steps.
-const _: () = assert!(mem::size_of::<Alignment>() == mem::size_of::<usize>());
-const _: () = assert!(mem::align_of::<Alignment>() == mem::align_of::<usize>());
+const _: () = assert!(size_of::<Alignment>() == size_of::<usize>());
+const _: () = assert!(align_of::<Alignment>() == align_of::<usize>());
 
 fn _alignment_can_be_structurally_matched(a: Alignment) -> bool {
     matches!(a, Alignment::MIN)
@@ -38,14 +38,14 @@ impl Alignment {
 
     /// Returns the alignment for a type.
     ///
-    /// This provides the same numerical value as [`mem::align_of`],
+    /// This provides the same numerical value as [`align_of`],
     /// but in an `Alignment` instead of a `usize`.
     #[unstable(feature = "ptr_alignment_type", issue = "102070")]
     #[inline]
     #[must_use]
     pub const fn of<T>() -> Self {
         // This can't actually panic since type alignment is always a power of two.
-        const { Alignment::new(mem::align_of::<T>()).unwrap() }
+        const { Alignment::new(align_of::<T>()).unwrap() }
     }
 
     /// Creates an `Alignment` from a `usize`, or returns `None` if it's
@@ -73,6 +73,7 @@ impl Alignment {
     /// It must *not* be zero.
     #[unstable(feature = "ptr_alignment_type", issue = "102070")]
     #[inline]
+    #[track_caller]
     pub const unsafe fn new_unchecked(align: usize) -> Self {
         assert_unsafe_precondition!(
             check_language_ub,
@@ -188,7 +189,8 @@ impl TryFrom<usize> for Alignment {
 }
 
 #[unstable(feature = "ptr_alignment_type", issue = "102070")]
-impl From<Alignment> for NonZero<usize> {
+#[rustc_const_unstable(feature = "const_try", issue = "74935")]
+impl const From<Alignment> for NonZero<usize> {
     #[inline]
     fn from(align: Alignment) -> NonZero<usize> {
         align.as_nonzero()
@@ -196,7 +198,8 @@ impl From<Alignment> for NonZero<usize> {
 }
 
 #[unstable(feature = "ptr_alignment_type", issue = "102070")]
-impl From<Alignment> for usize {
+#[rustc_const_unstable(feature = "const_try", issue = "74935")]
+impl const From<Alignment> for usize {
     #[inline]
     fn from(align: Alignment) -> usize {
         align.as_usize()
@@ -229,7 +232,8 @@ impl hash::Hash for Alignment {
 
 /// Returns [`Alignment::MIN`], which is valid for any type.
 #[unstable(feature = "ptr_alignment_type", issue = "102070")]
-impl Default for Alignment {
+#[rustc_const_unstable(feature = "const_default", issue = "143894")]
+impl const Default for Alignment {
     fn default() -> Alignment {
         Alignment::MIN
     }

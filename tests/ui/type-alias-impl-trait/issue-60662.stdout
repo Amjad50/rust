@@ -1,10 +1,11 @@
 //@ check-pass
 //@ compile-flags: -Z unpretty=hir
+//@ edition: 2015
 
 #![feature(type_alias_impl_trait)]
 #[prelude_import]
 use ::std::prelude::rust_2015::*;
-#[macro_use]
+#[attr = MacroUse {arguments: UseAll}]
 extern crate std;
 
 trait Animal { }

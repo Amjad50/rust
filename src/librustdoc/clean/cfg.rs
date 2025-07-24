@@ -8,7 +8,6 @@ use std::{mem, ops};
 
 use rustc_ast::{LitKind, MetaItem, MetaItemInner, MetaItemKind, MetaItemLit};
 use rustc_data_structures::fx::FxHashSet;
-use rustc_feature::Features;
 use rustc_session::parse::ParseSess;
 use rustc_span::Span;
 use rustc_span::symbol::{Symbol, sym};
@@ -132,25 +131,20 @@ impl Cfg {
     /// Checks whether the given configuration can be matched in the current session.
     ///
     /// Equivalent to `attr::cfg_matches`.
-    // FIXME: Actually make use of `features`.
-    pub(crate) fn matches(&self, psess: &ParseSess, features: Option<&Features>) -> bool {
+    pub(crate) fn matches(&self, psess: &ParseSess) -> bool {
         match *self {
             Cfg::False => false,
             Cfg::True => true,
-            Cfg::Not(ref child) => !child.matches(psess, features),
-            Cfg::All(ref sub_cfgs) => {
-                sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(psess, features))
-            }
-            Cfg::Any(ref sub_cfgs) => {
-                sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(psess, features))
-            }
+            Cfg::Not(ref child) => !child.matches(psess),
+            Cfg::All(ref sub_cfgs) => sub_cfgs.iter().all(|sub_cfg| sub_cfg.matches(psess)),
+            Cfg::Any(ref sub_cfgs) => sub_cfgs.iter().any(|sub_cfg| sub_cfg.matches(psess)),
             Cfg::Cfg(name, value) => psess.config.contains(&(name, value)),
         }
     }
 
     /// Whether the configuration consists of just `Cfg` or `Not`.
     fn is_simple(&self) -> bool {
-        match *self {
+        match self {
             Cfg::False | Cfg::True | Cfg::Cfg(..) | Cfg::Not(..) => true,
             Cfg::All(..) | Cfg::Any(..) => false,
         }
@@ -158,7 +152,7 @@ impl Cfg {
 
     /// Whether the configuration consists of just `Cfg`, `Not` or `All`.
     fn is_all(&self) -> bool {
-        match *self {
+        match self {
             Cfg::False | Cfg::True | Cfg::Cfg(..) | Cfg::Not(..) | Cfg::All(..) => true,
             Cfg::Any(..) => false,
         }
@@ -175,28 +169,36 @@ impl Cfg {
         msg
     }
 
-    /// Renders the configuration for long display, as a long HTML description.
-    pub(crate) fn render_long_html(&self) -> String {
-        let on = if self.should_use_with_in_description() { "with" } else { "on" };
+    fn render_long_inner(&self, format: Format) -> String {
+        let on = if self.omit_preposition() {
+            " "
+        } else if self.should_use_with_in_description() {
+            " with "
+        } else {
+            " on "
+        };
 
-        let mut msg =
-            format!("Available {on} <strong>{}</strong>", Display(self, Format::LongHtml));
+        let mut msg = if matches!(format, Format::LongHtml) {
+            format!("Available{on}<strong>{}</strong>", Display(self, format))
+        } else {
+            format!("Available{on}{}", Display(self, format))
+        };
         if self.should_append_only_to_description() {
             msg.push_str(" only");
         }
+        msg
+    }
+
+    /// Renders the configuration for long display, as a long HTML description.
+    pub(crate) fn render_long_html(&self) -> String {
+        let mut msg = self.render_long_inner(Format::LongHtml);
         msg.push('.');
         msg
     }
 
     /// Renders the configuration for long display, as a long plain text description.
     pub(crate) fn render_long_plain(&self) -> String {
-        let on = if self.should_use_with_in_description() { "with" } else { "on" };
-
-        let mut msg = format!("Available {on} {}", Display(self, Format::LongPlain));
-        if self.should_append_only_to_description() {
-            msg.push_str(" only");
-        }
-        msg
+        self.render_long_inner(Format::LongPlain)
     }
 
     fn should_capitalize_first_letter(&self) -> bool {
@@ -210,7 +212,7 @@ impl Cfg {
     }
 
     fn should_append_only_to_description(&self) -> bool {
-        match *self {
+        match self {
             Cfg::False | Cfg::True => false,
             Cfg::Any(..) | Cfg::All(..) | Cfg::Cfg(..) => true,
             Cfg::Not(box Cfg::Cfg(..)) => true,
@@ -250,6 +252,10 @@ impl Cfg {
             Some(self.clone())
         }
     }
+
+    fn omit_preposition(&self) -> bool {
+        matches!(self, Cfg::True | Cfg::False)
+    }
 }
 
 impl ops::Not for Cfg {
@@ -267,17 +273,17 @@ impl ops::Not for Cfg {
 impl ops::BitAndAssign for Cfg {
     fn bitand_assign(&mut self, other: Cfg) {
         match (self, other) {
-            (&mut Cfg::False, _) | (_, Cfg::True) => {}
+            (Cfg::False, _) | (_, Cfg::True) => {}
             (s, Cfg::False) => *s = Cfg::False,
-            (s @ &mut Cfg::True, b) => *s = b,
-            (&mut Cfg::All(ref mut a), Cfg::All(ref mut b)) => {
+            (s @ Cfg::True, b) => *s = b,
+            (Cfg::All(a), Cfg::All(ref mut b)) => {
                 for c in b.drain(..) {
                     if !a.contains(&c) {
                         a.push(c);
                     }
                 }
             }
-            (&mut Cfg::All(ref mut a), ref mut b) => {
+            (Cfg::All(a), ref mut b) => {
                 if !a.contains(b) {
                     a.push(mem::replace(b, Cfg::True));
                 }
@@ -311,15 +317,15 @@ impl ops::BitOrAssign for Cfg {
     fn bitor_assign(&mut self, other: Cfg) {
         match (self, other) {
             (Cfg::True, _) | (_, Cfg::False) | (_, Cfg::True) => {}
-            (s @ &mut Cfg::False, b) => *s = b,
-            (&mut Cfg::Any(ref mut a), Cfg::Any(ref mut b)) => {
+            (s @ Cfg::False, b) => *s = b,
+            (Cfg::Any(a), Cfg::Any(ref mut b)) => {
                 for c in b.drain(..) {
                     if !a.contains(&c) {
                         a.push(c);
                     }
                 }
             }
-            (&mut Cfg::Any(ref mut a), ref mut b) => {
+            (Cfg::Any(a), ref mut b) => {
                 if !a.contains(b) {
                     a.push(mem::replace(b, Cfg::True));
                 }
@@ -446,40 +452,34 @@ impl Display<'_> {
 
 impl fmt::Display for Display<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self.0 {
-            Cfg::Not(ref child) => match **child {
-                Cfg::Any(ref sub_cfgs) => {
-                    let separator =
-                        if sub_cfgs.iter().all(Cfg::is_simple) { " nor " } else { ", nor " };
-                    fmt.write_str("neither ")?;
+        match self.0 {
+            Cfg::Not(box Cfg::Any(sub_cfgs)) => {
+                let separator =
+                    if sub_cfgs.iter().all(Cfg::is_simple) { " nor " } else { ", nor " };
+                fmt.write_str("neither ")?;
 
-                    sub_cfgs
-                        .iter()
-                        .map(|sub_cfg| {
-                            fmt::from_fn(|fmt| {
-                                write_with_opt_paren(
-                                    fmt,
-                                    !sub_cfg.is_all(),
-                                    Display(sub_cfg, self.1),
-                                )
-                            })
+                sub_cfgs
+                    .iter()
+                    .map(|sub_cfg| {
+                        fmt::from_fn(|fmt| {
+                            write_with_opt_paren(fmt, !sub_cfg.is_all(), Display(sub_cfg, self.1))
                         })
-                        .joined(separator, fmt)
-                }
-                ref simple @ Cfg::Cfg(..) => write!(fmt, "non-{}", Display(simple, self.1)),
-                ref c => write!(fmt, "not ({})", Display(c, self.1)),
-            },
+                    })
+                    .joined(separator, fmt)
+            }
+            Cfg::Not(box simple @ Cfg::Cfg(..)) => write!(fmt, "non-{}", Display(simple, self.1)),
+            Cfg::Not(box c) => write!(fmt, "not ({})", Display(c, self.1)),
 
-            Cfg::Any(ref sub_cfgs) => {
+            Cfg::Any(sub_cfgs) => {
                 let separator = if sub_cfgs.iter().all(Cfg::is_simple) { " or " } else { ", or " };
                 self.display_sub_cfgs(fmt, sub_cfgs, separator)
             }
-            Cfg::All(ref sub_cfgs) => self.display_sub_cfgs(fmt, sub_cfgs, " and "),
+            Cfg::All(sub_cfgs) => self.display_sub_cfgs(fmt, sub_cfgs, " and "),
 
             Cfg::True => fmt.write_str("everywhere"),
             Cfg::False => fmt.write_str("nowhere"),
 
-            Cfg::Cfg(name, value) => {
+            &Cfg::Cfg(name, value) => {
                 let human_readable = match (name, value) {
                     (sym::unix, None) => "Unix",
                     (sym::windows, None) => "Windows",
@@ -511,6 +511,7 @@ impl fmt::Display for Display<'_> {
                     (sym::target_arch, Some(arch)) => match arch.as_str() {
                         "aarch64" => "AArch64",
                         "arm" => "ARM",
+                        "loongarch32" => "LoongArch LA32",
                         "loongarch64" => "LoongArch LA64",
                         "m68k" => "M68k",
                         "csky" => "CSKY",

@@ -2,7 +2,7 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::codes::*;
 use rustc_errors::{
     Applicability, Diag, DiagArgValue, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level,
-    MultiSpan, SubdiagMessageOp, Subdiagnostic, pluralize,
+    MultiSpan, Subdiagnostic, pluralize,
 };
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
@@ -546,11 +546,7 @@ pub(crate) struct UnsafeNotInheritedLintNote {
 }
 
 impl Subdiagnostic for UnsafeNotInheritedLintNote {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _f: &F,
-    ) {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         diag.span_note(self.signature_span, fluent::mir_build_unsafe_fn_safe_body);
         let body_start = self.body_span.shrink_to_lo();
         let body_end = self.body_span.shrink_to_hi();
@@ -613,9 +609,9 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for NonExhaustivePatternsTypeNo
             diag.span_note(span, fluent::mir_build_def_note);
         }
 
-        let is_variant_list_non_exhaustive = matches!(self.ty.kind(),
-            ty::Adt(def, _) if def.is_variant_list_non_exhaustive() && !def.did().is_local());
-        if is_variant_list_non_exhaustive {
+        let is_non_exhaustive = matches!(self.ty.kind(),
+            ty::Adt(def, _) if def.variant_list_has_applicable_non_exhaustive());
+        if is_non_exhaustive {
             diag.note(fluent::mir_build_non_exhaustive_type_note);
         } else {
             diag.note(fluent::mir_build_type_note);
@@ -998,14 +994,15 @@ pub(crate) struct PatternNotCovered<'s, 'tcx> {
     pub(crate) uncovered: Uncovered,
     #[subdiagnostic]
     pub(crate) inform: Option<Inform>,
-    #[label(mir_build_confused)]
-    pub(crate) interpreted_as_const: Option<Span>,
     #[subdiagnostic]
-    pub(crate) interpreted_as_const_sugg: Option<InterpretedAsConst>,
+    pub(crate) interpreted_as_const: Option<InterpretedAsConst>,
+    #[subdiagnostic]
+    pub(crate) interpreted_as_const_sugg: Option<InterpretedAsConstSugg>,
     #[subdiagnostic]
     pub(crate) adt_defined_here: Option<AdtDefinedHere<'tcx>>,
     #[note(mir_build_privately_uninhabited)]
     pub(crate) witness_1_is_privately_uninhabited: bool,
+    pub(crate) witness_1: String,
     #[note(mir_build_pattern_ty)]
     pub(crate) _p: (),
     pub(crate) pattern_ty: Ty<'tcx>,
@@ -1020,6 +1017,14 @@ pub(crate) struct PatternNotCovered<'s, 'tcx> {
 #[note(mir_build_more_information)]
 pub(crate) struct Inform;
 
+#[derive(Subdiagnostic)]
+#[label(mir_build_confused)]
+pub(crate) struct InterpretedAsConst {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) variable: String,
+}
+
 pub(crate) struct AdtDefinedHere<'tcx> {
     pub(crate) adt_def_span: Span,
     pub(crate) ty: Ty<'tcx>,
@@ -1031,11 +1036,7 @@ pub(crate) struct Variant {
 }
 
 impl<'tcx> Subdiagnostic for AdtDefinedHere<'tcx> {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _f: &F,
-    ) {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         diag.arg("ty", self.ty);
         let mut spans = MultiSpan::from(self.adt_def_span);
 
@@ -1054,7 +1055,7 @@ impl<'tcx> Subdiagnostic for AdtDefinedHere<'tcx> {
     applicability = "maybe-incorrect",
     style = "verbose"
 )]
-pub(crate) struct InterpretedAsConst {
+pub(crate) struct InterpretedAsConstSugg {
     #[primary_span]
     pub(crate) span: Span,
     pub(crate) variable: String,
@@ -1117,11 +1118,7 @@ pub(crate) struct Rust2024IncompatiblePatSugg {
 }
 
 impl Subdiagnostic for Rust2024IncompatiblePatSugg {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _f: &F,
-    ) {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         // Format and emit explanatory notes about default binding modes. Reversing the spans' order
         // means if we have nested spans, the innermost ones will be visited first.
         for (span, def_br_mutbl) in self.default_mode_labels.into_iter().rev() {
@@ -1160,4 +1157,80 @@ impl Subdiagnostic for Rust2024IncompatiblePatSugg {
             diag.multipart_suggestion_verbose(msg, self.suggestion, applicability);
         }
     }
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_invalid_update)]
+pub(crate) struct LoopMatchInvalidUpdate {
+    #[primary_span]
+    pub lhs: Span,
+    #[label]
+    pub scrutinee: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_invalid_match)]
+#[note]
+pub(crate) struct LoopMatchInvalidMatch {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_unsupported_type)]
+#[note]
+pub(crate) struct LoopMatchUnsupportedType<'tcx> {
+    #[primary_span]
+    pub span: Span,
+    pub ty: Ty<'tcx>,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_bad_statements)]
+pub(crate) struct LoopMatchBadStatements {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_bad_rhs)]
+pub(crate) struct LoopMatchBadRhs {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_missing_assignment)]
+pub(crate) struct LoopMatchMissingAssignment {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_loop_match_arm_with_guard)]
+pub(crate) struct LoopMatchArmWithGuard {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_const_continue_bad_const)]
+pub(crate) struct ConstContinueBadConst {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_const_continue_missing_value)]
+pub(crate) struct ConstContinueMissingValue {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(mir_build_const_continue_unknown_jump_target)]
+pub(crate) struct ConstContinueUnknownJumpTarget {
+    #[primary_span]
+    pub span: Span,
 }

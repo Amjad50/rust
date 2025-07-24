@@ -1,3 +1,5 @@
+use crate::msrvs::Msrv;
+use crate::qualify_min_const_fn::is_stable_const_fn;
 use crate::ty::needs_ordered_drop;
 use crate::{get_enclosing_block, path_to_local_id};
 use core::ops::ControlFlow;
@@ -297,10 +299,10 @@ where
 /// Checks if the given resolved path is used in the given body.
 pub fn is_res_used(cx: &LateContext<'_>, res: Res, body: BodyId) -> bool {
     for_each_expr(cx, cx.tcx.hir_body(body).value, |e| {
-        if let ExprKind::Path(p) = &e.kind {
-            if cx.qpath_res(p, e.hir_id) == res {
-                return ControlFlow::Break(());
-            }
+        if let ExprKind::Path(p) = &e.kind
+            && cx.qpath_res(p, e.hir_id) == res
+        {
+            return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
     })
@@ -343,17 +345,17 @@ pub fn is_const_evaluatable<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> 
                     .cx
                     .qpath_res(p, hir_id)
                     .opt_def_id()
-                    .is_some_and(|id| self.cx.tcx.is_const_fn(id)) => {},
+                    .is_some_and(|id| is_stable_const_fn(self.cx, id, Msrv::default())) => {},
                 ExprKind::MethodCall(..)
                     if self
                         .cx
                         .typeck_results()
                         .type_dependent_def_id(e.hir_id)
-                        .is_some_and(|id| self.cx.tcx.is_const_fn(id)) => {},
+                        .is_some_and(|id| is_stable_const_fn(self.cx, id, Msrv::default())) => {},
                 ExprKind::Binary(_, lhs, rhs)
                     if self.cx.typeck_results().expr_ty(lhs).peel_refs().is_primitive_ty()
                         && self.cx.typeck_results().expr_ty(rhs).peel_refs().is_primitive_ty() => {},
-                ExprKind::Unary(UnOp::Deref, e) if self.cx.typeck_results().expr_ty(e).is_ref() => (),
+                ExprKind::Unary(UnOp::Deref, e) if self.cx.typeck_results().expr_ty(e).is_raw_ptr() => (),
                 ExprKind::Unary(_, e) if self.cx.typeck_results().expr_ty(e).peel_refs().is_primitive_ty() => (),
                 ExprKind::Index(base, _, _)
                     if matches!(
@@ -388,7 +390,8 @@ pub fn is_const_evaluatable<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> 
                 | ExprKind::Repeat(..)
                 | ExprKind::Struct(..)
                 | ExprKind::Tup(_)
-                | ExprKind::Type(..) => (),
+                | ExprKind::Type(..)
+                | ExprKind::UnsafeBinderCast(..) => (),
 
                 _ => {
                     return ControlFlow::Break(());
@@ -648,6 +651,9 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
                     helper(typeck, true, arg, f)?;
                 }
             },
+            ExprKind::Use(expr, _) => {
+                helper(typeck, true, expr, f)?;
+            },
             ExprKind::Index(borrowed, consumed, _)
             | ExprKind::Assign(borrowed, consumed, _)
             | ExprKind::AssignOp(_, borrowed, consumed) => {
@@ -673,10 +679,7 @@ pub fn for_each_unconsumed_temporary<'tcx, B>(
                     helper(typeck, true, else_expr, f)?;
                 }
             },
-            ExprKind::Type(e, _) => {
-                helper(typeck, consume, e, f)?;
-            },
-            ExprKind::UnsafeBinderCast(_, e, _) => {
+            ExprKind::Type(e, _) | ExprKind::UnsafeBinderCast(_, e, _) => {
                 helper(typeck, consume, e, f)?;
             },
 

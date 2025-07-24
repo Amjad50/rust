@@ -5,12 +5,11 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::thread::panicking;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use std::{env, fs, io, str};
+use std::{env, fs, io, panic, str};
 
-use build_helper::util::fail;
 use object::read::archive::ArchiveFile;
 
 use crate::LldMode;
@@ -22,6 +21,23 @@ pub use crate::utils::shared_helpers::{dylib_path, dylib_path_var};
 #[cfg(test)]
 mod tests;
 
+/// A wrapper around `std::panic::Location` used to track the location of panics
+/// triggered by `t` macro usage.
+pub struct PanicTracker<'a>(pub &'a panic::Location<'a>);
+
+impl Drop for PanicTracker<'_> {
+    fn drop(&mut self) {
+        if panicking() {
+            eprintln!(
+                "Panic was initiated from {}:{}:{}",
+                self.0.file(),
+                self.0.line(),
+                self.0.column()
+            );
+        }
+    }
+}
+
 /// A helper macro to `unwrap` a result except also print out details like:
 ///
 /// * The file/line of the panic
@@ -32,24 +48,43 @@ mod tests;
 /// using a `Result` with `try!`, but this may change one day...
 #[macro_export]
 macro_rules! t {
-    ($e:expr) => {
+    ($e:expr) => {{
+        let _panic_guard = $crate::PanicTracker(std::panic::Location::caller());
         match $e {
             Ok(e) => e,
             Err(e) => panic!("{} failed with {}", stringify!($e), e),
         }
-    };
+    }};
     // it can show extra info in the second parameter
-    ($e:expr, $extra:expr) => {
+    ($e:expr, $extra:expr) => {{
+        let _panic_guard = $crate::PanicTracker(std::panic::Location::caller());
         match $e {
             Ok(e) => e,
             Err(e) => panic!("{} failed with {} ({:?})", stringify!($e), e, $extra),
         }
-    };
+    }};
 }
 
 pub use t;
 pub fn exe(name: &str, target: TargetSelection) -> String {
     crate::utils::shared_helpers::exe(name, &target.triple)
+}
+
+/// Returns the path to the split debug info for the specified file if it exists.
+pub fn split_debuginfo(name: impl Into<PathBuf>) -> Option<PathBuf> {
+    // FIXME: only msvc is currently supported
+
+    let path = name.into();
+    let pdb = path.with_extension("pdb");
+    if pdb.exists() {
+        return Some(pdb);
+    }
+
+    // pdbs get named with '-' replaced by '_'
+    let file_name = pdb.file_name()?.to_str()?.replace("-", "_");
+
+    let pdb: PathBuf = [path.parent()?, Path::new(&file_name)].into_iter().collect();
+    pdb.exists().then_some(pdb)
 }
 
 /// Returns `true` if the file name given looks like a dynamic library.
@@ -61,7 +96,7 @@ pub fn is_dylib(path: &Path) -> bool {
 
 /// Return the path to the containing submodule if available.
 pub fn submodule_path_of(builder: &Builder<'_>, path: &str) -> Option<String> {
-    let submodule_paths = build_helper::util::parse_gitmodules(&builder.src);
+    let submodule_paths = builder.submodule_paths();
     submodule_paths.iter().find_map(|submodule_path| {
         if path.starts_with(submodule_path) { Some(submodule_path.to_string()) } else { None }
     })
@@ -93,7 +128,7 @@ pub fn is_debug_info(name: &str) -> bool {
 /// Returns the corresponding relative library directory that the compiler's
 /// dylibs will be found in.
 pub fn libdir(target: TargetSelection) -> &'static str {
-    if target.is_windows() { "bin" } else { "lib" }
+    if target.is_windows() || target.contains("cygwin") { "bin" } else { "lib" }
 }
 
 /// Adds a list of lookup paths to `cmd`'s dynamic library lookup path.
@@ -141,6 +176,11 @@ pub fn symlink_dir(config: &Config, original: &Path, link: &Path) -> io::Result<
     fn symlink_dir_inner(target: &Path, junction: &Path) -> io::Result<()> {
         junction::create(target, junction)
     }
+}
+
+/// Return the host target on which we are currently running.
+pub fn get_host_target() -> TargetSelection {
+    TargetSelection::from_user(env!("BUILD_TRIPLE"))
 }
 
 /// Rename a file if from and to are in the same filesystem or
@@ -233,24 +273,6 @@ pub fn is_valid_test_suite_arg<'a, P: AsRef<Path>>(
     }
 }
 
-// FIXME: get rid of this function
-pub fn check_run(cmd: &mut BootstrapCommand, print_cmd_on_fail: bool) -> bool {
-    let status = match cmd.as_command_mut().status() {
-        Ok(status) => status,
-        Err(e) => {
-            println!("failed to execute command: {cmd:?}\nERROR: {e}");
-            return false;
-        }
-    };
-    if !status.success() && print_cmd_on_fail {
-        println!(
-            "\n\ncommand did not execute successfully: {cmd:?}\n\
-             expected success, got: {status}\n\n"
-        );
-    }
-    status.success()
-}
-
 pub fn make(host: &str) -> PathBuf {
     if host.contains("dragonfly")
         || host.contains("freebsd")
@@ -260,52 +282,6 @@ pub fn make(host: &str) -> PathBuf {
         PathBuf::from("gmake")
     } else {
         PathBuf::from("make")
-    }
-}
-
-#[track_caller]
-pub fn output(cmd: &mut Command) -> String {
-    #[cfg(feature = "tracing")]
-    let _run_span = crate::trace_cmd!(cmd);
-
-    let output = match cmd.stderr(Stdio::inherit()).output() {
-        Ok(status) => status,
-        Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
-    };
-    if !output.status.success() {
-        panic!(
-            "command did not execute successfully: {:?}\n\
-             expected success, got: {}",
-            cmd, output.status
-        );
-    }
-    String::from_utf8(output.stdout).unwrap()
-}
-
-/// Spawn a process and return a closure that will wait for the process
-/// to finish and then return its output. This allows the spawned process
-/// to do work without immediately blocking bootstrap.
-#[track_caller]
-pub fn start_process(cmd: &mut Command) -> impl FnOnce() -> String {
-    let child = match cmd.stderr(Stdio::inherit()).stdout(Stdio::piped()).spawn() {
-        Ok(child) => child,
-        Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
-    };
-
-    let command = format!("{:?}", cmd);
-
-    move || {
-        let output = child.wait_with_output().unwrap();
-
-        if !output.status.success() {
-            panic!(
-                "command did not execute successfully: {}\n\
-                 expected success, got: {}",
-                command, output.status
-            );
-        }
-
-        String::from_utf8(output.stdout).unwrap()
     }
 }
 
@@ -415,9 +391,7 @@ pub fn dir_is_empty(dir: &Path) -> bool {
 /// the "y" part from the string.
 pub fn extract_beta_rev(version: &str) -> Option<String> {
     let parts = version.splitn(2, "-beta.").collect::<Vec<_>>();
-    let count = parts.get(1).and_then(|s| s.find(' ').map(|p| s[..p].to_string()));
-
-    count
+    parts.get(1).and_then(|s| s.find(' ').map(|p| s[..p].to_string()))
 }
 
 pub enum LldThreads {
@@ -453,19 +427,24 @@ pub fn linker_flags(
     if !builder.is_lld_direct_linker(target) && builder.config.lld_mode.is_used() {
         match builder.config.lld_mode {
             LldMode::External => {
-                // cfg(bootstrap) - remove after updating bootstrap compiler (#137498)
-                if stage == 0 && target.is_windows() {
-                    args.push("-Clink-arg=-fuse-ld=lld".to_string());
+                // cfg(bootstrap) - remove the stage 0 check after updating the bootstrap compiler:
+                // `-Clinker-features` has been stabilized.
+                if stage == 0 {
+                    args.push("-Zlinker-features=+lld".to_string());
                 } else {
-                    args.push("-Clinker-flavor=gnu-lld-cc".to_string());
+                    args.push("-Clinker-features=+lld".to_string());
                 }
-                // FIXME(kobzol): remove this flag once MCP510 gets stabilized
                 args.push("-Zunstable-options".to_string());
             }
             LldMode::SelfContained => {
-                args.push("-Clinker-flavor=gnu-lld-cc".to_string());
+                // cfg(bootstrap) - remove the stage 0 check after updating the bootstrap compiler:
+                // `-Clinker-features` has been stabilized.
+                if stage == 0 {
+                    args.push("-Zlinker-features=+lld".to_string());
+                } else {
+                    args.push("-Clinker-features=+lld".to_string());
+                }
                 args.push("-Clink-self-contained=+linker".to_string());
-                // FIXME(kobzol): remove this flag once MCP510 gets stabilized
                 args.push("-Zunstable-options".to_string());
             }
             LldMode::Unused => unreachable!(),
@@ -513,7 +492,7 @@ where
     use std::fmt::Write;
 
     input.as_ref().iter().fold(String::with_capacity(input.as_ref().len() * 2), |mut acc, &byte| {
-        write!(&mut acc, "{:02x}", byte).expect("Failed to write byte to the hex String.");
+        write!(&mut acc, "{byte:02x}").expect("Failed to write byte to the hex String.");
         acc
     })
 }

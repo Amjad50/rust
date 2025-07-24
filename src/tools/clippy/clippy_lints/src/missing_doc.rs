@@ -48,6 +48,8 @@ pub struct MissingDoc {
     /// Whether to **only** check for missing documentation in items visible within the current
     /// crate. For example, `pub(crate)` items.
     crate_items_only: bool,
+    /// Whether to allow fields starting with an underscore to skip documentation requirements
+    allow_unused: bool,
     /// Stack of whether #[doc(hidden)] is set
     /// at each level which has lint attributes.
     doc_hidden_stack: Vec<bool>,
@@ -59,6 +61,7 @@ impl MissingDoc {
     pub fn new(conf: &'static Conf) -> Self {
         Self {
             crate_items_only: conf.missing_docs_in_crate_items,
+            allow_unused: conf.missing_docs_allow_unused,
             doc_hidden_stack: vec![false],
             prev_span: None,
         }
@@ -182,7 +185,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
     }
 
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
-        let attrs = cx.tcx.hir().attrs(hir::CRATE_HIR_ID);
+        let attrs = cx.tcx.hir_attrs(hir::CRATE_HIR_ID);
         self.check_missing_docs_attrs(cx, CRATE_DEF_ID, attrs, cx.tcx.def_span(CRATE_DEF_ID), "the", "crate");
     }
 
@@ -192,17 +195,17 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
 
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx hir::Item<'_>) {
         match it.kind {
-            hir::ItemKind::Fn { .. } => {
+            hir::ItemKind::Fn { ident, .. } => {
                 // ignore main()
-                if it.ident.name == sym::main {
+                if ident.name == sym::main {
                     let at_root = cx.tcx.local_parent(it.owner_id.def_id) == CRATE_DEF_ID;
                     if at_root {
                         note_prev_span_then_ret!(self.prev_span, it.span);
                     }
                 }
             },
-            hir::ItemKind::Const(..) => {
-                if it.ident.name == kw::Underscore {
+            hir::ItemKind::Const(ident, ..) => {
+                if ident.name == kw::Underscore {
                     note_prev_span_then_ret!(self.prev_span, it.span);
                 }
             },
@@ -224,7 +227,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
 
         let (article, desc) = cx.tcx.article_and_description(it.owner_id.to_def_id());
 
-        let attrs = cx.tcx.hir().attrs(it.hir_id());
+        let attrs = cx.tcx.hir_attrs(it.hir_id());
         if !is_from_proc_macro(cx, it) {
             self.check_missing_docs_attrs(cx, it.owner_id.def_id, attrs, it.span, article, desc);
         }
@@ -234,7 +237,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
     fn check_trait_item(&mut self, cx: &LateContext<'tcx>, trait_item: &'tcx hir::TraitItem<'_>) {
         let (article, desc) = cx.tcx.article_and_description(trait_item.owner_id.to_def_id());
 
-        let attrs = cx.tcx.hir().attrs(trait_item.hir_id());
+        let attrs = cx.tcx.hir_attrs(trait_item.hir_id());
         if !is_from_proc_macro(cx, trait_item) {
             self.check_missing_docs_attrs(cx, trait_item.owner_id.def_id, attrs, trait_item.span, article, desc);
         }
@@ -252,7 +255,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
         }
 
         let (article, desc) = cx.tcx.article_and_description(impl_item.owner_id.to_def_id());
-        let attrs = cx.tcx.hir().attrs(impl_item.hir_id());
+        let attrs = cx.tcx.hir_attrs(impl_item.hir_id());
         if !is_from_proc_macro(cx, impl_item) {
             self.check_missing_docs_attrs(cx, impl_item.owner_id.def_id, attrs, impl_item.span, article, desc);
         }
@@ -260,17 +263,18 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
     }
 
     fn check_field_def(&mut self, cx: &LateContext<'tcx>, sf: &'tcx hir::FieldDef<'_>) {
-        if !sf.is_positional() {
-            let attrs = cx.tcx.hir().attrs(sf.hir_id);
-            if !is_from_proc_macro(cx, sf) {
-                self.check_missing_docs_attrs(cx, sf.def_id, attrs, sf.span, "a", "struct field");
-            }
+        if !(sf.is_positional()
+            || is_from_proc_macro(cx, sf)
+            || self.allow_unused && sf.ident.as_str().starts_with('_'))
+        {
+            let attrs = cx.tcx.hir_attrs(sf.hir_id);
+            self.check_missing_docs_attrs(cx, sf.def_id, attrs, sf.span, "a", "struct field");
         }
         self.prev_span = Some(sf.span);
     }
 
     fn check_variant(&mut self, cx: &LateContext<'tcx>, v: &'tcx hir::Variant<'_>) {
-        let attrs = cx.tcx.hir().attrs(v.hir_id);
+        let attrs = cx.tcx.hir_attrs(v.hir_id);
         if !is_from_proc_macro(cx, v) {
             self.check_missing_docs_attrs(cx, v.def_id, attrs, v.span, "a", "variant");
         }

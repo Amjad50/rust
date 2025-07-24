@@ -2,8 +2,7 @@ use rustc_data_structures::fx::{FxIndexMap, FxIndexSet, IndexEntry};
 use rustc_hir as hir;
 use rustc_infer::infer::region_constraints::{Constraint, RegionConstraintData};
 use rustc_middle::bug;
-use rustc_middle::ty::fold::fold_regions;
-use rustc_middle::ty::{self, Region, Ty};
+use rustc_middle::ty::{self, Region, Ty, fold_regions};
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::{Symbol, kw};
 use rustc_trait_selection::traits::auto_trait::{self, RegionTarget};
@@ -12,7 +11,7 @@ use tracing::{debug, instrument};
 
 use crate::clean::{
     self, Lifetime, clean_generic_param_def, clean_middle_ty, clean_predicate,
-    clean_trait_ref_with_constraints, clean_ty_generics, simplify,
+    clean_trait_ref_with_constraints, clean_ty_generics_inner, simplify,
 };
 use crate::core::DocContext;
 
@@ -102,7 +101,7 @@ fn synthesize_auto_trait_impl<'tcx>(
             // Instead, we generate `impl !Send for Foo<T>`, which better
             // expresses the fact that `Foo<T>` never implements `Send`,
             // regardless of the choice of `T`.
-            let mut generics = clean_ty_generics(
+            let mut generics = clean_ty_generics_inner(
                 cx,
                 tcx.generics_of(item_def_id),
                 ty::GenericPredicates::default(),
@@ -115,8 +114,8 @@ fn synthesize_auto_trait_impl<'tcx>(
     };
 
     Some(clean::Item {
-        name: None,
         inner: Box::new(clean::ItemInner {
+            name: None,
             attrs: Default::default(),
             stability: None,
             kind: clean::ImplItem(Box::new(clean::Impl {
@@ -128,10 +127,10 @@ fn synthesize_auto_trait_impl<'tcx>(
                 polarity,
                 kind: clean::ImplKind::Auto,
             })),
+            item_id: clean::ItemId::Auto { trait_: trait_def_id, for_: item_def_id },
+            cfg: None,
+            inline_stmt_id: None,
         }),
-        item_id: clean::ItemId::Auto { trait_: trait_def_id, for_: item_def_id },
-        cfg: None,
-        inline_stmt_id: None,
     })
 }
 
@@ -183,7 +182,7 @@ fn clean_param_env<'tcx>(
                     .is_some_and(|pred| tcx.lang_items().sized_trait() == Some(pred.def_id()))
         })
         .map(|pred| {
-            fold_regions(tcx, pred, |r, _| match *r {
+            fold_regions(tcx, pred, |r, _| match r.kind() {
                 // FIXME: Don't `unwrap_or`, I think we should panic if we encounter an infer var that
                 // we can't map to a concrete region. However, `AutoTraitFinder` *does* leak those kinds
                 // of `ReVar`s for some reason at the time of writing. See `rustdoc-ui/` tests.
@@ -363,7 +362,7 @@ fn clean_region_outlives_constraints<'tcx>(
 }
 
 fn early_bound_region_name(region: Region<'_>) -> Option<Symbol> {
-    match *region {
+    match region.kind() {
         ty::ReEarlyParam(r) => Some(r.name),
         _ => None,
     }

@@ -1031,7 +1031,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
 
     /// Retains only the elements specified by the predicate.
     ///
-    /// In other words, remove all elements `e` for which `f(&e)` returns false.
+    /// In other words, remove all elements `e` for which `f(&mut e)` returns false.
     /// This method operates in place, visiting each element exactly once in the
     /// original order, and preserves the order of the retained elements.
     ///
@@ -1047,7 +1047,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// d.push_front(2);
     /// d.push_front(3);
     ///
-    /// d.retain(|&x| x % 2 == 0);
+    /// d.retain(|&mut x| x % 2 == 0);
     ///
     /// assert_eq!(d.pop_front(), Some(2));
     /// assert_eq!(d.pop_front(), None);
@@ -1075,41 +1075,6 @@ impl<T, A: Allocator> LinkedList<T, A> {
     #[unstable(feature = "linked_list_retain", issue = "114135")]
     pub fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&T) -> bool,
-    {
-        self.retain_mut(|elem| f(elem));
-    }
-
-    /// Retains only the elements specified by the predicate.
-    ///
-    /// In other words, remove all elements `e` for which `f(&mut e)` returns false.
-    /// This method operates in place, visiting each element exactly once in the
-    /// original order, and preserves the order of the retained elements.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(linked_list_retain)]
-    /// use std::collections::LinkedList;
-    ///
-    /// let mut d = LinkedList::new();
-    ///
-    /// d.push_front(1);
-    /// d.push_front(2);
-    /// d.push_front(3);
-    ///
-    /// d.retain_mut(|x| if *x % 2 == 0 {
-    ///     *x += 1;
-    ///     true
-    /// } else {
-    ///     false
-    /// });
-    /// assert_eq!(d.pop_front(), Some(3));
-    /// assert_eq!(d.pop_front(), None);
-    /// ```
-    #[unstable(feature = "linked_list_retain", issue = "114135")]
-    pub fn retain_mut<F>(&mut self, mut f: F)
-    where
         F: FnMut(&mut T) -> bool,
     {
         let mut cursor = self.cursor_front_mut();
@@ -1124,20 +1089,20 @@ impl<T, A: Allocator> LinkedList<T, A> {
 
     /// Creates an iterator which uses a closure to determine if an element should be removed.
     ///
-    /// If the closure returns true, then the element is removed and yielded.
-    /// If the closure returns false, the element will remain in the list and will not be yielded
-    /// by the iterator.
+    /// If the closure returns `true`, the element is removed from the list and
+    /// yielded. If the closure returns `false`, or panics, the element remains
+    /// in the list and will not be yielded.
     ///
     /// If the returned `ExtractIf` is not exhausted, e.g. because it is dropped without iterating
     /// or the iteration short-circuits, then the remaining elements will be retained.
     /// Use `extract_if().for_each(drop)` if you do not need the returned iterator.
     ///
-    /// Note that `extract_if` lets you mutate every element in the filter closure, regardless of
-    /// whether you choose to keep or remove it.
+    /// The iterator also lets you mutate the value of each element in the
+    /// closure, regardless of whether you choose to keep or remove it.
     ///
     /// # Examples
     ///
-    /// Splitting a list into evens and odds, reusing the original list:
+    /// Splitting a list into even and odd values, reusing the original list:
     ///
     /// ```
     /// use std::collections::LinkedList;
@@ -1151,7 +1116,7 @@ impl<T, A: Allocator> LinkedList<T, A> {
     /// assert_eq!(evens.into_iter().collect::<Vec<_>>(), vec![2, 4, 6, 8, 14]);
     /// assert_eq!(odds.into_iter().collect::<Vec<_>>(), vec![1, 3, 5, 9, 11, 13, 15]);
     /// ```
-    #[stable(feature = "extract_if", since = "CURRENT_RUSTC_VERSION")]
+    #[stable(feature = "extract_if", since = "1.87.0")]
     pub fn extract_if<F>(&mut self, filter: F) -> ExtractIf<'_, T, F, A>
     where
         F: FnMut(&mut T) -> bool,
@@ -1931,7 +1896,7 @@ impl<'a, T, A: Allocator> CursorMut<'a, T, A> {
 }
 
 /// An iterator produced by calling `extract_if` on LinkedList.
-#[stable(feature = "extract_if", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "extract_if", since = "1.87.0")]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct ExtractIf<
     'a,
@@ -1946,7 +1911,7 @@ pub struct ExtractIf<
     old_len: usize,
 }
 
-#[stable(feature = "extract_if", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "extract_if", since = "1.87.0")]
 impl<T, F, A: Allocator> Iterator for ExtractIf<'_, T, F, A>
 where
     F: FnMut(&mut T) -> bool,
@@ -1975,10 +1940,15 @@ where
     }
 }
 
-#[stable(feature = "extract_if", since = "CURRENT_RUSTC_VERSION")]
-impl<T: fmt::Debug, F> fmt::Debug for ExtractIf<'_, T, F> {
+#[stable(feature = "extract_if", since = "1.87.0")]
+impl<T, F, A> fmt::Debug for ExtractIf<'_, T, F, A>
+where
+    T: fmt::Debug,
+    A: Allocator,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ExtractIf").field(&self.list).finish()
+        let peek = self.it.map(|node| unsafe { &node.as_ref().element });
+        f.debug_struct("ExtractIf").field("peek", &peek).finish_non_exhaustive()
     }
 }
 

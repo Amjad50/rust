@@ -1,13 +1,12 @@
 //! This module ensures that if a function's ABI requires a particular target feature,
 //! that target feature is enabled both on the callee and all callers.
-use rustc_abi::{BackendRepr, RegKind};
-use rustc_hir::CRATE_HIR_ID;
-use rustc_middle::mir::{self, traversal};
+use rustc_abi::{BackendRepr, CanonAbi, RegKind, X86Call};
+use rustc_hir::{CRATE_HIR_ID, HirId};
+use rustc_middle::mir::{self, Location, traversal};
 use rustc_middle::ty::{self, Instance, InstanceKind, Ty, TyCtxt};
-use rustc_session::lint::builtin::ABI_UNSUPPORTED_VECTOR_TYPES;
 use rustc_span::def_id::DefId;
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
-use rustc_target::callconv::{Conv, FnAbi, PassMode};
+use rustc_target::callconv::{FnAbi, PassMode};
 
 use crate::errors;
 
@@ -26,12 +25,12 @@ fn uses_vector_registers(mode: &PassMode, repr: &BackendRepr) -> bool {
 /// for a certain function.
 /// `is_call` indicates whether this is a call-site check or a definition-site check;
 /// this is only relevant for the wording in the emitted error.
-fn do_check_abi<'tcx>(
+fn do_check_simd_vector_abi<'tcx>(
     tcx: TyCtxt<'tcx>,
     abi: &FnAbi<'tcx, Ty<'tcx>>,
     def_id: DefId,
     is_call: bool,
-    span: impl Fn() -> Span,
+    loc: impl Fn() -> (Span, HirId),
 ) {
     let feature_def = tcx.sess.target.features_for_correct_vector_abi();
     let codegen_attrs = tcx.codegen_fn_attrs(def_id);
@@ -46,41 +45,32 @@ fn do_check_abi<'tcx>(
             let feature = match feature_def.iter().find(|(bits, _)| size.bits() <= *bits) {
                 Some((_, feature)) => feature,
                 None => {
-                    let span = span();
-                    tcx.emit_node_span_lint(
-                        ABI_UNSUPPORTED_VECTOR_TYPES,
-                        CRATE_HIR_ID,
+                    let (span, _hir_id) = loc();
+                    tcx.dcx().emit_err(errors::AbiErrorUnsupportedVectorType {
                         span,
-                        errors::AbiErrorUnsupportedVectorType {
-                            span,
-                            ty: arg_abi.layout.ty,
-                            is_call,
-                        },
-                    );
+                        ty: arg_abi.layout.ty,
+                        is_call,
+                    });
                     continue;
                 }
             };
             if !have_feature(Symbol::intern(feature)) {
                 // Emit error.
-                let span = span();
-                tcx.emit_node_span_lint(
-                    ABI_UNSUPPORTED_VECTOR_TYPES,
-                    CRATE_HIR_ID,
+                let (span, _hir_id) = loc();
+                tcx.dcx().emit_err(errors::AbiErrorDisabledVectorType {
                     span,
-                    errors::AbiErrorDisabledVectorType {
-                        span,
-                        required_feature: feature,
-                        ty: arg_abi.layout.ty,
-                        is_call,
-                    },
-                );
+                    required_feature: feature,
+                    ty: arg_abi.layout.ty,
+                    is_call,
+                });
             }
         }
     }
     // The `vectorcall` ABI is special in that it requires SSE2 no matter which types are being passed.
-    if abi.conv == Conv::X86VectorCall && !have_feature(sym::sse2) {
+    if abi.conv == CanonAbi::X86(X86Call::Vectorcall) && !have_feature(sym::sse2) {
+        let (span, _hir_id) = loc();
         tcx.dcx().emit_err(errors::AbiRequiredTargetFeature {
-            span: span(),
+            span,
             required_feature: "sse2",
             abi: "vectorcall",
             is_call,
@@ -96,15 +86,23 @@ fn check_instance_abi<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
     else {
         // An error will be reported during codegen if we cannot determine the ABI of this
         // function.
+        tcx.dcx().delayed_bug("ABI computation failure should lead to compilation failure");
         return;
     };
-    do_check_abi(
-        tcx,
-        abi,
-        instance.def_id(),
-        /*is_call*/ false,
-        || tcx.def_span(instance.def_id()),
-    )
+    // Unlike the call-site check, we do also check "Rust" ABI functions here.
+    // This should never trigger, *except* if we start making use of vector registers
+    // for the "Rust" ABI and the user disables those vector registers (which should trigger a
+    // warning as that's clearly disabling a "required" target feature for this target).
+    // Using such a function is where disabling the vector register actually can start leading
+    // to soundness issues, so erroring here seems good.
+    let loc = || {
+        let def_id = instance.def_id();
+        (
+            tcx.def_span(def_id),
+            def_id.as_local().map(|did| tcx.local_def_id_to_hir_id(did)).unwrap_or(CRATE_HIR_ID),
+        )
+    };
+    do_check_simd_vector_abi(tcx, abi, instance.def_id(), /*is_call*/ false, loc);
 }
 
 /// Checks that a call expression does not try to pass a vector-passed argument which requires a
@@ -112,11 +110,12 @@ fn check_instance_abi<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
 fn check_call_site_abi<'tcx>(
     tcx: TyCtxt<'tcx>,
     callee: Ty<'tcx>,
-    span: Span,
     caller: InstanceKind<'tcx>,
+    loc: impl Fn() -> (Span, HirId) + Copy,
 ) {
     if callee.fn_sig(tcx).abi().is_rustic_abi() {
-        // we directly handle the soundness of Rust ABIs
+        // We directly handle the soundness of Rust ABIs -- so let's skip the majority of
+        // call sites to avoid a perf regression.
         return;
     }
     let typing_env = ty::TypingEnv::fully_monomorphized();
@@ -141,7 +140,7 @@ fn check_call_site_abi<'tcx>(
         // ABI failed to compute; this will not get through codegen.
         return;
     };
-    do_check_abi(tcx, callee_abi, caller.def_id(), /*is_call*/ true, || span);
+    do_check_simd_vector_abi(tcx, callee_abi, caller.def_id(), /*is_call*/ true, loc);
 }
 
 fn check_callees_abi<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, body: &mir::Body<'tcx>) {
@@ -157,7 +156,19 @@ fn check_callees_abi<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, body: &m
                     ty::TypingEnv::fully_monomorphized(),
                     ty::EarlyBinder::bind(callee_ty),
                 );
-                check_call_site_abi(tcx, callee_ty, *fn_span, body.source.instance);
+                check_call_site_abi(tcx, callee_ty, body.source.instance, || {
+                    let loc = Location {
+                        block: bb,
+                        statement_index: body.basic_blocks[bb].statements.len(),
+                    };
+                    (
+                        *fn_span,
+                        body.source_info(loc)
+                            .scope
+                            .lint_root(&body.source_scopes)
+                            .unwrap_or(CRATE_HIR_ID),
+                    )
+                });
             }
             _ => {}
         }

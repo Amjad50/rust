@@ -62,21 +62,21 @@ a type parameter).
 
 */
 
+pub mod always_applicable;
 mod check;
 mod compare_impl_item;
-pub mod dropck;
 mod entry;
 pub mod intrinsic;
-pub mod intrinsicck;
 mod region;
 pub mod wfcheck;
 
 use std::num::NonZero;
 
-pub use check::{check_abi, check_abi_fn_ptr};
-use rustc_abi::{ExternAbi, VariantIdx};
+pub use check::{check_abi, check_custom_abi};
+use rustc_abi::VariantIdx;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_errors::{Diag, ErrorGuaranteed, pluralize, struct_span_code_err};
+use rustc_hir::LangItem;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::Visitor;
 use rustc_index::bit_set::DenseBitSet;
@@ -84,6 +84,7 @@ use rustc_infer::infer::{self, TyCtxtInferExt as _};
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
+use rustc_middle::ty::print::with_types_for_signature;
 use rustc_middle::ty::{self, GenericArgs, GenericArgsRef, Ty, TyCtxt, TypingMode};
 use rustc_middle::{bug, span_bug};
 use rustc_session::parse::feature_err;
@@ -99,8 +100,8 @@ use self::compare_impl_item::collect_return_position_impl_trait_in_trait_tys;
 use self::region::region_scope_tree;
 use crate::{errors, require_c_abi_if_c_variadic};
 
-pub fn provide(providers: &mut Providers) {
-    wfcheck::provide(providers);
+/// Adds query implementations to the [Providers] vtable, see [`rustc_middle::query`]
+pub(super) fn provide(providers: &mut Providers) {
     *providers = Providers {
         adt_destructor,
         adt_async_destructor,
@@ -108,16 +109,26 @@ pub fn provide(providers: &mut Providers) {
         collect_return_position_impl_trait_in_trait_tys,
         compare_impl_item: compare_impl_item::compare_impl_item,
         check_coroutine_obligations: check::check_coroutine_obligations,
+        check_type_wf: wfcheck::check_type_wf,
+        check_well_formed: wfcheck::check_well_formed,
         ..*providers
     };
 }
 
 fn adt_destructor(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::Destructor> {
-    tcx.calculate_dtor(def_id.to_def_id(), dropck::check_drop_impl)
+    let dtor = tcx.calculate_dtor(def_id, always_applicable::check_drop_impl);
+    if dtor.is_none() && tcx.features().async_drop() {
+        if let Some(async_dtor) = adt_async_destructor(tcx, def_id) {
+            // When type has AsyncDrop impl, but doesn't have Drop impl, generate error
+            let span = tcx.def_span(async_dtor.impl_did);
+            tcx.dcx().emit_err(errors::AsyncDropWithoutSyncDrop { span });
+        }
+    }
+    dtor
 }
 
 fn adt_async_destructor(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::AsyncDestructor> {
-    tcx.calculate_async_dtor(def_id.to_def_id(), dropck::check_drop_impl)
+    tcx.calculate_async_dtor(def_id, always_applicable::check_drop_impl)
 }
 
 /// Given a `DefId` for an opaque type in return position, find its parent item's return
@@ -136,15 +147,6 @@ fn get_owner_return_paths(
     })
 }
 
-/// Forbid defining intrinsics in Rust code,
-/// as they must always be defined by the compiler.
-// FIXME: Move this to a more appropriate place.
-pub fn forbid_intrinsic_abi(tcx: TyCtxt<'_>, sp: Span, abi: ExternAbi) {
-    if let ExternAbi::RustIntrinsic = abi {
-        tcx.dcx().span_err(sp, "intrinsic must be in `extern \"rust-intrinsic\" { ... }` block");
-    }
-}
-
 pub(super) fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDefId) {
     // Only restricted on wasm target for now
     if !tcx.sess.target.is_like_wasm {
@@ -152,10 +154,9 @@ pub(super) fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDef
     }
 
     // If `#[link_section]` is missing, then nothing to verify
-    let attrs = tcx.codegen_fn_attrs(id);
-    if attrs.link_section.is_none() {
+    let Some(link_section) = tcx.codegen_fn_attrs(id).link_section else {
         return;
-    }
+    };
 
     // For the wasm32 target statics with `#[link_section]` other than `.init_array`
     // are placed into custom sections of the final output file, but this isn't like
@@ -181,11 +182,8 @@ pub(super) fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDef
     //  continue to work, but would no longer be necessary.
 
     if let Ok(alloc) = tcx.eval_static_initializer(id.to_def_id())
-        && alloc.inner().provenance().ptrs().len() != 0
-        && attrs
-            .link_section
-            .map(|link_section| !link_section.as_str().starts_with(".init_array"))
-            .unwrap()
+        && !alloc.inner().provenance().ptrs().is_empty()
+        && !link_section.as_str().starts_with(".init_array")
     {
         let msg = "statics with a custom `#[link_section]` must be a \
                         simple list of bytes on the wasm target with no \
@@ -217,7 +215,7 @@ fn missing_items_err(
 
     let missing_items_msg = missing_items
         .clone()
-        .map(|trait_item| trait_item.name.to_string())
+        .map(|trait_item| trait_item.name().to_string())
         .collect::<Vec<_>>()
         .join("`, `");
 
@@ -240,15 +238,15 @@ fn missing_items_err(
         (Vec::new(), Vec::new(), Vec::new());
 
     for &trait_item in missing_items {
-        let snippet = suggestion_signature(
+        let snippet = with_types_for_signature!(suggestion_signature(
             tcx,
             trait_item,
             tcx.impl_trait_ref(impl_def_id).unwrap().instantiate_identity(),
-        );
+        ));
         let code = format!("{padding}{snippet}\n{padding}");
-        if let Some(span) = tcx.hir().span_if_local(trait_item.def_id) {
+        if let Some(span) = tcx.hir_span_if_local(trait_item.def_id) {
             missing_trait_item_label
-                .push(errors::MissingTraitItemLabel { span, item: trait_item.name });
+                .push(errors::MissingTraitItemLabel { span, item: trait_item.name() });
             missing_trait_item.push(errors::MissingTraitItemSuggestion {
                 span: sugg_sp,
                 code,
@@ -315,9 +313,7 @@ fn default_body_is_unstable(
         reason: reason_str,
     });
 
-    let inject_span = item_did
-        .as_local()
-        .and_then(|id| tcx.crate_level_attribute_injection_span(tcx.local_def_id_to_hir_id(id)));
+    let inject_span = item_did.is_local().then(|| tcx.crate_level_attribute_injection_span());
     rustc_session::parse::add_feature_diagnostics_for_issue(
         &mut err,
         &tcx.sess,
@@ -344,9 +340,8 @@ fn bounds_from_generic_predicates<'tcx>(
             ty::ClauseKind::Trait(trait_predicate) => {
                 let entry = types.entry(trait_predicate.self_ty()).or_default();
                 let def_id = trait_predicate.def_id();
-                if Some(def_id) != tcx.lang_items().sized_trait() {
-                    // Type params are `Sized` by default, do not add that restriction to the list
-                    // if it is a positive requirement.
+                if !tcx.is_default_trait(def_id) && !tcx.is_lang_item(def_id, LangItem::Sized) {
+                    // Do not add that restriction to the list if it is a positive requirement.
                     entry.push(trait_predicate.def_id());
                 }
             }
@@ -420,14 +415,14 @@ fn fn_sig_suggestion<'tcx>(
         .enumerate()
         .map(|(i, ty)| {
             Some(match ty.kind() {
-                ty::Param(_) if assoc.fn_has_self_parameter && i == 0 => "self".to_string(),
+                ty::Param(_) if assoc.is_method() && i == 0 => "self".to_string(),
                 ty::Ref(reg, ref_ty, mutability) if i == 0 => {
                     let reg = format!("{reg} ");
                     let reg = match &reg[..] {
                         "'_ " | " " => "",
                         reg => reg,
                     };
-                    if assoc.fn_has_self_parameter {
+                    if assoc.is_method() {
                         match ref_ty.kind() {
                             ty::Param(param) if param.name == kw::SelfUpper => {
                                 format!("&{}{}self", reg, mutability.prefix_str())
@@ -440,7 +435,7 @@ fn fn_sig_suggestion<'tcx>(
                     }
                 }
                 _ => {
-                    if assoc.fn_has_self_parameter && i == 0 {
+                    if assoc.is_method() && i == 0 {
                         format!("self: {ty}")
                     } else {
                         format!("_: {ty}")
@@ -502,7 +497,7 @@ fn suggestion_signature<'tcx>(
     );
 
     match assoc.kind {
-        ty::AssocKind::Fn => fn_sig_suggestion(
+        ty::AssocKind::Fn { .. } => fn_sig_suggestion(
             tcx,
             tcx.liberate_late_bound_regions(
                 assoc.def_id,
@@ -512,14 +507,14 @@ fn suggestion_signature<'tcx>(
             tcx.predicates_of(assoc.def_id).instantiate_own(tcx, args),
             assoc,
         ),
-        ty::AssocKind::Type => {
+        ty::AssocKind::Type { .. } => {
             let (generics, where_clauses) = bounds_from_generic_predicates(
                 tcx,
                 tcx.predicates_of(assoc.def_id).instantiate_own(tcx, args),
             );
-            format!("type {}{generics} = /* Type */{where_clauses};", assoc.name)
+            format!("type {}{generics} = /* Type */{where_clauses};", assoc.name())
         }
-        ty::AssocKind::Const => {
+        ty::AssocKind::Const { name } => {
             let ty = tcx.type_of(assoc.def_id).instantiate_identity();
             let val = tcx
                 .infer_ctxt()
@@ -527,7 +522,7 @@ fn suggestion_signature<'tcx>(
                 .err_ctxt()
                 .ty_kind_suggestion(tcx.param_env(assoc.def_id), ty)
                 .unwrap_or_else(|| "value".to_string());
-            format!("const {}: {} = {};", assoc.name, ty, val)
+            format!("const {}: {} = {};", name, ty, val)
         }
     }
 }
@@ -537,7 +532,7 @@ fn bad_variant_count<'tcx>(tcx: TyCtxt<'tcx>, adt: ty::AdtDef<'tcx>, sp: Span, d
     let variant_spans: Vec<_> = adt
         .variants()
         .iter()
-        .map(|variant| tcx.hir().span_if_local(variant.def_id).unwrap())
+        .map(|variant| tcx.hir_span_if_local(variant.def_id).unwrap())
         .collect();
     let (mut spans, mut many) = (Vec::new(), None);
     if let [start @ .., end] = &*variant_spans {

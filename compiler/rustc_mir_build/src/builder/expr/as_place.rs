@@ -101,12 +101,12 @@ fn convert_to_hir_projections_and_truncate_for_capture(
                 variant = Some(*idx);
                 continue;
             }
+            ProjectionElem::UnwrapUnsafeBinder(_) => HirProjectionKind::UnwrapUnsafeBinder,
             // These do not affect anything, they just make sure we know the right type.
             ProjectionElem::OpaqueCast(_) | ProjectionElem::Subtype(..) => continue,
             ProjectionElem::Index(..)
             | ProjectionElem::ConstantIndex { .. }
-            | ProjectionElem::Subslice { .. }
-            | ProjectionElem::UnwrapUnsafeBinder(_) => {
+            | ProjectionElem::Subslice { .. } => {
                 // We don't capture array-access projections.
                 // We can stop here as arrays are captured completely.
                 break;
@@ -159,7 +159,7 @@ fn find_capture_matching_projections<'a, 'tcx>(
 ) -> Option<(usize, &'a Capture<'tcx>)> {
     let hir_projections = convert_to_hir_projections_and_truncate_for_capture(projections);
 
-    upvars.get_by_key_enumerated(var_hir_id.0).find(|(_, capture)| {
+    upvars.get_by_key_enumerated(var_hir_id.0.local_id).find(|(_, capture)| {
         let possible_ancestor_proj_kinds: Vec<_> =
             capture.captured_place.place.projections.iter().map(|proj| proj.kind).collect();
         is_ancestor_or_same_capture(&possible_ancestor_proj_kinds, &hir_projections)
@@ -240,6 +240,9 @@ fn strip_prefix<'tcx>(
             HirProjectionKind::OpaqueCast => {
                 assert_matches!(iter.next(), Some(ProjectionElem::OpaqueCast(..)));
             }
+            HirProjectionKind::UnwrapUnsafeBinder => {
+                assert_matches!(iter.next(), Some(ProjectionElem::UnwrapUnsafeBinder(..)));
+            }
             HirProjectionKind::Index | HirProjectionKind::Subslice => {
                 bug!("unexpected projection kind: {:?}", projection);
             }
@@ -258,7 +261,7 @@ impl<'tcx> PlaceBuilder<'tcx> {
                 self.projection
             ),
             PlaceBase::Upvar { var_hir_id, closure_def_id: _ } => span_bug!(
-                cx.tcx.hir().span(var_hir_id.0),
+                cx.tcx.hir_span(var_hir_id.0),
                 "could not resolve upvar: {var_hir_id:?} + {:?}",
                 self.projection
             ),
@@ -486,16 +489,16 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     let place = place_builder.to_place(this);
                     this.cfg.push(
                         block,
-                        Statement {
-                            source_info: ty_source_info,
-                            kind: StatementKind::AscribeUserType(
+                        Statement::new(
+                            ty_source_info,
+                            StatementKind::AscribeUserType(
                                 Box::new((
                                     place,
                                     UserTypeProjection { base: annotation_index, projs: vec![] },
                                 )),
                                 Variance::Invariant,
                             ),
-                        },
+                        ),
                     );
                 }
                 block.and(place_builder)
@@ -515,16 +518,16 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         });
                     this.cfg.push(
                         block,
-                        Statement {
-                            source_info: ty_source_info,
-                            kind: StatementKind::AscribeUserType(
+                        Statement::new(
+                            ty_source_info,
+                            StatementKind::AscribeUserType(
                                 Box::new((
                                     Place::from(temp),
                                     UserTypeProjection { base: annotation_index, projs: vec![] },
                                 )),
                                 Variance::Invariant,
                             ),
-                        },
+                        ),
                     );
                 }
                 block.and(PlaceBuilder::from(temp))
@@ -562,12 +565,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Match { .. }
             | ExprKind::If { .. }
             | ExprKind::Loop { .. }
+            | ExprKind::LoopMatch { .. }
             | ExprKind::Block { .. }
             | ExprKind::Let { .. }
             | ExprKind::Assign { .. }
             | ExprKind::AssignOp { .. }
             | ExprKind::Break { .. }
             | ExprKind::Continue { .. }
+            | ExprKind::ConstContinue { .. }
             | ExprKind::Return { .. }
             | ExprKind::Become { .. }
             | ExprKind::Literal { .. }
@@ -582,6 +587,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Yield { .. }
             | ExprKind::ThreadLocalRef(_)
             | ExprKind::Call { .. }
+            | ExprKind::ByUse { .. }
             | ExprKind::WrapUnsafeBinder { .. } => {
                 // these are not places, so we need to make a temporary.
                 debug_assert!(!matches!(Category::of(&expr.kind), Some(Category::Place)));

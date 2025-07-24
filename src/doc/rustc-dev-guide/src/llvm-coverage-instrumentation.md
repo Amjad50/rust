@@ -1,4 +1,4 @@
-# LLVM Source-Based Code Coverage
+# LLVM source-based code coverage
 
 <!-- toc -->
 
@@ -34,7 +34,7 @@ Detailed instructions and examples are documented in the
 [coverage map]: https://llvm.org/docs/CoverageMappingFormat.html
 [rustc-book-instrument-coverage]: https://doc.rust-lang.org/nightly/rustc/instrument-coverage.html
 
-## Recommended `config.toml` settings
+## Recommended `bootstrap.toml` settings
 
 When working on the coverage instrumentation code, it is usually necessary to
 **enable the profiler runtime** by setting `profiler = true` in `[build]`.
@@ -83,7 +83,7 @@ statically links coverage-instrumented binaries with LLVM runtime code
 In the `rustc` source tree,
 `library/profiler_builtins` bundles the LLVM `compiler-rt` code into a Rust library crate.
 Note that when building `rustc`,
-`profiler_builtins` is only included when `build.profiler = true` is set in `config.toml`.
+`profiler_builtins` is only included when `build.profiler = true` is set in `bootstrap.toml`.
 
 When compiling with `-C instrument-coverage`,
 [`CrateLoader::postprocess()`][crate-loader-postprocess] dynamically loads
@@ -115,9 +115,9 @@ human-readable coverage report.
 
 > Tests in `coverage-run` mode have an implicit `//@ needs-profiler-runtime`
 > directive, so they will be skipped if the profiler runtime has not been
-> [enabled in `config.toml`](#recommended-configtoml-settings).
+> [enabled in `bootstrap.toml`](#recommended-configtoml-settings).
 
-Finally, the [`tests/codegen/instrument-coverage/testprog.rs`] test compiles a simple Rust program
+Finally, the [`tests/codegen-llvm/instrument-coverage/testprog.rs`] test compiles a simple Rust program
 with `-C instrument-coverage` and compares the compiled program's LLVM IR to
 expected LLVM IR instructions and structured data for a coverage-enabled
 program, including various checks for Coverage Map-related metadata and the LLVM
@@ -136,4 +136,4 @@ and `mir-opt` tests can be refreshed by running:
 [`tests/coverage`]: https://github.com/rust-lang/rust/tree/master/tests/coverage
 [`src/tools/coverage-dump`]: https://github.com/rust-lang/rust/tree/master/src/tools/coverage-dump
 [`tests/coverage-run-rustdoc`]: https://github.com/rust-lang/rust/tree/master/tests/coverage-run-rustdoc
-[`tests/codegen/instrument-coverage/testprog.rs`]: https://github.com/rust-lang/rust/blob/master/tests/mir-opt/coverage/instrument_coverage.rs
+[`tests/codegen-llvm/instrument-coverage/testprog.rs`]: https://github.com/rust-lang/rust/blob/master/tests/mir-opt/coverage/instrument_coverage.rs

@@ -18,6 +18,25 @@ pub enum CfgAtom {
     KeyValue { key: Symbol, value: Symbol },
 }
 
+impl PartialOrd for CfgAtom {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CfgAtom {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (CfgAtom::Flag(a), CfgAtom::Flag(b)) => a.as_str().cmp(b.as_str()),
+            (CfgAtom::Flag(_), CfgAtom::KeyValue { .. }) => std::cmp::Ordering::Less,
+            (CfgAtom::KeyValue { .. }, CfgAtom::Flag(_)) => std::cmp::Ordering::Greater,
+            (CfgAtom::KeyValue { key, value }, CfgAtom::KeyValue { key: key2, value: value2 }) => {
+                key.as_str().cmp(key2.as_str()).then(value.as_str().cmp(value2.as_str()))
+            }
+        }
+    }
+}
+
 impl fmt::Display for CfgAtom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -49,6 +68,11 @@ impl CfgExpr {
         next_cfg_expr(&mut tt.iter()).unwrap_or(CfgExpr::Invalid)
     }
 
+    #[cfg(feature = "tt")]
+    pub fn parse_from_iter<S: Copy>(tt: &mut tt::iter::TtIter<'_, S>) -> CfgExpr {
+        next_cfg_expr(tt).unwrap_or(CfgExpr::Invalid)
+    }
+
     /// Fold the cfg by querying all basic `Atom` and `KeyValue` predicates.
     pub fn fold(&self, query: &dyn Fn(&CfgAtom) -> bool) -> Option<bool> {
         match self {
@@ -77,7 +101,14 @@ fn next_cfg_expr<S: Copy>(it: &mut tt::iter::TtIter<'_, S>) -> Option<CfgExpr> {
     };
 
     let ret = match it.peek() {
-        Some(TtElement::Leaf(tt::Leaf::Punct(punct))) if punct.char == '=' => {
+        Some(TtElement::Leaf(tt::Leaf::Punct(punct)))
+            // Don't consume on e.g. `=>`.
+            if punct.char == '='
+                && (punct.spacing == tt::Spacing::Alone
+                    || it.remaining().flat_tokens().get(1).is_none_or(|peek2| {
+                        !matches!(peek2, tt::TokenTree::Leaf(tt::Leaf::Punct(_)))
+                    })) =>
+        {
             match it.remaining().flat_tokens().get(1) {
                 Some(tt::TokenTree::Leaf(tt::Leaf::Literal(literal))) => {
                     it.next();

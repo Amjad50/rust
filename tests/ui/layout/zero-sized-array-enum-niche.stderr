@@ -1,10 +1,9 @@
 error: layout_of(Result<[u32; 0], bool>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -39,11 +38,10 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -65,11 +63,10 @@ error: layout_of(Result<[u32; 0], bool>) = Layout {
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -111,11 +108,10 @@ LL | type AlignedResult = Result<[u32; 0], bool>;
 
 error: layout_of(MultipleAlignments) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -150,11 +146,10 @@ error: layout_of(MultipleAlignments) = Layout {
                variants: [
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(2 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -176,11 +171,10 @@ error: layout_of(MultipleAlignments) = Layout {
                    },
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -202,11 +196,10 @@ error: layout_of(MultipleAlignments) = Layout {
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -248,11 +241,10 @@ LL | enum MultipleAlignments {
 
 error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -287,11 +279,10 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -313,11 +304,10 @@ error: layout_of(Result<[u32; 0], Packed<NonZero<u16>>>) = Layout {
                    },
                    Layout {
                        size: Size(3 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -359,11 +349,10 @@ LL | type NicheLosesToTagged = Result<[u32; 0], Packed<std::num::NonZero<u16>>>;
 
 error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: $PREF_ALIGN,
            },
-           abi: Memory {
+           backend_repr: Memory {
                sized: true,
            },
            fields: Arbitrary {
@@ -402,11 +391,10 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                variants: [
                    Layout {
                        size: Size(0 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -428,11 +416,10 @@ error: layout_of(Result<[u32; 0], Packed<U16IsZero>>) = Layout {
                    },
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: $PREF_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {

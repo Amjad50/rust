@@ -5,11 +5,10 @@ error: fn_abi_of(pass_zst) = FnAbi {
                        ty: (),
                        layout: Layout {
                            size: Size(0 bytes),
-                           align: AbiAndPrefAlign {
+                           align: AbiAlign {
                                abi: $SOME_ALIGN,
-                               pref: $SOME_ALIGN,
                            },
-                           abi: Memory {
+                           backend_repr: Memory {
                                sized: true,
                            },
                            fields: Arbitrary {
@@ -34,11 +33,10 @@ error: fn_abi_of(pass_zst) = FnAbi {
                    ty: (),
                    layout: Layout {
                        size: Size(0 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: $SOME_ALIGN,
-                           pref: $SOME_ALIGN,
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {

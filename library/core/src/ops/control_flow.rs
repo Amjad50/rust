@@ -79,7 +79,8 @@ use crate::{convert, ops};
 /// [`Break`]: ControlFlow::Break
 /// [`Continue`]: ControlFlow::Continue
 #[stable(feature = "control_flow_enum_type", since = "1.55.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "ControlFlow")]
+#[rustc_diagnostic_item = "ControlFlow"]
+#[must_use]
 // ControlFlow should not implement PartialOrd or Ord, per RFC 3058:
 // https://rust-lang.github.io/rfcs/3058-try-trait-v2.html#traits-for-controlflow
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,7 +98,7 @@ pub enum ControlFlow<B, C = ()> {
     // is a no-op conversion in the `Try` implementation.
 }
 
-#[unstable(feature = "try_trait_v2", issue = "84277")]
+#[unstable(feature = "try_trait_v2", issue = "84277", old_name = "try_trait")]
 impl<B, C> ops::Try for ControlFlow<B, C> {
     type Output = C;
     type Residual = ControlFlow<B, convert::Infallible>;
@@ -116,7 +117,7 @@ impl<B, C> ops::Try for ControlFlow<B, C> {
     }
 }
 
-#[unstable(feature = "try_trait_v2", issue = "84277")]
+#[unstable(feature = "try_trait_v2", issue = "84277", old_name = "try_trait")]
 // Note: manually specifying the residual type instead of using the default to work around
 // https://github.com/rust-lang/rust/issues/99940
 impl<B, C> ops::FromResidual<ControlFlow<B, convert::Infallible>> for ControlFlow<B, C> {

@@ -10,10 +10,10 @@
 //! (some invariant is not being upheld).
 //!
 //! The specifics of how this "poisoned" state affects other threads
-//! depend on the primitive. See [#Overview] bellow.
+//! depend on the primitive. See [#Overview] below.
 //!
 //! For the alternative implementations that do not employ poisoning,
-//! see `std::sys::nonpoisoning`.
+//! see `std::sync::nonpoisoning`.
 //!
 //! # Overview
 //!
@@ -76,7 +76,7 @@ pub use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::error::Error;
 use crate::fmt;
 #[cfg(panic = "unwind")]
-use crate::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::atomic::{Atomic, AtomicBool, Ordering};
 #[cfg(panic = "unwind")]
 use crate::thread;
 
@@ -88,7 +88,7 @@ mod rwlock;
 
 pub(crate) struct Flag {
     #[cfg(panic = "unwind")]
-    failed: AtomicBool,
+    failed: Atomic<bool>,
 }
 
 // Note that the Ordering uses to access the `failed` field of `Flag` below is

@@ -6,7 +6,7 @@ use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, MultiSpan, struct_span_code_err};
 use rustc_hir::def::*;
 use rustc_hir::def_id::LocalDefId;
-use rustc_hir::{self as hir, BindingMode, ByRef, HirId};
+use rustc_hir::{self as hir, BindingMode, ByRef, HirId, MatchSource};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::Level;
 use rustc_middle::bug;
@@ -153,6 +153,12 @@ impl<'p, 'tcx> Visitor<'p, 'tcx> for MatchVisitor<'p, 'tcx> {
             }
             ExprKind::Match { scrutinee, box ref arms, match_source } => {
                 self.check_match(scrutinee, arms, match_source, ex.span);
+            }
+            ExprKind::LoopMatch {
+                match_data: box LoopMatchMatchData { scrutinee, box ref arms, span },
+                ..
+            } => {
+                self.check_match(scrutinee, arms, MatchSource::Normal, span);
             }
             ExprKind::Let { box ref pat, expr } => {
                 self.check_let(pat, Some(expr), ex.span);
@@ -331,7 +337,11 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | WrapUnsafeBinder { source } => self.is_known_valid_scrutinee(&self.thir()[*source]),
 
             // These diverge.
-            Become { .. } | Break { .. } | Continue { .. } | Return { .. } => true,
+            Become { .. }
+            | Break { .. }
+            | Continue { .. }
+            | ConstContinue { .. }
+            | Return { .. } => true,
 
             // These are statements that evaluate to `()`.
             Assign { .. } | AssignOp { .. } | InlineAsm { .. } | Let { .. } => true,
@@ -345,6 +355,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | Borrow { .. }
             | Box { .. }
             | Call { .. }
+            | ByUse { .. }
             | Closure { .. }
             | ConstBlock { .. }
             | ConstParam { .. }
@@ -352,6 +363,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | Literal { .. }
             | LogicalOp { .. }
             | Loop { .. }
+            | LoopMatch { .. }
             | Match { .. }
             | NamedConst { .. }
             | NonHirLiteral { .. }
@@ -394,6 +406,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             scrut_span,
             refutable,
             known_valid_scrutinee,
+            internal_state: Default::default(),
         }
     }
 
@@ -675,7 +688,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             unpeeled_pat = subpattern;
         }
 
-        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. } = unpeeled_pat.kind
+        if let PatKind::ExpandedConstant { def_id, .. } = unpeeled_pat.kind
             && let DefKind::Const = self.tcx.def_kind(def_id)
             && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(pat.span)
             // We filter out paths with multiple path::segments.
@@ -684,8 +697,8 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             let span = self.tcx.def_span(def_id);
             let variable = self.tcx.item_name(def_id).to_string();
             // When we encounter a constant as the binding name, point at the `const` definition.
-            interpreted_as_const = Some(span);
-            interpreted_as_const_sugg = Some(InterpretedAsConst { span: pat.span, variable });
+            interpreted_as_const = Some(InterpretedAsConst { span, variable: variable.clone() });
+            interpreted_as_const_sugg = Some(InterpretedAsConstSugg { span: pat.span, variable });
         } else if let PatKind::Constant { .. } = unpeeled_pat.kind
             && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(pat.span)
         {
@@ -737,6 +750,8 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             false
         };
 
+        let witness_1 = cx.print_witness_pat(witnesses.get(0).unwrap());
+
         self.error = Err(self.tcx.dcx().emit_err(PatternNotCovered {
             span: pat.span,
             origin,
@@ -745,6 +760,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             interpreted_as_const,
             interpreted_as_const_sugg,
             witness_1_is_privately_uninhabited,
+            witness_1,
             _p: (),
             pattern_ty,
             let_suggestion,
@@ -1024,7 +1040,7 @@ fn find_fallback_pattern_typo<'tcx>(
     pat: &Pat<'tcx>,
     lint: &mut UnreachablePattern<'_>,
 ) {
-    if let (Level::Allow, _) = cx.tcx.lint_level_at_node(UNREACHABLE_PATTERNS, hir_id) {
+    if let Level::Allow = cx.tcx.lint_level_at_node(UNREACHABLE_PATTERNS, hir_id).level {
         // This is because we use `with_no_trimmed_paths` later, so if we never emit the lint we'd
         // ICE. At the same time, we don't really need to do all of this if we won't emit anything.
         return;
@@ -1042,30 +1058,25 @@ fn find_fallback_pattern_typo<'tcx>(
         for item in cx.tcx.hir_crate_items(()).free_items() {
             if let DefKind::Use = cx.tcx.def_kind(item.owner_id) {
                 // Look for consts being re-exported.
-                let item = cx.tcx.hir().expect_item(item.owner_id.def_id);
-                let use_name = item.ident.name;
+                let item = cx.tcx.hir_expect_item(item.owner_id.def_id);
                 let hir::ItemKind::Use(path, _) = item.kind else {
                     continue;
                 };
-                for res in &path.res {
-                    if let Res::Def(DefKind::Const, id) = res
-                        && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
-                    {
-                        if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
-                            // The original const is accessible, suggest using it directly.
-                            let item_name = cx.tcx.item_name(*id);
-                            accessible.push(item_name);
-                            accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
-                        } else if cx
-                            .tcx
-                            .visibility(item.owner_id)
-                            .is_accessible_from(parent, cx.tcx)
-                        {
-                            // The const is accessible only through the re-export, point at
-                            // the `use`.
-                            imported.push(use_name);
-                            imported_spans.push(item.ident.span);
-                        }
+                if let Some(value_ns) = path.res.value_ns
+                    && let Res::Def(DefKind::Const, id) = value_ns
+                    && infcx.can_eq(param_env, ty, cx.tcx.type_of(id).instantiate_identity())
+                {
+                    if cx.tcx.visibility(id).is_accessible_from(parent, cx.tcx) {
+                        // The original const is accessible, suggest using it directly.
+                        let item_name = cx.tcx.item_name(id);
+                        accessible.push(item_name);
+                        accessible_path.push(with_no_trimmed_paths!(cx.tcx.def_path_str(id)));
+                    } else if cx.tcx.visibility(item.owner_id).is_accessible_from(parent, cx.tcx) {
+                        // The const is accessible only through the re-export, point at
+                        // the `use`.
+                        let ident = item.kind.ident().unwrap();
+                        imported.push(ident.name);
+                        imported_spans.push(ident.span);
                     }
                 }
             }
@@ -1073,7 +1084,7 @@ fn find_fallback_pattern_typo<'tcx>(
                 && infcx.can_eq(param_env, ty, cx.tcx.type_of(item.owner_id).instantiate_identity())
             {
                 // Look for local consts.
-                let item_name = cx.tcx.item_name(item.owner_id.into());
+                let item_name = cx.tcx.item_name(item.owner_id);
                 let vis = cx.tcx.visibility(item.owner_id);
                 if vis.is_accessible_from(parent, cx.tcx) {
                     accessible.push(item_name);
@@ -1173,7 +1184,7 @@ fn report_arm_reachability<'p, 'tcx>(
     for (arm, is_useful) in report.arm_usefulness.iter() {
         if let Usefulness::Redundant(explanation) = is_useful {
             let hir_id = arm.arm_data;
-            let arm_span = cx.tcx.hir().span(hir_id);
+            let arm_span = cx.tcx.hir_span(hir_id);
             let whole_arm_span = if is_match_arm {
                 // If the arm is followed by a comma, extend the span to include it.
                 let with_whitespace = sm.span_extend_while_whitespace(arm_span);
@@ -1295,7 +1306,8 @@ fn report_non_exhaustive_match<'p, 'tcx>(
 
     for &arm in arms {
         let arm = &thir.arms[arm];
-        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. } = arm.pattern.kind
+        if let PatKind::ExpandedConstant { def_id, .. } = arm.pattern.kind
+            && !matches!(cx.tcx.def_kind(def_id), DefKind::InlineConst)
             && let Ok(snippet) = cx.tcx.sess.source_map().span_to_snippet(arm.pattern.span)
             // We filter out paths with multiple path::segments.
             && snippet.chars().all(|c| c.is_alphanumeric() || c == '_')

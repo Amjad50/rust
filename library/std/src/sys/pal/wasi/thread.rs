@@ -2,7 +2,7 @@
 
 use crate::ffi::CStr;
 use crate::num::NonZero;
-use crate::time::Duration;
+use crate::time::{Duration, Instant};
 use crate::{io, mem};
 
 cfg_if::cfg_if! {
@@ -13,16 +13,15 @@ cfg_if::cfg_if! {
         // Add a few symbols not in upstream `libc` just yet.
         mod libc {
             pub use crate::ffi;
-            pub use crate::mem;
             pub use libc::*;
 
             // defined in wasi-libc
             // https://github.com/WebAssembly/wasi-libc/blob/a6f871343313220b76009827ed0153586361c0d5/libc-top-half/musl/include/alltypes.h.in#L108
             #[repr(C)]
             union pthread_attr_union {
-                __i: [ffi::c_int; if mem::size_of::<ffi::c_long>() == 8 { 14 } else { 9 }],
-                __vi: [ffi::c_int; if mem::size_of::<ffi::c_long>() == 8 { 14 } else { 9 }],
-                __s: [ffi::c_ulong; if mem::size_of::<ffi::c_long>() == 8 { 7 } else { 9 }],
+                __i: [ffi::c_int; if size_of::<ffi::c_long>() == 8 { 14 } else { 9 }],
+                __vi: [ffi::c_int; if size_of::<ffi::c_long>() == 8 { 14 } else { 9 }],
+                __s: [ffi::c_ulong; if size_of::<ffi::c_long>() == 8 { 7 } else { 9 }],
             }
 
             #[repr(C)]
@@ -68,7 +67,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub const DEFAULT_MIN_STACK_SIZE: usize = 64 * 1024;
+pub const DEFAULT_MIN_STACK_SIZE: usize = 1024 * 1024;
 
 impl Thread {
     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
@@ -169,6 +168,14 @@ impl Thread {
                     _ => panic!("thread::sleep(): unexpected result of poll_oneoff"),
                 }
             }
+        }
+    }
+
+    pub fn sleep_until(deadline: Instant) {
+        let now = Instant::now();
+
+        if let Some(delay) = deadline.checked_duration_since(now) {
+            Self::sleep(delay);
         }
     }
 

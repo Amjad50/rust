@@ -9,7 +9,7 @@ use clippy_utils::source::SpanRangeExt;
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::{Visitor, walk_path};
 use rustc_hir::{
-    FnRetTy, GenericArg, GenericArgs, HirId, Impl, ImplItemKind, ImplItemRef, Item, ItemKind, PatKind, Path,
+    FnRetTy, GenericArg, GenericArgs, HirId, Impl, ImplItemKind, ImplItemId, Item, ItemKind, PatKind, Path,
     PathSegment, Ty, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
@@ -102,7 +102,7 @@ impl<'tcx> LateLintPass<'tcx> for FromOverInto {
                         middle_trait_ref.self_ty()
                     );
                     if let Some(suggestions) =
-                        convert_to_from(cx, into_trait_seg, target_ty.as_unambig_ty(), self_ty, impl_item_ref)
+                        convert_to_from(cx, into_trait_seg, target_ty.as_unambig_ty(), self_ty, *impl_item_ref)
                     {
                         diag.multipart_suggestion(message, suggestions, Applicability::MachineApplicable);
                     } else {
@@ -164,20 +164,20 @@ fn convert_to_from(
     into_trait_seg: &PathSegment<'_>,
     target_ty: &Ty<'_>,
     self_ty: &Ty<'_>,
-    impl_item_ref: &ImplItemRef,
+    impl_item_ref: ImplItemId,
 ) -> Option<Vec<(Span, String)>> {
     if !target_ty.find_self_aliases().is_empty() {
         // It's tricky to expand self-aliases correctly, we'll ignore it to not cause a
         // bad suggestion/fix.
         return None;
     }
-    let impl_item = cx.tcx.hir_impl_item(impl_item_ref.id);
+    let impl_item = cx.tcx.hir_impl_item(impl_item_ref);
     let ImplItemKind::Fn(ref sig, body_id) = impl_item.kind else {
         return None;
     };
     let body = cx.tcx.hir_body(body_id);
-    let [input] = body.params else { return None };
-    let PatKind::Binding(.., self_ident, None) = input.pat.kind else {
+    let [self_param] = body.params else { return None };
+    let PatKind::Binding(.., self_ident, None) = self_param.pat.kind else {
         return None;
     };
 
@@ -194,12 +194,12 @@ fn convert_to_from(
         // impl Into<T> for U  ->  impl Into<T> for T
         //                  ~                       ~
         (self_ty.span, into.to_owned()),
-        // fn into(self) -> T  ->  fn from(self) -> T
-        //    ~~~~                    ~~~~
+        // fn into(self: U) -> T  ->  fn from(self) -> T
+        //    ~~~~                       ~~~~
         (impl_item.ident.span, String::from("from")),
-        // fn into([mut] self) -> T  ->  fn into([mut] v: T) -> T
-        //               ~~~~                          ~~~~
-        (self_ident.span, format!("val: {from}")),
+        // fn into([mut] self: U) -> T  ->  fn into([mut] val: T) -> T
+        //               ~~~~~~~                          ~~~~~~
+        (self_ident.span.to(self_param.ty_span), format!("val: {from}")),
     ];
 
     if let FnRetTy::Return(_) = sig.decl.output {

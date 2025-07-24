@@ -10,6 +10,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
+doctest = false
 
 [dependencies]
 anyhow.workspace = true
@@ -34,7 +35,7 @@ stdx.workspace = true
 toolchain.workspace = true
 
 [dev-dependencies]
-expect-test = "1.4.0"
+expect-test = "1.5.1"
 
 [lints]
 workspace = true

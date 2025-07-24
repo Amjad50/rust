@@ -1,11 +1,13 @@
 use std::marker::PhantomData;
+#[cfg(not(feature = "nightly"))]
+use std::mem;
 use std::ops::{BitAnd, BitAndAssign, BitOrAssign, Bound, Not, Range, RangeBounds, Shl};
 use std::rc::Rc;
-use std::{fmt, iter, mem, slice};
+use std::{fmt, iter, slice};
 
 use Chunk::*;
 #[cfg(feature = "nightly")]
-use rustc_macros::{Decodable_Generic, Encodable_Generic};
+use rustc_macros::{Decodable_NoContext, Encodable_NoContext};
 use smallvec::{SmallVec, smallvec};
 
 use crate::{Idx, IndexVec};
@@ -14,7 +16,7 @@ use crate::{Idx, IndexVec};
 mod tests;
 
 type Word = u64;
-const WORD_BYTES: usize = mem::size_of::<Word>();
+const WORD_BYTES: usize = size_of::<Word>();
 const WORD_BITS: usize = WORD_BYTES * 8;
 
 // The choice of chunk size has some trade-offs.
@@ -112,7 +114,7 @@ macro_rules! bit_relations_inherent_impls {
 /// to or greater than the domain size. All operations that involve two bitsets
 /// will panic if the bitsets have differing domain sizes.
 ///
-#[cfg_attr(feature = "nightly", derive(Decodable_Generic, Encodable_Generic))]
+#[cfg_attr(feature = "nightly", derive(Decodable_NoContext, Encodable_NoContext))]
 #[derive(Eq, PartialEq, Hash)]
 pub struct DenseBitSet<T> {
     domain_size: usize,
@@ -230,6 +232,32 @@ impl<T: Idx> DenseBitSet<T> {
     pub fn insert_all(&mut self) {
         self.words.fill(!0);
         self.clear_excess_bits();
+    }
+
+    /// Checks whether any bit in the given range is a 1.
+    #[inline]
+    pub fn contains_any(&self, elems: impl RangeBounds<T>) -> bool {
+        let Some((start, end)) = inclusive_start_end(elems, self.domain_size) else {
+            return false;
+        };
+        let (start_word_index, start_mask) = word_index_and_mask(start);
+        let (end_word_index, end_mask) = word_index_and_mask(end);
+
+        if start_word_index == end_word_index {
+            self.words[start_word_index] & (end_mask | (end_mask - start_mask)) != 0
+        } else {
+            if self.words[start_word_index] & !(start_mask - 1) != 0 {
+                return true;
+            }
+
+            let remaining = start_word_index + 1..end_word_index;
+            if remaining.start <= remaining.end {
+                self.words[remaining].iter().any(|&w| w != 0)
+                    || self.words[end_word_index] & (end_mask | (end_mask - 1)) != 0
+            } else {
+                false
+            }
+        }
     }
 
     /// Returns `true` if the set has changed.
@@ -1390,7 +1418,7 @@ impl<T: Idx> From<DenseBitSet<T>> for GrowableBitSet<T> {
 ///
 /// All operations that involve a row and/or column index will panic if the
 /// index exceeds the relevant bound.
-#[cfg_attr(feature = "nightly", derive(Decodable_Generic, Encodable_Generic))]
+#[cfg_attr(feature = "nightly", derive(Decodable_NoContext, Encodable_NoContext))]
 #[derive(Clone, Eq, PartialEq, Hash)]
 pub struct BitMatrix<R: Idx, C: Idx> {
     num_rows: usize,
@@ -1716,13 +1744,13 @@ impl<R: Idx, C: Idx> SparseBitMatrix<R, C> {
 
 #[inline]
 fn num_words<T: Idx>(domain_size: T) -> usize {
-    (domain_size.index() + WORD_BITS - 1) / WORD_BITS
+    domain_size.index().div_ceil(WORD_BITS)
 }
 
 #[inline]
 fn num_chunks<T: Idx>(domain_size: T) -> usize {
     assert!(domain_size.index() > 0);
-    (domain_size.index() + CHUNK_BITS - 1) / CHUNK_BITS
+    domain_size.index().div_ceil(CHUNK_BITS)
 }
 
 #[inline]
@@ -1814,7 +1842,7 @@ impl std::fmt::Debug for FiniteBitSet<u32> {
 
 /// A fixed-sized bitset type represented by an integer type. Indices outwith than the range
 /// representable by `T` are considered set.
-#[cfg_attr(feature = "nightly", derive(Decodable_Generic, Encodable_Generic))]
+#[cfg_attr(feature = "nightly", derive(Decodable_NoContext, Encodable_NoContext))]
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct FiniteBitSet<T: FiniteBitSetTy>(pub T);
 

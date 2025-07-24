@@ -1,5 +1,6 @@
 use libc::{MSG_PEEK, c_int, c_void, size_t, sockaddr, socklen_t};
 
+#[cfg(not(any(target_os = "espidf", target_os = "nuttx")))]
 use crate::ffi::CStr;
 use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::net::{Shutdown, SocketAddr};
@@ -81,6 +82,7 @@ impl Socket {
                     target_os = "linux",
                     target_os = "netbsd",
                     target_os = "openbsd",
+                    target_os = "cygwin",
                     target_os = "nto",
                     target_os = "solaris",
                 ))] {
@@ -128,6 +130,7 @@ impl Socket {
                     target_os = "hurd",
                     target_os = "netbsd",
                     target_os = "openbsd",
+                    target_os = "cygwin",
                     target_os = "nto",
                 ))] {
                     // Like above, set cloexec atomically
@@ -257,6 +260,7 @@ impl Socket {
                 target_os = "hurd",
                 target_os = "netbsd",
                 target_os = "openbsd",
+                target_os = "cygwin",
             ))] {
                 unsafe {
                     let fd = cvt_r(|| libc::accept4(self.as_raw_fd(), storage, len, libc::SOCK_CLOEXEC))?;
@@ -275,6 +279,14 @@ impl Socket {
 
     pub fn duplicate(&self) -> io::Result<Socket> {
         self.0.duplicate().map(Socket)
+    }
+
+    pub fn send_with_flags(&self, buf: &[u8], flags: c_int) -> io::Result<usize> {
+        let len = cmp::min(buf.len(), <wrlen_t>::MAX as usize) as wrlen_t;
+        let ret = cvt(unsafe {
+            libc::send(self.as_raw_fd(), buf.as_ptr() as *const c_void, len, flags)
+        })?;
+        Ok(ret as usize)
     }
 
     fn recv_with_flags(&self, mut buf: BorrowedCursor<'_>, flags: c_int) -> io::Result<()> {
@@ -326,7 +338,7 @@ impl Socket {
         // so we don't need to zero it here.
         // reference: https://linux.die.net/man/2/recvfrom
         let mut storage: mem::MaybeUninit<libc::sockaddr_storage> = mem::MaybeUninit::uninit();
-        let mut addrlen = mem::size_of_val(&storage) as libc::socklen_t;
+        let mut addrlen = size_of_val(&storage) as libc::socklen_t;
 
         let n = cvt(unsafe {
             libc::recvfrom(
@@ -421,10 +433,21 @@ impl Socket {
         Ok(())
     }
 
+    #[cfg(not(target_os = "cygwin"))]
     pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
         let linger = libc::linger {
             l_onoff: linger.is_some() as libc::c_int,
             l_linger: linger.unwrap_or_default().as_secs() as libc::c_int,
+        };
+
+        setsockopt(self, libc::SOL_SOCKET, SO_LINGER, linger)
+    }
+
+    #[cfg(target_os = "cygwin")]
+    pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
+        let linger = libc::linger {
+            l_onoff: linger.is_some() as libc::c_ushort,
+            l_linger: linger.unwrap_or_default().as_secs() as libc::c_ushort,
         };
 
         setsockopt(self, libc::SOL_SOCKET, SO_LINGER, linger)
@@ -497,6 +520,21 @@ impl Socket {
             unsafe { core::slice::from_raw_parts(arg.af_name.as_ptr() as *const u8, 16) };
         let name = CStr::from_bytes_with_nul(s).unwrap();
         Ok(name)
+    }
+
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    pub fn set_exclbind(&self, excl: bool) -> io::Result<()> {
+        // not yet on libc crate
+        const SO_EXCLBIND: i32 = 0x1015;
+        setsockopt(self, libc::SOL_SOCKET, SO_EXCLBIND, excl)
+    }
+
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    pub fn exclbind(&self) -> io::Result<bool> {
+        // not yet on libc crate
+        const SO_EXCLBIND: i32 = 0x1015;
+        let raw: c_int = getsockopt(self, libc::SOL_SOCKET, SO_EXCLBIND)?;
+        Ok(raw != 0)
     }
 
     #[cfg(any(target_os = "android", target_os = "linux",))]

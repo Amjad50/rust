@@ -6,7 +6,7 @@
 //! [`core::error`] module is marked as stable since 1.81.0, so we want to show
 //! [`core::error::Error`] as stable since 1.81.0 as well.
 
-use rustc_attr_parsing::{Stability, StabilityLevel};
+use rustc_attr_data_structures::{Stability, StabilityLevel};
 use rustc_hir::def_id::CRATE_DEF_ID;
 
 use crate::clean::{Crate, Item, ItemId, ItemKind};
@@ -39,15 +39,15 @@ impl DocFolder for StabilityPropagator<'_, '_> {
                 let item_stability = self.cx.tcx.lookup_stability(def_id);
                 let inline_stability =
                     item.inline_stmt_id.and_then(|did| self.cx.tcx.lookup_stability(did));
-                let is_glob_export = item.inline_stmt_id.and_then(|id| {
+                let is_glob_export = item.inline_stmt_id.map(|id| {
                     let hir_id = self.cx.tcx.local_def_id_to_hir_id(id);
-                    Some(matches!(
+                    matches!(
                         self.cx.tcx.hir_node(hir_id),
                         rustc_hir::Node::Item(rustc_hir::Item {
                             kind: rustc_hir::ItemKind::Use(_, rustc_hir::UseKind::Glob),
                             ..
                         })
-                    ))
+                    )
                 });
                 let own_stability = if let Some(item_stab) = item_stability
                     && let StabilityLevel::Stable { since: _, allowed_through_unstable_modules } =

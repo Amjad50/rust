@@ -35,8 +35,9 @@ use std::collections::hash_map::Entry;
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::bug;
-use rustc_middle::ty::fold::TypeFolder;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeSuperFoldable, TypeVisitableExt};
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt,
+};
 
 use super::InferCtxt;
 
@@ -108,18 +109,17 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for TypeFreshener<'a, 'tcx> {
     }
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        match *r {
-            ty::ReBound(..) => {
-                // leave bound regions alone
-                r
-            }
+        match r.kind() {
+            // Leave bound regions alone, since they affect selection via the leak check.
+            ty::ReBound(..) => r,
+            // Leave error regions alone, since they affect selection b/c of incompleteness.
+            ty::ReError(_) => r,
 
             ty::ReEarlyParam(..)
             | ty::ReLateParam(_)
             | ty::ReVar(_)
             | ty::RePlaceholder(..)
             | ty::ReStatic
-            | ty::ReError(_)
             | ty::ReErased => self.cx().lifetimes.re_erased,
         }
     }

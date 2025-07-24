@@ -1,13 +1,13 @@
 //! Completion tests for expressions.
-use expect_test::{expect, Expect};
+use expect_test::{Expect, expect};
 
 use crate::{
+    CompletionConfig,
     config::AutoImportExclusionType,
     tests::{
-        check, check_edit, check_with_base_items, completion_list_with_config, BASE_ITEMS_FIXTURE,
-        TEST_CONFIG,
+        BASE_ITEMS_FIXTURE, TEST_CONFIG, check, check_edit, check_with_base_items,
+        completion_list_with_config,
     },
-    CompletionConfig,
 };
 
 fn check_with_config(
@@ -58,6 +58,7 @@ fn baz() {
             un Union                  Union
             ev TupleV(…)        TupleV(u32)
             bt u32                      u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -101,6 +102,7 @@ fn func(param0 @ (param1, param2): (i32, i32)) {
             lc param1             i32
             lc param2             i32
             bt u32                u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -169,7 +171,9 @@ impl Unit {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -246,7 +250,9 @@ fn complete_in_block() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -296,7 +302,9 @@ fn complete_after_if_expr() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -332,6 +340,7 @@ fn complete_in_match_arm() {
         expect![[r#"
             fn foo() fn()
             bt u32    u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -369,7 +378,9 @@ fn completes_in_loop_ctx() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -396,6 +407,7 @@ fn completes_in_loop_ctx() {
             sn box  Box::new(expr)
             sn break    break expr
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -420,6 +432,7 @@ fn completes_in_let_initializer() {
         expect![[r#"
             fn main() fn()
             bt u32     u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -444,6 +457,7 @@ fn completes_after_ref_expr() {
         expect![[r#"
             fn main() fn()
             bt u32     u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -467,6 +481,7 @@ fn completes_after_ref_expr() {
             fn main() fn()
             bt u32     u32
             kw const
+            kw const
             kw crate::
             kw false
             kw for
@@ -488,6 +503,7 @@ fn completes_after_ref_expr() {
         expect![[r#"
             fn main() fn()
             bt u32     u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -508,6 +524,7 @@ fn completes_after_ref_expr() {
         expect![[r#"
             fn main() fn()
             bt u32     u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -528,6 +545,7 @@ fn completes_after_ref_expr() {
         expect![[r#"
             fn main() fn()
             bt u32     u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -562,6 +580,7 @@ fn foo() {
             fn foo() fn()
             st Foo    Foo
             bt u32    u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -597,6 +616,7 @@ fn foo() {
             fn foo() fn()
             lc bar    i32
             bt u32    u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -628,6 +648,7 @@ fn quux(x: i32) {
             lc x                i32
             ma m!(…) macro_rules! m
             bt u32              u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -655,6 +676,7 @@ fn quux(x: i32) {
             lc x                i32
             ma m!(…) macro_rules! m
             bt u32              u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -684,6 +706,7 @@ fn quux(x: i32) {
             lc y                i32
             ma m!(…) macro_rules! m
             bt u32              u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -866,6 +889,7 @@ fn brr() {
             st YoloVariant                  YoloVariant
             st YoloVariant {…} YoloVariant { f: usize }
             bt u32                                  u32
+            kw const
             kw crate::
             kw false
             kw for
@@ -941,7 +965,9 @@ fn foo() { if foo {} $0 }
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -982,7 +1008,9 @@ fn foo() { if foo {} el$0 }
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1010,6 +1038,7 @@ fn foo() { bar(if foo {} $0) }
         expect![[r#"
             fn foo() fn()
             bt u32    u32
+            kw const
             kw crate::
             kw else
             kw else if
@@ -1034,6 +1063,7 @@ fn foo() { bar(if foo {} el$0) }
         expect![[r#"
             fn foo() fn()
             bt u32    u32
+            kw const
             kw crate::
             kw else
             kw else if
@@ -1071,7 +1101,9 @@ fn foo() { if foo {} $0 let x = 92; }
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1112,7 +1144,9 @@ fn foo() { if foo {} el$0 let x = 92; }
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1153,7 +1187,9 @@ fn foo() { if foo {} el$0 { let x = 92; } }
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1204,7 +1240,9 @@ pub struct UnstableThisShouldNotBeListed;
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1257,7 +1295,9 @@ pub struct UnstableButWeAreOnNightlyAnyway;
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1298,6 +1338,7 @@ fn main() {
             me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -1324,6 +1365,7 @@ fn main() {
             me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -1354,6 +1396,7 @@ fn main() {
             me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -1380,6 +1423,7 @@ fn main() {
             me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -1406,6 +1450,7 @@ fn main() {
             me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
@@ -1429,19 +1474,18 @@ fn main() {
 }
 "#,
         expect![[r#"
+            me foo()     fn(&self)
             sn box  Box::new(expr)
             sn call function(expr)
+            sn const      const {}
             sn dbg      dbg!(expr)
             sn dbgr    dbg!(&expr)
             sn deref         *expr
-            sn if       if expr {}
             sn match match expr {}
-            sn not           !expr
             sn ref           &expr
             sn refm      &mut expr
             sn return  return expr
             sn unsafe    unsafe {}
-            sn while while expr {}
         "#]],
     );
 }
@@ -1471,7 +1515,7 @@ fn main() {
             en Enum                      Enum
             fn function()                fn()
             fn main()                    fn()
-            lc variable                  &str
+            lc variable          &'static str
             ma helper!(…) macro_rules! helper
             ma m!(…)           macro_rules! m
             ma makro!(…)   macro_rules! makro
@@ -1494,7 +1538,9 @@ fn main() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -1519,7 +1565,10 @@ fn main() {
 #[test]
 fn excluded_trait_method_is_excluded() {
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1539,22 +1588,20 @@ fn foo() {
 }
         "#,
         expect![[r#"
-            me bar() (as ExcludedTrait) fn(&self)
-            me baz() (as ExcludedTrait) fn(&self)
-            me foo() (as ExcludedTrait) fn(&self)
-            me inherent()               fn(&self)
-            sn box                 Box::new(expr)
-            sn call                function(expr)
-            sn dbg                     dbg!(expr)
-            sn dbgr                   dbg!(&expr)
-            sn deref                        *expr
-            sn let                            let
-            sn letm                       let mut
-            sn match                match expr {}
-            sn ref                          &expr
-            sn refm                     &mut expr
-            sn return                 return expr
-            sn unsafe                   unsafe {}
+            me inherent() fn(&self)
+            sn box   Box::new(expr)
+            sn call  function(expr)
+            sn const       const {}
+            sn dbg       dbg!(expr)
+            sn dbgr     dbg!(&expr)
+            sn deref          *expr
+            sn let              let
+            sn letm         let mut
+            sn match  match expr {}
+            sn ref            &expr
+            sn refm       &mut expr
+            sn return   return expr
+            sn unsafe     unsafe {}
         "#]],
     );
 }
@@ -1562,7 +1609,10 @@ fn foo() {
 #[test]
 fn excluded_trait_not_excluded_when_inherent() {
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1582,6 +1632,7 @@ fn foo(v: &dyn ExcludedTrait) {
             me foo() (as ExcludedTrait) fn(&self)
             sn box                 Box::new(expr)
             sn call                function(expr)
+            sn const                     const {}
             sn dbg                     dbg!(expr)
             sn dbgr                   dbg!(&expr)
             sn deref                        *expr
@@ -1595,7 +1646,10 @@ fn foo(v: &dyn ExcludedTrait) {
         "#]],
     );
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1615,6 +1669,7 @@ fn foo(v: impl ExcludedTrait) {
             me foo() (as ExcludedTrait) fn(&self)
             sn box                 Box::new(expr)
             sn call                function(expr)
+            sn const                     const {}
             sn dbg                     dbg!(expr)
             sn dbgr                   dbg!(&expr)
             sn deref                        *expr
@@ -1628,7 +1683,10 @@ fn foo(v: impl ExcludedTrait) {
         "#]],
     );
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1648,6 +1706,7 @@ fn foo<T: ExcludedTrait>(v: T) {
             me foo() (as ExcludedTrait) fn(&self)
             sn box                 Box::new(expr)
             sn call                function(expr)
+            sn const                     const {}
             sn dbg                     dbg!(expr)
             sn dbgr                   dbg!(&expr)
             sn deref                        *expr
@@ -1666,7 +1725,7 @@ fn foo<T: ExcludedTrait>(v: T) {
 fn excluded_trait_method_is_excluded_from_flyimport() {
     check_with_config(
         CompletionConfig {
-            exclude_traits: &["test::module2::ExcludedTrait".to_owned()],
+            exclude_traits: &["ra_test_fixture::module2::ExcludedTrait".to_owned()],
             ..TEST_CONFIG
         },
         r#"
@@ -1690,22 +1749,20 @@ fn foo() {
 }
         "#,
         expect![[r#"
-            me bar() (use module2::ExcludedTrait) fn(&self)
-            me baz() (use module2::ExcludedTrait) fn(&self)
-            me foo() (use module2::ExcludedTrait) fn(&self)
-            me inherent()                         fn(&self)
-            sn box                           Box::new(expr)
-            sn call                          function(expr)
-            sn dbg                               dbg!(expr)
-            sn dbgr                             dbg!(&expr)
-            sn deref                                  *expr
-            sn let                                      let
-            sn letm                                 let mut
-            sn match                          match expr {}
-            sn ref                                    &expr
-            sn refm                               &mut expr
-            sn return                           return expr
-            sn unsafe                             unsafe {}
+            me inherent() fn(&self)
+            sn box   Box::new(expr)
+            sn call  function(expr)
+            sn const       const {}
+            sn dbg       dbg!(expr)
+            sn dbgr     dbg!(&expr)
+            sn deref          *expr
+            sn let              let
+            sn letm         let mut
+            sn match  match expr {}
+            sn ref            &expr
+            sn refm       &mut expr
+            sn return   return expr
+            sn unsafe     unsafe {}
         "#]],
     );
 }
@@ -1715,7 +1772,7 @@ fn flyimport_excluded_trait_method_is_excluded_from_flyimport() {
     check_with_config(
         CompletionConfig {
             exclude_flyimport: vec![(
-                "test::module2::ExcludedTrait".to_owned(),
+                "ra_test_fixture::module2::ExcludedTrait".to_owned(),
                 AutoImportExclusionType::Methods,
             )],
             ..TEST_CONFIG
@@ -1741,22 +1798,20 @@ fn foo() {
 }
         "#,
         expect![[r#"
-            me bar() (use module2::ExcludedTrait) fn(&self)
-            me baz() (use module2::ExcludedTrait) fn(&self)
-            me foo() (use module2::ExcludedTrait) fn(&self)
-            me inherent()                         fn(&self)
-            sn box                           Box::new(expr)
-            sn call                          function(expr)
-            sn dbg                               dbg!(expr)
-            sn dbgr                             dbg!(&expr)
-            sn deref                                  *expr
-            sn let                                      let
-            sn letm                                 let mut
-            sn match                          match expr {}
-            sn ref                                    &expr
-            sn refm                               &mut expr
-            sn return                           return expr
-            sn unsafe                             unsafe {}
+            me inherent() fn(&self)
+            sn box   Box::new(expr)
+            sn call  function(expr)
+            sn const       const {}
+            sn dbg       dbg!(expr)
+            sn dbgr     dbg!(&expr)
+            sn deref          *expr
+            sn let              let
+            sn letm         let mut
+            sn match  match expr {}
+            sn ref            &expr
+            sn refm       &mut expr
+            sn return   return expr
+            sn unsafe     unsafe {}
         "#]],
     );
 }
@@ -1764,7 +1819,10 @@ fn foo() {
 #[test]
 fn excluded_trait_method_is_excluded_from_path_completion() {
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 pub trait ExcludedTrait {
     fn foo(&self) {}
@@ -1784,10 +1842,7 @@ fn foo() {
 }
         "#,
         expect![[r#"
-            me bar(…) (as ExcludedTrait) fn(&self)
-            me baz(…) (as ExcludedTrait) fn(&self)
-            me foo(…) (as ExcludedTrait) fn(&self)
-            me inherent(…)               fn(&self)
+            me inherent(…) fn(&self)
         "#]],
     );
 }
@@ -1795,7 +1850,10 @@ fn foo() {
 #[test]
 fn excluded_trait_method_is_not_excluded_when_trait_is_specified() {
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 pub trait ExcludedTrait {
     fn foo(&self) {}
@@ -1821,7 +1879,10 @@ fn foo() {
             "#]],
     );
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 pub trait ExcludedTrait {
     fn foo(&self) {}
@@ -1851,7 +1912,10 @@ fn foo() {
 #[test]
 fn excluded_trait_not_excluded_when_inherent_path() {
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1872,7 +1936,10 @@ fn foo() {
         "#]],
     );
     check_with_config(
-        CompletionConfig { exclude_traits: &["test::ExcludedTrait".to_owned()], ..TEST_CONFIG },
+        CompletionConfig {
+            exclude_traits: &["ra_test_fixture::ExcludedTrait".to_owned()],
+            ..TEST_CONFIG
+        },
         r#"
 trait ExcludedTrait {
     fn foo(&self) {}
@@ -1920,6 +1987,7 @@ fn bar() {
             md rust_2015 (use core::prelude::rust_2015)
             md rust_2018 (use core::prelude::rust_2018)
             md rust_2021 (use core::prelude::rust_2021)
+            md rust_2024 (use core::prelude::rust_2024)
             tt Clone
             tt Copy
             tt IntoIterator
@@ -1943,7 +2011,9 @@ fn bar() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -2014,7 +2084,9 @@ fn foo() {
             kw if
             kw if let
             kw impl
+            kw impl for
             kw let
+            kw letm
             kw loop
             kw match
             kw mod
@@ -2033,6 +2105,173 @@ fn foo() {
             sn macro_rules
             sn pd
             sn ppd
+        "#]],
+    );
+}
+
+#[test]
+fn cfg_attr_attr_macro() {
+    check(
+        r#"
+//- proc_macros: identity
+#[cfg_attr(test, proc_macros::identity)]
+fn foo() {
+    $0
+}
+    "#,
+        expect![[r#"
+            fn foo()  fn()
+            md proc_macros
+            bt u32     u32
+            kw async
+            kw const
+            kw crate::
+            kw enum
+            kw extern
+            kw false
+            kw fn
+            kw for
+            kw if
+            kw if let
+            kw impl
+            kw impl for
+            kw let
+            kw letm
+            kw loop
+            kw match
+            kw mod
+            kw return
+            kw self::
+            kw static
+            kw struct
+            kw trait
+            kw true
+            kw type
+            kw union
+            kw unsafe
+            kw use
+            kw while
+            kw while let
+            sn macro_rules
+            sn pd
+            sn ppd
+        "#]],
+    );
+}
+
+#[test]
+fn escaped_label() {
+    check(
+        r#"
+fn main() {
+    'r#break: {
+        break '$0;
+    }
+}
+    "#,
+        expect![[r#"
+            lb 'r#break
+        "#]],
+    );
+}
+
+#[test]
+fn call_parens_with_newline() {
+    check_edit(
+        "foo",
+        r#"
+fn foo(v: i32) {}
+
+fn bar() {
+    foo$0
+    ()
+}
+    "#,
+        r#"
+fn foo(v: i32) {}
+
+fn bar() {
+    foo(${1:v});$0
+    ()
+}
+    "#,
+    );
+    check_edit(
+        "foo",
+        r#"
+struct Foo;
+impl Foo {
+    fn foo(&self, v: i32) {}
+}
+
+fn bar() {
+    Foo.foo$0
+    ()
+}
+    "#,
+        r#"
+struct Foo;
+impl Foo {
+    fn foo(&self, v: i32) {}
+}
+
+fn bar() {
+    Foo.foo(${1:v});$0
+    ()
+}
+    "#,
+    );
+}
+
+#[test]
+fn dbg_too_many_asterisks() {
+    check_edit(
+        "dbg",
+        r#"
+fn main() {
+    let x = &42;
+    let y = *x.$0;
+}
+    "#,
+        r#"
+fn main() {
+    let x = &42;
+    let y = dbg!(*x);
+}
+    "#,
+    );
+}
+
+#[test]
+fn ambiguous_float_literal() {
+    check(
+        r#"
+#![rustc_coherence_is_core]
+
+impl i32 {
+    pub fn int_method(self) {}
+}
+impl f64 {
+    pub fn float_method(self) {}
+}
+
+fn foo() {
+    1.$0
+}
+    "#,
+        expect![[r#"
+            me int_method() fn(self)
+            sn box    Box::new(expr)
+            sn call   function(expr)
+            sn const        const {}
+            sn dbg        dbg!(expr)
+            sn dbgr      dbg!(&expr)
+            sn deref           *expr
+            sn match   match expr {}
+            sn ref             &expr
+            sn refm        &mut expr
+            sn return    return expr
+            sn unsafe      unsafe {}
         "#]],
     );
 }

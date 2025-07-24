@@ -22,6 +22,8 @@ use stdx::{impl_from, itertools::Itertools as _};
 
 pub use text_size::{TextRange, TextSize};
 
+pub const MAX_GLUED_PUNCT_LEN: usize = 3;
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Lit {
     pub kind: LitKind,
@@ -243,35 +245,30 @@ impl<S: Copy> TopSubtreeBuilder<S> {
         self.token_trees.extend(tt.0.iter().cloned());
     }
 
-    pub fn expected_delimiter(&self) -> Option<&Delimiter<S>> {
-        self.unclosed_subtree_indices.last().map(|&subtree_idx| {
+    /// Like [`Self::extend_with_tt()`], but makes sure the new tokens will never be
+    /// joint with whatever comes after them.
+    pub fn extend_with_tt_alone(&mut self, tt: TokenTreesView<'_, S>) {
+        if let Some((last, before_last)) = tt.0.split_last() {
+            self.token_trees.reserve(tt.0.len());
+            self.token_trees.extend(before_last.iter().cloned());
+            let last = if let TokenTree::Leaf(Leaf::Punct(last)) = last {
+                let mut last = *last;
+                last.spacing = Spacing::Alone;
+                TokenTree::Leaf(Leaf::Punct(last))
+            } else {
+                last.clone()
+            };
+            self.token_trees.push(last);
+        }
+    }
+
+    pub fn expected_delimiters(&self) -> impl Iterator<Item = &Delimiter<S>> {
+        self.unclosed_subtree_indices.iter().rev().map(|&subtree_idx| {
             let TokenTree::Subtree(subtree) = &self.token_trees[subtree_idx] else {
                 unreachable!("unclosed token tree is always a subtree")
             };
             &subtree.delimiter
         })
-    }
-
-    /// Converts unclosed subtree to a punct of their open delimiter.
-    // FIXME: This is incorrect to do, delimiters can never be puncts. See #18244.
-    pub fn flatten_unclosed_subtrees(&mut self) {
-        for &subtree_idx in &self.unclosed_subtree_indices {
-            let TokenTree::Subtree(subtree) = &self.token_trees[subtree_idx] else {
-                unreachable!("unclosed token tree is always a subtree")
-            };
-            let char = match subtree.delimiter.kind {
-                DelimiterKind::Parenthesis => '(',
-                DelimiterKind::Brace => '{',
-                DelimiterKind::Bracket => '[',
-                DelimiterKind::Invisible => '$',
-            };
-            self.token_trees[subtree_idx] = TokenTree::Leaf(Leaf::Punct(Punct {
-                char,
-                spacing: Spacing::Alone,
-                span: subtree.delimiter.open,
-            }));
-        }
-        self.unclosed_subtree_indices.clear();
     }
 
     /// Builds, and remove the top subtree if it has only one subtree child.
@@ -385,7 +382,8 @@ impl<'a, S: Copy> TokenTreesView<'a, S> {
     ) -> impl Iterator<Item = TokenTreesView<'a, S>> {
         let mut subtree_iter = self.iter();
         let mut need_to_yield_even_if_empty = true;
-        let result = std::iter::from_fn(move || {
+
+        std::iter::from_fn(move || {
             if subtree_iter.is_empty() && !need_to_yield_even_if_empty {
                 return None;
             };
@@ -401,8 +399,7 @@ impl<'a, S: Copy> TokenTreesView<'a, S> {
                 result = subtree_iter.from_savepoint(savepoint);
             }
             Some(result)
-        });
-        result
+        })
     }
 }
 
@@ -582,7 +579,7 @@ where
 {
     use rustc_lexer::LiteralKind;
 
-    let token = rustc_lexer::tokenize(text).next_tuple();
+    let token = rustc_lexer::tokenize(text, rustc_lexer::FrontmatterAllowed::No).next_tuple();
     let Some((rustc_lexer::Token {
         kind: rustc_lexer::TokenKind::Literal { kind, suffix_start },
         ..
@@ -731,9 +728,9 @@ fn print_debug_subtree<S: fmt::Debug>(
     };
 
     write!(f, "{align}SUBTREE {delim} ",)?;
-    fmt::Debug::fmt(&open, f)?;
+    write!(f, "{open:#?}")?;
     write!(f, " ")?;
-    fmt::Debug::fmt(&close, f)?;
+    write!(f, "{close:#?}")?;
     for child in iter {
         writeln!(f)?;
         print_debug_token(f, level + 1, child)?;
@@ -820,6 +817,58 @@ impl<S> fmt::Display for Ident<S> {
     }
 }
 
+impl<S> Literal<S> {
+    pub fn display_no_minus(&self) -> impl fmt::Display {
+        struct NoMinus<'a, S>(&'a Literal<S>);
+        impl<S> fmt::Display for NoMinus<'_, S> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let symbol =
+                    self.0.symbol.as_str().strip_prefix('-').unwrap_or(self.0.symbol.as_str());
+                match self.0.kind {
+                    LitKind::Byte => write!(f, "b'{symbol}'"),
+                    LitKind::Char => write!(f, "'{symbol}'"),
+                    LitKind::Integer | LitKind::Float | LitKind::Err(_) => write!(f, "{symbol}"),
+                    LitKind::Str => write!(f, "\"{symbol}\""),
+                    LitKind::ByteStr => write!(f, "b\"{symbol}\""),
+                    LitKind::CStr => write!(f, "c\"{symbol}\""),
+                    LitKind::StrRaw(num_of_hashes) => {
+                        let num_of_hashes = num_of_hashes as usize;
+                        write!(
+                            f,
+                            r#"r{0:#<num_of_hashes$}"{text}"{0:#<num_of_hashes$}"#,
+                            "",
+                            text = symbol
+                        )
+                    }
+                    LitKind::ByteStrRaw(num_of_hashes) => {
+                        let num_of_hashes = num_of_hashes as usize;
+                        write!(
+                            f,
+                            r#"br{0:#<num_of_hashes$}"{text}"{0:#<num_of_hashes$}"#,
+                            "",
+                            text = symbol
+                        )
+                    }
+                    LitKind::CStrRaw(num_of_hashes) => {
+                        let num_of_hashes = num_of_hashes as usize;
+                        write!(
+                            f,
+                            r#"cr{0:#<num_of_hashes$}"{text}"{0:#<num_of_hashes$}"#,
+                            "",
+                            text = symbol
+                        )
+                    }
+                }?;
+                if let Some(suffix) = &self.0.suffix {
+                    write!(f, "{suffix}")?;
+                }
+                Ok(())
+            }
+        }
+        NoMinus(self)
+    }
+}
+
 impl<S> fmt::Display for Literal<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
@@ -858,7 +907,7 @@ impl<S> fmt::Display for Literal<S> {
             }
         }?;
         if let Some(suffix) = &self.suffix {
-            write!(f, "{}", suffix)?;
+            write!(f, "{suffix}")?;
         }
         Ok(())
     }

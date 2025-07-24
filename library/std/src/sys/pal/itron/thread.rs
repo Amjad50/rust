@@ -9,8 +9,8 @@ use crate::ffi::CStr;
 use crate::mem::ManuallyDrop;
 use crate::num::NonZero;
 use crate::ptr::NonNull;
-use crate::sync::atomic::{AtomicUsize, Ordering};
-use crate::time::Duration;
+use crate::sync::atomic::{Atomic, AtomicUsize, Ordering};
+use crate::time::{Duration, Instant};
 use crate::{hint, io};
 
 pub struct Thread {
@@ -64,7 +64,7 @@ struct ThreadInner {
     ///                 '--> JOIN_FINALIZE ---'
     ///                          (-1)
     ///
-    lifecycle: AtomicUsize,
+    lifecycle: Atomic<usize>,
 }
 
 // Safety: The only `!Sync` field, `ThreadInner::start`, is only touched by
@@ -80,7 +80,7 @@ const LIFECYCLE_EXITED_OR_FINISHED_OR_JOIN_FINALIZE: usize = usize::MAX;
 // there's no single value for `JOINING`
 
 // 64KiB for 32-bit ISAs, 128KiB for 64-bit ISAs.
-pub const DEFAULT_MIN_STACK_SIZE: usize = 0x4000 * crate::mem::size_of::<usize>();
+pub const DEFAULT_MIN_STACK_SIZE: usize = 0x4000 * size_of::<usize>();
 
 impl Thread {
     /// # Safety
@@ -202,6 +202,14 @@ impl Thread {
     pub fn sleep(dur: Duration) {
         for timeout in dur2reltims(dur) {
             expect_success(unsafe { abi::dly_tsk(timeout) }, &"dly_tsk");
+        }
+    }
+
+    pub fn sleep_until(deadline: Instant) {
+        let now = Instant::now();
+
+        if let Some(delay) = deadline.checked_duration_since(now) {
+            Self::sleep(delay);
         }
     }
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::{fs, io, mem, str, thread};
 
+use rustc_abi::Size;
 use rustc_ast::attr;
 use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
@@ -13,17 +14,16 @@ use rustc_data_structures::jobserver::{self, Acquired};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::profiling::{SelfProfilerRef, VerboseTimingGuard};
 use rustc_errors::emitter::Emitter;
-use rustc_errors::translation::Translate;
+use rustc_errors::translation::Translator;
 use rustc_errors::{
-    Diag, DiagArgMap, DiagCtxt, DiagMessage, ErrCode, FatalError, FluentBundle, Level, MultiSpan,
-    Style, Suggestions,
+    Diag, DiagArgMap, DiagCtxt, DiagMessage, ErrCode, FatalError, Level, MultiSpan, Style,
+    Suggestions,
 };
 use rustc_fs_util::link_or_copy;
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc_incremental::{
     copy_cgu_workproduct_to_incr_comp_cache_dir, in_incr_comp_dir, in_incr_comp_dir_sess,
 };
-use rustc_metadata::EncodedMetadata;
 use rustc_metadata::fs::copy_to_stdout;
 use rustc_middle::bug;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -120,6 +120,7 @@ pub struct ModuleConfig {
     pub emit_lifetime_markers: bool,
     pub llvm_plugins: Vec<String>,
     pub autodiff: Vec<config::AutoDiff>,
+    pub offload: Vec<config::Offload>,
 }
 
 impl ModuleConfig {
@@ -141,7 +142,6 @@ impl ModuleConfig {
             || match kind {
                 ModuleKind::Regular => sess.opts.output_types.contains_key(&OutputType::Object),
                 ModuleKind::Allocator => false,
-                ModuleKind::Metadata => sess.opts.output_types.contains_key(&OutputType::Metadata),
             };
 
         let emit_obj = if !should_emit_obj {
@@ -269,6 +269,7 @@ impl ModuleConfig {
             emit_lifetime_markers: sess.emit_lifetime_markers(),
             llvm_plugins: if_regular!(sess.opts.unstable_opts.llvm_plugins.clone(), vec![]),
             autodiff: if_regular!(sess.opts.unstable_opts.autodiff.clone(), vec![]),
+            offload: if_regular!(sess.opts.unstable_opts.offload.clone(), vec![]),
         }
     }
 
@@ -305,14 +306,18 @@ impl TargetMachineFactoryConfig {
             cgcx.output_filenames.split_dwarf_path(
                 cgcx.split_debuginfo,
                 cgcx.split_dwarf_kind,
-                Some(module_name),
+                module_name,
+                cgcx.invocation_temp.as_deref(),
             )
         } else {
             None
         };
 
-        let output_obj_file =
-            Some(cgcx.output_filenames.temp_path(OutputType::Object, Some(module_name)));
+        let output_obj_file = Some(cgcx.output_filenames.temp_path_for_cgu(
+            OutputType::Object,
+            module_name,
+            cgcx.invocation_temp.as_deref(),
+        ));
         TargetMachineFactoryConfig { split_dwarf_file, output_obj_file }
     }
 }
@@ -343,18 +348,19 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub crate_types: Vec<CrateType>,
     pub each_linked_rlib_for_lto: Vec<(CrateNum, PathBuf)>,
     pub output_filenames: Arc<OutputFilenames>,
+    pub invocation_temp: Option<String>,
     pub regular_module_config: Arc<ModuleConfig>,
-    pub metadata_module_config: Arc<ModuleConfig>,
     pub allocator_module_config: Arc<ModuleConfig>,
     pub tm_factory: TargetMachineFactoryFn<B>,
     pub msvc_imps_needed: bool,
     pub is_pe_coff: bool,
     pub target_can_use_split_dwarf: bool,
     pub target_arch: String,
-    pub target_is_like_osx: bool,
+    pub target_is_like_darwin: bool,
     pub target_is_like_aix: bool,
     pub split_debuginfo: rustc_target::spec::SplitDebuginfo,
     pub split_dwarf_kind: rustc_session::config::SplitDwarfKind,
+    pub pointer_size: Size,
 
     /// All commandline args used to invoke the compiler, with @file args fully expanded.
     /// This will only be used within debug info, e.g. in the pdb file on windows
@@ -376,7 +382,7 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub coordinator_send: Sender<Box<dyn Any + Send>>,
     /// `true` if the codegen should be run in parallel.
     ///
-    /// Depends on [`CodegenBackend::supports_parallel()`] and `-Zno_parallel_backend`.
+    /// Depends on [`ExtraBackendMethods::supports_parallel()`] and `-Zno_parallel_backend`.
     pub parallel: bool,
 }
 
@@ -388,57 +394,36 @@ impl<B: WriteBackendMethods> CodegenContext<B> {
     pub fn config(&self, kind: ModuleKind) -> &ModuleConfig {
         match kind {
             ModuleKind::Regular => &self.regular_module_config,
-            ModuleKind::Metadata => &self.metadata_module_config,
             ModuleKind::Allocator => &self.allocator_module_config,
         }
     }
 }
 
-fn generate_lto_work<B: ExtraBackendMethods>(
+fn generate_thin_lto_work<B: ExtraBackendMethods>(
     cgcx: &CodegenContext<B>,
-    autodiff: Vec<AutoDiffItem>,
-    needs_fat_lto: Vec<FatLtoInput<B>>,
     needs_thin_lto: Vec<(String, B::ThinBuffer)>,
     import_only_modules: Vec<(SerializedModule<B::ModuleBuffer>, WorkProduct)>,
 ) -> Vec<(WorkItem<B>, u64)> {
-    let _prof_timer = cgcx.prof.generic_activity("codegen_generate_lto_work");
+    let _prof_timer = cgcx.prof.generic_activity("codegen_thin_generate_lto_work");
 
-    if !needs_fat_lto.is_empty() {
-        assert!(needs_thin_lto.is_empty());
-        let mut module =
-            B::run_fat_lto(cgcx, needs_fat_lto, import_only_modules).unwrap_or_else(|e| e.raise());
-        if cgcx.lto == Lto::Fat && !autodiff.is_empty() {
-            let config = cgcx.config(ModuleKind::Regular);
-            module =
-                unsafe { module.autodiff(cgcx, autodiff, config).unwrap_or_else(|e| e.raise()) };
-        }
-        // We are adding a single work item, so the cost doesn't matter.
-        vec![(WorkItem::LTO(module), 0)]
-    } else {
-        if !autodiff.is_empty() {
-            let dcx = cgcx.create_dcx();
-            dcx.handle().emit_fatal(AutodiffWithoutLto {});
-        }
-        assert!(needs_fat_lto.is_empty());
-        let (lto_modules, copy_jobs) = B::run_thin_lto(cgcx, needs_thin_lto, import_only_modules)
-            .unwrap_or_else(|e| e.raise());
-        lto_modules
-            .into_iter()
-            .map(|module| {
-                let cost = module.cost();
-                (WorkItem::LTO(module), cost)
-            })
-            .chain(copy_jobs.into_iter().map(|wp| {
-                (
-                    WorkItem::CopyPostLtoArtifacts(CachedModuleCodegen {
-                        name: wp.cgu_name.clone(),
-                        source: wp,
-                    }),
-                    0, // copying is very cheap
-                )
-            }))
-            .collect()
-    }
+    let (lto_modules, copy_jobs) =
+        B::run_thin_lto(cgcx, needs_thin_lto, import_only_modules).unwrap_or_else(|e| e.raise());
+    lto_modules
+        .into_iter()
+        .map(|module| {
+            let cost = module.cost();
+            (WorkItem::ThinLto(module), cost)
+        })
+        .chain(copy_jobs.into_iter().map(|wp| {
+            (
+                WorkItem::CopyPostLtoArtifacts(CachedModuleCodegen {
+                    name: wp.cgu_name.clone(),
+                    source: wp,
+                }),
+                0, // copying is very cheap
+            )
+        }))
+        .collect()
 }
 
 struct CompiledModules {
@@ -468,18 +453,16 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
     target_cpu: String,
-    metadata: EncodedMetadata,
-    metadata_module: Option<CompiledModule>,
+    autodiff_items: &[AutoDiffItem],
 ) -> OngoingCodegen<B> {
     let (coordinator_send, coordinator_receive) = channel();
 
-    let crate_attrs = tcx.hir().attrs(rustc_hir::CRATE_HIR_ID);
+    let crate_attrs = tcx.hir_attrs(rustc_hir::CRATE_HIR_ID);
     let no_builtins = attr::contains_name(crate_attrs, sym::no_builtins);
 
     let crate_info = CrateInfo::new(tcx, target_cpu);
 
     let regular_config = ModuleConfig::new(ModuleKind::Regular, tcx, no_builtins);
-    let metadata_config = ModuleConfig::new(ModuleKind::Metadata, tcx, no_builtins);
     let allocator_config = ModuleConfig::new(ModuleKind::Allocator, tcx, no_builtins);
 
     let (shared_emitter, shared_emitter_main) = SharedEmitter::new();
@@ -489,19 +472,17 @@ pub(crate) fn start_async_codegen<B: ExtraBackendMethods>(
         backend.clone(),
         tcx,
         &crate_info,
+        autodiff_items,
         shared_emitter,
         codegen_worker_send,
         coordinator_receive,
         Arc::new(regular_config),
-        Arc::new(metadata_config),
         Arc::new(allocator_config),
         coordinator_send.clone(),
     );
 
     OngoingCodegen {
         backend,
-        metadata,
-        metadata_module,
         crate_info,
 
         codegen_worker_receive,
@@ -544,9 +525,12 @@ fn copy_all_cgu_workproducts_to_incr_comp_cache_dir(
         if let Some(path) = &module.bytecode {
             files.push((OutputType::Bitcode.extension(), path.as_path()));
         }
-        if let Some((id, product)) =
-            copy_cgu_workproduct_to_incr_comp_cache_dir(sess, &module.name, files.as_slice())
-        {
+        if let Some((id, product)) = copy_cgu_workproduct_to_incr_comp_cache_dir(
+            sess,
+            &module.name,
+            files.as_slice(),
+            &module.links_from_incr_cache,
+        ) {
             work_products.insert(id, product);
         }
     }
@@ -564,24 +548,24 @@ fn produce_final_output_artifacts(
 
     // Produce final compile outputs.
     let copy_gracefully = |from: &Path, to: &OutFileName| match to {
-        OutFileName::Stdout => {
-            if let Err(e) = copy_to_stdout(from) {
-                sess.dcx().emit_err(errors::CopyPath::new(from, to.as_path(), e));
-            }
+        OutFileName::Stdout if let Err(e) = copy_to_stdout(from) => {
+            sess.dcx().emit_err(errors::CopyPath::new(from, to.as_path(), e));
         }
-        OutFileName::Real(path) => {
-            if let Err(e) = fs::copy(from, path) {
-                sess.dcx().emit_err(errors::CopyPath::new(from, path, e));
-            }
+        OutFileName::Real(path) if let Err(e) = fs::copy(from, path) => {
+            sess.dcx().emit_err(errors::CopyPath::new(from, path, e));
         }
+        _ => {}
     };
 
     let copy_if_one_unit = |output_type: OutputType, keep_numbered: bool| {
         if let [module] = &compiled_modules.modules[..] {
             // 1) Only one codegen unit. In this case it's no difficulty
             //    to copy `foo.0.x` to `foo.x`.
-            let module_name = Some(&module.name[..]);
-            let path = crate_output.temp_path(output_type, module_name);
+            let path = crate_output.temp_path_for_cgu(
+                output_type,
+                &module.name,
+                sess.invocation_temp.as_deref(),
+            );
             let output = crate_output.path(output_type);
             if !output_type.is_text_output() && output.is_tty() {
                 sess.dcx()
@@ -594,22 +578,15 @@ fn produce_final_output_artifacts(
                 ensure_removed(sess.dcx(), &path);
             }
         } else {
-            let extension = crate_output
-                .temp_path(output_type, None)
-                .extension()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-
             if crate_output.outputs.contains_explicit_name(&output_type) {
                 // 2) Multiple codegen units, with `--emit foo=some_name`. We have
                 //    no good solution for this case, so warn the user.
-                sess.dcx().emit_warn(errors::IgnoringEmitPath { extension });
+                sess.dcx()
+                    .emit_warn(errors::IgnoringEmitPath { extension: output_type.extension() });
             } else if crate_output.single_output_file.is_some() {
                 // 3) Multiple codegen units, with `-o some_name`. We have
                 //    no good solution for this case, so warn the user.
-                sess.dcx().emit_warn(errors::IgnoringOutput { extension });
+                sess.dcx().emit_warn(errors::IgnoringOutput { extension: output_type.extension() });
             } else {
                 // 4) Multiple codegen units, but no explicit name. We
                 //    just leave the `foo.0.x` files in place.
@@ -683,14 +660,12 @@ fn produce_final_output_artifacts(
             needs_crate_object || (user_wants_objects && sess.codegen_units().as_usize() > 1);
 
         for module in compiled_modules.modules.iter() {
-            if let Some(ref path) = module.object {
-                if !keep_numbered_objects {
+            if !keep_numbered_objects {
+                if let Some(ref path) = module.object {
                     ensure_removed(sess.dcx(), path);
                 }
-            }
 
-            if let Some(ref path) = module.dwarf_object {
-                if !keep_numbered_objects {
+                if let Some(ref path) = module.dwarf_object {
                     ensure_removed(sess.dcx(), path);
                 }
             }
@@ -702,12 +677,11 @@ fn produce_final_output_artifacts(
             }
         }
 
-        if !user_wants_bitcode {
-            if let Some(ref allocator_module) = compiled_modules.allocator_module {
-                if let Some(ref path) = allocator_module.bytecode {
-                    ensure_removed(sess.dcx(), path);
-                }
-            }
+        if !user_wants_bitcode
+            && let Some(ref allocator_module) = compiled_modules.allocator_module
+            && let Some(ref path) = allocator_module.bytecode
+        {
+            ensure_removed(sess.dcx(), path);
         }
     }
 
@@ -747,15 +721,23 @@ pub(crate) enum WorkItem<B: WriteBackendMethods> {
     /// Copy the post-LTO artifacts from the incremental cache to the output
     /// directory.
     CopyPostLtoArtifacts(CachedModuleCodegen),
-    /// Performs (Thin)LTO on the given module.
-    LTO(lto::LtoModuleCodegen<B>),
+    /// Performs fat LTO on the given module.
+    FatLto {
+        needs_fat_lto: Vec<FatLtoInput<B>>,
+        import_only_modules: Vec<(SerializedModule<B::ModuleBuffer>, WorkProduct)>,
+        autodiff: Vec<AutoDiffItem>,
+    },
+    /// Performs thin-LTO on the given module.
+    ThinLto(lto::ThinModule<B>),
 }
 
 impl<B: WriteBackendMethods> WorkItem<B> {
     fn module_kind(&self) -> ModuleKind {
         match *self {
             WorkItem::Optimize(ref m) => m.kind,
-            WorkItem::CopyPostLtoArtifacts(_) | WorkItem::LTO(_) => ModuleKind::Regular,
+            WorkItem::CopyPostLtoArtifacts(_) | WorkItem::FatLto { .. } | WorkItem::ThinLto(_) => {
+                ModuleKind::Regular
+            }
         }
     }
 
@@ -803,7 +785,8 @@ impl<B: WriteBackendMethods> WorkItem<B> {
         match self {
             WorkItem::Optimize(m) => desc("opt", "optimize module", &m.name),
             WorkItem::CopyPostLtoArtifacts(m) => desc("cpy", "copy LTO artifacts for", &m.name),
-            WorkItem::LTO(m) => desc("lto", "LTO module", m.name()),
+            WorkItem::FatLto { .. } => desc("lto", "fat LTO module", "everything"),
+            WorkItem::ThinLto(m) => desc("lto", "thin-LTO module", m.name()),
         }
     }
 }
@@ -844,12 +827,6 @@ pub(crate) fn compute_per_cgu_lto_type(
     sess_crate_types: &[CrateType],
     module_kind: ModuleKind,
 ) -> ComputedLtoType {
-    // Metadata modules never participate in LTO regardless of the lto
-    // settings.
-    if module_kind == ModuleKind::Metadata {
-        return ComputedLtoType::No;
-    }
-
     // If the linker does LTO, we don't have to do it. Note that we
     // keep doing full LTO, if it is requested, as not to break the
     // assumption that the output will be a single module.
@@ -887,9 +864,7 @@ fn execute_optimize_work_item<B: ExtraBackendMethods>(
     let dcx = cgcx.create_dcx();
     let dcx = dcx.handle();
 
-    unsafe {
-        B::optimize(cgcx, dcx, &mut module, module_config)?;
-    }
+    B::optimize(cgcx, dcx, &mut module, module_config)?;
 
     // After we've done the initial round of optimizations we need to
     // decide whether to synchronously codegen this module or ship it
@@ -938,7 +913,9 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
 ) -> WorkItemResult<B> {
     let incr_comp_session_dir = cgcx.incr_comp_session_dir.as_ref().unwrap();
 
-    let load_from_incr_comp_dir = |output_path: PathBuf, saved_path: &str| {
+    let mut links_from_incr_cache = Vec::new();
+
+    let mut load_from_incr_comp_dir = |output_path: PathBuf, saved_path: &str| {
         let source_file = in_incr_comp_dir(incr_comp_session_dir, saved_path);
         debug!(
             "copying preexisting module `{}` from {:?} to {}",
@@ -947,7 +924,10 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
             output_path.display()
         );
         match link_or_copy(&source_file, &output_path) {
-            Ok(_) => Some(output_path),
+            Ok(_) => {
+                links_from_incr_cache.push(source_file);
+                Some(output_path)
+            }
             Err(error) => {
                 cgcx.create_dcx().handle().emit_err(errors::CopyPathBuf {
                     source_file,
@@ -963,17 +943,26 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
         module.source.saved_files.get("dwo").as_ref().and_then(|saved_dwarf_object_file| {
             let dwarf_obj_out = cgcx
                 .output_filenames
-                .split_dwarf_path(cgcx.split_debuginfo, cgcx.split_dwarf_kind, Some(&module.name))
+                .split_dwarf_path(
+                    cgcx.split_debuginfo,
+                    cgcx.split_dwarf_kind,
+                    &module.name,
+                    cgcx.invocation_temp.as_deref(),
+                )
                 .expect(
                     "saved dwarf object in work product but `split_dwarf_path` returned `None`",
                 );
             load_from_incr_comp_dir(dwarf_obj_out, saved_dwarf_object_file)
         });
 
-    let load_from_incr_cache = |perform, output_type: OutputType| {
+    let mut load_from_incr_cache = |perform, output_type: OutputType| {
         if perform {
             let saved_file = module.source.saved_files.get(output_type.extension())?;
-            let output_path = cgcx.output_filenames.temp_path(output_type, Some(&module.name));
+            let output_path = cgcx.output_filenames.temp_path_for_cgu(
+                output_type,
+                &module.name,
+                cgcx.invocation_temp.as_deref(),
+            );
             load_from_incr_comp_dir(output_path, &saved_file)
         } else {
             None
@@ -990,6 +979,7 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
     }
 
     WorkItemResult::Finished(CompiledModule {
+        links_from_incr_cache,
         name: module.name,
         kind: ModuleKind::Regular,
         object,
@@ -1000,12 +990,24 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
     })
 }
 
-fn execute_lto_work_item<B: ExtraBackendMethods>(
+fn execute_fat_lto_work_item<B: ExtraBackendMethods>(
     cgcx: &CodegenContext<B>,
-    module: lto::LtoModuleCodegen<B>,
+    needs_fat_lto: Vec<FatLtoInput<B>>,
+    import_only_modules: Vec<(SerializedModule<B::ModuleBuffer>, WorkProduct)>,
+    autodiff: Vec<AutoDiffItem>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
-    let module = unsafe { module.optimize(cgcx)? };
+    let module = B::run_and_optimize_fat_lto(cgcx, needs_fat_lto, import_only_modules, autodiff)?;
+    let module = B::codegen(cgcx, module, module_config)?;
+    Ok(WorkItemResult::Finished(module))
+}
+
+fn execute_thin_lto_work_item<B: ExtraBackendMethods>(
+    cgcx: &CodegenContext<B>,
+    module: lto::ThinModule<B>,
+    module_config: &ModuleConfig,
+) -> Result<WorkItemResult<B>, FatalError> {
+    let module = B::optimize_thin(cgcx, module)?;
     finish_intra_module_work(cgcx, module, module_config)
 }
 
@@ -1014,14 +1016,8 @@ fn finish_intra_module_work<B: ExtraBackendMethods>(
     module: ModuleCodegen<B::Module>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
-    let dcx = cgcx.create_dcx();
-    let dcx = dcx.handle();
-
-    if !cgcx.opts.unstable_opts.combine_cgu
-        || module.kind == ModuleKind::Metadata
-        || module.kind == ModuleKind::Allocator
-    {
-        let module = unsafe { B::codegen(cgcx, dcx, module, module_config)? };
+    if !cgcx.opts.unstable_opts.combine_cgu || module.kind == ModuleKind::Allocator {
+        let module = B::codegen(cgcx, module, module_config)?;
         Ok(WorkItemResult::Finished(module))
     } else {
         Ok(WorkItemResult::NeedsLink(module))
@@ -1037,9 +1033,6 @@ pub(crate) enum Message<B: WriteBackendMethods> {
     /// The backend has finished processing a work item for a codegen unit.
     /// Sent from a backend worker thread.
     WorkItem { result: Result<WorkItemResult<B>, Option<WorkerFatalError>>, worker_id: usize },
-
-    /// A vector containing all the AutoDiff tasks that we have to pass to Enzyme.
-    AddAutoDiffItems(Vec<AutoDiffItem>),
 
     /// The frontend has finished generating something (backend IR or a
     /// post-LTO artifact) for a codegen unit, and it should be passed to the
@@ -1107,16 +1100,17 @@ fn start_executing_work<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
     crate_info: &CrateInfo,
+    autodiff_items: &[AutoDiffItem],
     shared_emitter: SharedEmitter,
     codegen_worker_send: Sender<CguMessage>,
     coordinator_receive: Receiver<Box<dyn Any + Send>>,
     regular_config: Arc<ModuleConfig>,
-    metadata_config: Arc<ModuleConfig>,
     allocator_config: Arc<ModuleConfig>,
     tx_to_llvm_workers: Sender<Box<dyn Any + Send>>,
 ) -> thread::JoinHandle<Result<CompiledModules, ()>> {
     let coordinator_send = tx_to_llvm_workers;
     let sess = tcx.sess;
+    let autodiff_items = autodiff_items.to_vec();
 
     let mut each_linked_rlib_for_lto = Vec::new();
     drop(link::each_linked_rlib(crate_info, None, &mut |cnum, path| {
@@ -1132,8 +1126,9 @@ fn start_executing_work<B: ExtraBackendMethods>(
 
         let copy_symbols = |cnum| {
             let symbols = tcx
-                .exported_symbols(cnum)
+                .exported_non_generic_symbols(cnum)
                 .iter()
+                .chain(tcx.exported_generic_symbols(cnum))
                 .map(|&(s, lvl)| (symbol_name_for_instance_in_crate(tcx, s, cnum), lvl))
                 .collect();
             Arc::new(symbols)
@@ -1204,18 +1199,19 @@ fn start_executing_work<B: ExtraBackendMethods>(
         diag_emitter: shared_emitter.clone(),
         output_filenames: Arc::clone(tcx.output_filenames(())),
         regular_module_config: regular_config,
-        metadata_module_config: metadata_config,
         allocator_module_config: allocator_config,
         tm_factory: backend.target_machine_factory(tcx.sess, ol, backend_features),
         msvc_imps_needed: msvc_imps_needed(tcx),
         is_pe_coff: tcx.sess.target.is_like_windows,
         target_can_use_split_dwarf: tcx.sess.target_can_use_split_dwarf(),
         target_arch: tcx.sess.target.arch.to_string(),
-        target_is_like_osx: tcx.sess.target.is_like_osx,
+        target_is_like_darwin: tcx.sess.target.is_like_darwin,
         target_is_like_aix: tcx.sess.target.is_like_aix,
         split_debuginfo: tcx.sess.split_debuginfo(),
         split_dwarf_kind: tcx.sess.opts.unstable_opts.split_dwarf_kind,
         parallel: backend.supports_parallel() && !sess.opts.unstable_opts.no_parallel_backend,
+        pointer_size: tcx.data_layout.pointer_size(),
+        invocation_temp: sess.invocation_temp.clone(),
     };
 
     // This is the "main loop" of parallel work happening for parallel codegen.
@@ -1368,7 +1364,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
 
         // This is where we collect codegen units that have gone all the way
         // through codegen and LLVM.
-        let mut autodiff_items = Vec::new();
         let mut compiled_modules = vec![];
         let mut compiled_allocator_module = None;
         let mut needs_link = Vec::new();
@@ -1480,19 +1475,36 @@ fn start_executing_work<B: ExtraBackendMethods>(
                     let needs_thin_lto = mem::take(&mut needs_thin_lto);
                     let import_only_modules = mem::take(&mut lto_import_only_modules);
 
-                    for (work, cost) in generate_lto_work(
-                        &cgcx,
-                        autodiff_items.clone(),
-                        needs_fat_lto,
-                        needs_thin_lto,
-                        import_only_modules,
-                    ) {
-                        let insertion_index = work_items
-                            .binary_search_by_key(&cost, |&(_, cost)| cost)
-                            .unwrap_or_else(|e| e);
-                        work_items.insert(insertion_index, (work, cost));
+                    if !needs_fat_lto.is_empty() {
+                        assert!(needs_thin_lto.is_empty());
+
+                        work_items.push((
+                            WorkItem::FatLto {
+                                needs_fat_lto,
+                                import_only_modules,
+                                autodiff: autodiff_items.clone(),
+                            },
+                            0,
+                        ));
                         if cgcx.parallel {
                             helper.request_token();
+                        }
+                    } else {
+                        if !autodiff_items.is_empty() {
+                            let dcx = cgcx.create_dcx();
+                            dcx.handle().emit_fatal(AutodiffWithoutLto {});
+                        }
+
+                        for (work, cost) in
+                            generate_thin_lto_work(&cgcx, needs_thin_lto, import_only_modules)
+                        {
+                            let insertion_index = work_items
+                                .binary_search_by_key(&cost, |&(_, cost)| cost)
+                                .unwrap_or_else(|e| e);
+                            work_items.insert(insertion_index, (work, cost));
+                            if cgcx.parallel {
+                                helper.request_token();
+                            }
                         }
                     }
                 }
@@ -1622,10 +1634,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
                     main_thread_state = MainThreadState::Idle;
                 }
 
-                Message::AddAutoDiffItems(mut items) => {
-                    autodiff_items.append(&mut items);
-                }
-
                 Message::CodegenComplete => {
                     if codegen_state != Aborted {
                         codegen_state = Completed;
@@ -1659,7 +1667,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
                                     assert!(compiled_allocator_module.is_none());
                                     compiled_allocator_module = Some(compiled_module);
                                 }
-                                ModuleKind::Metadata => bug!("Should be handled separately"),
                             }
                         }
                         Ok(WorkItemResult::NeedsLink(module)) => {
@@ -1708,9 +1715,8 @@ fn start_executing_work<B: ExtraBackendMethods>(
             let dcx = cgcx.create_dcx();
             let dcx = dcx.handle();
             let module = B::run_link(&cgcx, dcx, needs_link).map_err(|_| ())?;
-            let module = unsafe {
-                B::codegen(&cgcx, dcx, module, cgcx.config(ModuleKind::Regular)).map_err(|_| ())?
-            };
+            let module =
+                B::codegen(&cgcx, module, cgcx.config(ModuleKind::Regular)).map_err(|_| ())?;
             compiled_modules.push(module);
         }
 
@@ -1850,10 +1856,22 @@ fn spawn_work<'a, B: ExtraBackendMethods>(
                     );
                     Ok(execute_copy_from_cache_work_item(&cgcx, m, module_config))
                 }
-                WorkItem::LTO(m) => {
+                WorkItem::FatLto { needs_fat_lto, import_only_modules, autodiff } => {
+                    let _timer = cgcx
+                        .prof
+                        .generic_activity_with_arg("codegen_module_perform_lto", "everything");
+                    execute_fat_lto_work_item(
+                        &cgcx,
+                        needs_fat_lto,
+                        import_only_modules,
+                        autodiff,
+                        module_config,
+                    )
+                }
+                WorkItem::ThinLto(m) => {
                     let _timer =
                         cgcx.prof.generic_activity_with_arg("codegen_module_perform_lto", m.name());
-                    execute_lto_work_item(&cgcx, m, module_config)
+                    execute_thin_lto_work_item(&cgcx, m, module_config)
                 }
             })
         };
@@ -1898,16 +1916,6 @@ impl SharedEmitter {
     }
 }
 
-impl Translate for SharedEmitter {
-    fn fluent_bundle(&self) -> Option<&FluentBundle> {
-        None
-    }
-
-    fn fallback_fluent_bundle(&self) -> &FluentBundle {
-        panic!("shared emitter attempted to translate a diagnostic");
-    }
-}
-
 impl Emitter for SharedEmitter {
     fn emit_diagnostic(
         &mut self,
@@ -1940,6 +1948,10 @@ impl Emitter for SharedEmitter {
 
     fn source_map(&self) -> Option<&SourceMap> {
         None
+    }
+
+    fn translator(&self) -> &Translator {
+        panic!("shared emitter attempted to translate a diagnostic");
     }
 }
 
@@ -2042,8 +2054,6 @@ impl<B: ExtraBackendMethods> Drop for Coordinator<B> {
 
 pub struct OngoingCodegen<B: ExtraBackendMethods> {
     pub backend: B,
-    pub metadata: EncodedMetadata,
-    pub metadata_module: Option<CompiledModule>,
     pub crate_info: CrateInfo,
     pub codegen_worker_receive: Receiver<CguMessage>,
     pub shared_emitter_main: SharedEmitterMain,
@@ -2083,12 +2093,10 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
 
         (
             CodegenResults {
-                metadata: self.metadata,
                 crate_info: self.crate_info,
 
                 modules: compiled_modules.modules,
                 allocator_module: compiled_modules.allocator_module,
-                metadata_module: self.metadata_module,
             },
             work_products,
         )
@@ -2098,10 +2106,6 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
         self.wait_for_signal_to_codegen_item();
         self.check_for_errors(tcx.sess);
         drop(self.coordinator.sender.send(Box::new(Message::CodegenComplete::<B>)));
-    }
-
-    pub(crate) fn submit_autodiff_items(&self, items: Vec<AutoDiffItem>) {
-        drop(self.coordinator.sender.send(Box::new(Message::<B>::AddAutoDiffItems(items))));
     }
 
     pub(crate) fn check_for_errors(&self, sess: &Session) {
@@ -2180,7 +2184,7 @@ fn msvc_imps_needed(tcx: TyCtxt<'_>) -> bool {
     // indirectly from ThinLTO. In theory these are not needed as ThinLTO could resolve
     // these, but it currently does not do so.
     let can_have_static_objects =
-        tcx.sess.lto() == Lto::Thin || tcx.crate_types().iter().any(|ct| *ct == CrateType::Rlib);
+        tcx.sess.lto() == Lto::Thin || tcx.crate_types().contains(&CrateType::Rlib);
 
     tcx.sess.target.is_like_windows &&
     can_have_static_objects   &&

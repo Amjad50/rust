@@ -107,11 +107,13 @@ impl<'tcx> Ty<'tcx> {
             // For now, unions are always considered inhabited
             Adt(adt, _) if adt.is_union() => InhabitedPredicate::True,
             // Non-exhaustive ADTs from other crates are always considered inhabited
-            Adt(adt, _) if adt.is_variant_list_non_exhaustive() && !adt.did().is_local() => {
+            Adt(adt, _) if adt.variant_list_has_applicable_non_exhaustive() => {
                 InhabitedPredicate::True
             }
             Never => InhabitedPredicate::False,
-            Param(_) | Alias(ty::Projection | ty::Weak, _) => InhabitedPredicate::GenericType(self),
+            Param(_) | Alias(ty::Inherent | ty::Projection | ty::Free, _) => {
+                InhabitedPredicate::GenericType(self)
+            }
             Alias(ty::Opaque, alias_ty) => {
                 match alias_ty.def_id.as_local() {
                     // Foreign opaque is considered inhabited.
@@ -122,12 +124,6 @@ impl<'tcx> Ty<'tcx> {
                         InhabitedPredicate::OpaqueType(key)
                     }
                 }
-            }
-            // FIXME(inherent_associated_types): Most likely we can just map to `GenericType` like above.
-            // However it's unclear if the args passed to `InhabitedPredicate::instantiate` are of the correct
-            // format, i.e. don't contain parent args. If you hit this case, please verify this beforehand.
-            Alias(ty::Inherent, _) => {
-                bug!("unimplemented: inhabitedness checking for inherent projections")
             }
             Tuple(tys) if tys.is_empty() => InhabitedPredicate::True,
             // use a query for more complex cases

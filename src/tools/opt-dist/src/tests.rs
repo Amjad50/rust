@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -11,7 +13,7 @@ pub fn run_tests(env: &Environment) -> anyhow::Result<()> {
     // and then use that extracted rustc as a stage0 compiler.
     // Then we run a subset of tests using that compiler, to have a basic smoke test which checks
     // whether the optimization pipeline hasn't broken something.
-    let build_dir = env.build_root().join("build");
+    let build_dir = env.build_root();
     let dist_dir = build_dir.join("dist");
     let unpacked_dist_dir = build_dir.join("unpacked-dist");
     std::fs::create_dir_all(&unpacked_dist_dir)?;
@@ -70,6 +72,8 @@ change-id = 115898
 [rust]
 channel = "{channel}"
 verbose-tests = true
+# rust-lld cannot be combined with an external LLVM
+lld = false
 
 [build]
 rustc = "{rustc}"
@@ -83,39 +87,63 @@ llvm-config = "{llvm_config}"
         cargo = cargo_path.to_string().replace('\\', "/"),
         llvm_config = llvm_config.to_string().replace('\\', "/")
     );
-    log::info!("Using following `config.toml` for running tests:\n{config_content}");
+    log::info!("Using following `bootstrap.toml` for running tests:\n{config_content}");
 
     // Simulate a stage 0 compiler with the extracted optimized dist artifacts.
-    std::fs::write("config.toml", config_content)?;
+    with_backed_up_file(Path::new("bootstrap.toml"), &config_content, || {
+        let x_py = env.checkout_path().join("x.py");
+        let mut args = vec![
+            env.python_binary(),
+            x_py.as_str(),
+            "test",
+            "--build",
+            env.host_tuple(),
+            "--stage",
+            "0",
+            "tests/assembly-llvm",
+            "tests/codegen-llvm",
+            "tests/codegen-units",
+            "tests/incremental",
+            "tests/mir-opt",
+            "tests/pretty",
+            // Make sure that we don't use too new GLIBC symbols on x64
+            "tests/run-make/glibc-symbols-x86_64-unknown-linux-gnu",
+            // Make sure that we use LLD by default on x64
+            "tests/run-make/rust-lld-x86_64-unknown-linux-gnu-dist",
+            "tests/ui",
+            "tests/crashes",
+        ];
+        for test_path in env.skipped_tests() {
+            args.extend(["--skip", test_path]);
+        }
+        cmd(&args)
+            .env("COMPILETEST_FORCE_STAGE0", "1")
+            // Also run dist-only tests
+            .env("COMPILETEST_ENABLE_DIST_TESTS", "1")
+            .run()
+            .context("Cannot execute tests")
+    })
+}
 
-    let x_py = env.checkout_path().join("x.py");
-    let mut args = vec![
-        env.python_binary(),
-        x_py.as_str(),
-        "test",
-        "--build",
-        env.host_tuple(),
-        "--stage",
-        "0",
-        "tests/assembly",
-        "tests/codegen",
-        "tests/codegen-units",
-        "tests/incremental",
-        "tests/mir-opt",
-        "tests/pretty",
-        "tests/run-make/glibc-symbols-x86_64-unknown-linux-gnu",
-        "tests/ui",
-        "tests/crashes",
-    ];
-    for test_path in env.skipped_tests() {
-        args.extend(["--skip", test_path]);
+/// Backup `path` (if it exists), then write `contents` into it, and then restore the original
+/// contents of the file.
+fn with_backed_up_file<F>(path: &Path, contents: &str, func: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> anyhow::Result<()>,
+{
+    let original_contents =
+        if path.is_file() { Some(std::fs::read_to_string(path)?) } else { None };
+
+    // Overwrite it with new contents
+    std::fs::write(path, contents)?;
+
+    let ret = func();
+
+    if let Some(original_contents) = original_contents {
+        std::fs::write(path, original_contents)?;
     }
-    cmd(&args)
-        .env("COMPILETEST_FORCE_STAGE0", "1")
-        // Also run dist-only tests
-        .env("COMPILETEST_ENABLE_DIST_TESTS", "1")
-        .run()
-        .context("Cannot execute tests")
+
+    ret
 }
 
 /// Tries to find the version of the dist artifacts (either nightly, beta, or 1.XY.Z).

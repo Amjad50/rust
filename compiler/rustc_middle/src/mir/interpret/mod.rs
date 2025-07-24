@@ -38,8 +38,8 @@ pub use self::error::{
     EvalToAllocationRawResult, EvalToConstValueResult, EvalToValTreeResult, ExpectedKind,
     InterpErrorInfo, InterpErrorKind, InterpResult, InvalidMetaKind, InvalidProgramInfo,
     MachineStopType, Misalignment, PointerKind, ReportedErrorInfo, ResourceExhaustionInfo,
-    ScalarSizeMismatch, UndefinedBehaviorInfo, UnsupportedOpInfo, ValidationErrorInfo,
-    ValidationErrorKind, interp_ok,
+    ScalarSizeMismatch, UndefinedBehaviorInfo, UnsupportedOpInfo, ValTreeCreationError,
+    ValidationErrorInfo, ValidationErrorKind, interp_ok,
 };
 pub use self::pointer::{CtfeProvenance, Pointer, PointerArithmetic, Provenance};
 pub use self::value::Scalar;
@@ -77,7 +77,7 @@ impl<'tcx> GlobalId<'tcx> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, HashStable)]
 pub struct LitToConstInput<'tcx> {
     /// The absolute value of the resultant constant.
-    pub lit: &'tcx LitKind,
+    pub lit: LitKind,
     /// The type of the constant.
     pub ty: Ty<'tcx>,
     /// If the constant is negative.
@@ -103,9 +103,10 @@ enum AllocDiscriminant {
     Fn,
     VTable,
     Static,
+    Type,
 }
 
-pub fn specialized_encode_alloc_id<'tcx, E: TyEncoder<I = TyCtxt<'tcx>>>(
+pub fn specialized_encode_alloc_id<'tcx, E: TyEncoder<'tcx>>(
     encoder: &mut E,
     tcx: TyCtxt<'tcx>,
     alloc_id: AllocId,
@@ -126,6 +127,11 @@ pub fn specialized_encode_alloc_id<'tcx, E: TyEncoder<I = TyCtxt<'tcx>>>(
             AllocDiscriminant::VTable.encode(encoder);
             ty.encode(encoder);
             poly_trait_ref.encode(encoder);
+        }
+        GlobalAlloc::TypeId { ty } => {
+            trace!("encoding {alloc_id:?} with {ty:#?}");
+            AllocDiscriminant::Type.encode(encoder);
+            ty.encode(encoder);
         }
         GlobalAlloc::Static(did) => {
             assert!(!tcx.is_thread_local_static(did));
@@ -175,7 +181,7 @@ impl<'s> AllocDecodingSession<'s> {
     /// Decodes an `AllocId` in a thread-safe way.
     pub fn decode_alloc_id<'tcx, D>(&self, decoder: &mut D) -> AllocId
     where
-        D: TyDecoder<I = TyCtxt<'tcx>>,
+        D: TyDecoder<'tcx>,
     {
         // Read the index of the allocation.
         let idx = usize::try_from(decoder.read_u32()).unwrap();
@@ -228,6 +234,12 @@ impl<'s> AllocDecodingSession<'s> {
                 trace!("decoded vtable alloc instance: {ty:?}, {poly_trait_ref:?}");
                 decoder.interner().reserve_and_set_vtable_alloc(ty, poly_trait_ref, CTFE_ALLOC_SALT)
             }
+            AllocDiscriminant::Type => {
+                trace!("creating typeid alloc ID");
+                let ty = Decodable::decode(decoder);
+                trace!("decoded typid: {ty:?}");
+                decoder.interner().reserve_and_set_type_id_alloc(ty)
+            }
             AllocDiscriminant::Static => {
                 trace!("creating extern static alloc ID");
                 let did = <DefId as Decodable<D>>::decode(decoder);
@@ -258,6 +270,9 @@ pub enum GlobalAlloc<'tcx> {
     Static(DefId),
     /// The alloc ID points to memory.
     Memory(ConstAllocation<'tcx>),
+    /// The first pointer-sized segment of a type id. On 64 bit systems, the 128 bit type id
+    /// is split into two segments, on 32 bit systems there are 4 segments, and so on.
+    TypeId { ty: Ty<'tcx> },
 }
 
 impl<'tcx> GlobalAlloc<'tcx> {
@@ -296,9 +311,10 @@ impl<'tcx> GlobalAlloc<'tcx> {
     pub fn address_space(&self, cx: &impl HasDataLayout) -> AddressSpace {
         match self {
             GlobalAlloc::Function { .. } => cx.data_layout().instruction_address_space,
-            GlobalAlloc::Static(..) | GlobalAlloc::Memory(..) | GlobalAlloc::VTable(..) => {
-                AddressSpace::DATA
-            }
+            GlobalAlloc::TypeId { .. }
+            | GlobalAlloc::Static(..)
+            | GlobalAlloc::Memory(..)
+            | GlobalAlloc::VTable(..) => AddressSpace::ZERO,
         }
     }
 
@@ -334,7 +350,7 @@ impl<'tcx> GlobalAlloc<'tcx> {
                 }
             }
             GlobalAlloc::Memory(alloc) => alloc.inner().mutability,
-            GlobalAlloc::Function { .. } | GlobalAlloc::VTable(..) => {
+            GlobalAlloc::TypeId { .. } | GlobalAlloc::Function { .. } | GlobalAlloc::VTable(..) => {
                 // These are immutable.
                 Mutability::Not
             }
@@ -380,8 +396,10 @@ impl<'tcx> GlobalAlloc<'tcx> {
             GlobalAlloc::Function { .. } => (Size::ZERO, Align::ONE),
             GlobalAlloc::VTable(..) => {
                 // No data to be accessed here. But vtables are pointer-aligned.
-                return (Size::ZERO, tcx.data_layout.pointer_align.abi);
+                (Size::ZERO, tcx.data_layout.pointer_align().abi)
             }
+            // Fake allocation, there's nothing to access here
+            GlobalAlloc::TypeId { .. } => (Size::ZERO, Align::ONE),
         }
     }
 }
@@ -452,12 +470,7 @@ impl<'tcx> TyCtxt<'tcx> {
         }
         let id = self.alloc_map.reserve();
         debug!("creating alloc {:?} with id {id:?}", alloc_salt.0);
-        let had_previous = self
-            .alloc_map
-            .to_alloc
-            .lock_shard_by_value(&id)
-            .insert(id, alloc_salt.0.clone())
-            .is_some();
+        let had_previous = self.alloc_map.to_alloc.insert(id, alloc_salt.0.clone()).is_some();
         // We just reserved, so should always be unique.
         assert!(!had_previous);
         dedup.insert(alloc_salt, id);
@@ -492,6 +505,11 @@ impl<'tcx> TyCtxt<'tcx> {
         self.reserve_and_set_dedup(GlobalAlloc::VTable(ty, dyn_ty), salt)
     }
 
+    /// Generates an [AllocId] for a [core::any::TypeId]. Will get deduplicated.
+    pub fn reserve_and_set_type_id_alloc(self, ty: Ty<'tcx>) -> AllocId {
+        self.reserve_and_set_dedup(GlobalAlloc::TypeId { ty }, 0)
+    }
+
     /// Interns the `Allocation` and return a new `AllocId`, even if there's already an identical
     /// `Allocation` with a different `AllocId`.
     /// Statics with identical content will still point to the same `Allocation`, i.e.,
@@ -510,7 +528,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// local dangling pointers and allocations in constants/statics.
     #[inline]
     pub fn try_get_global_alloc(self, id: AllocId) -> Option<GlobalAlloc<'tcx>> {
-        self.alloc_map.to_alloc.lock_shard_by_value(&id).get(&id).cloned()
+        self.alloc_map.to_alloc.get(&id)
     }
 
     #[inline]
@@ -529,9 +547,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Freezes an `AllocId` created with `reserve` by pointing it at an `Allocation`. Trying to
     /// call this function twice, even with the same `Allocation` will ICE the compiler.
     pub fn set_alloc_id_memory(self, id: AllocId, mem: ConstAllocation<'tcx>) {
-        if let Some(old) =
-            self.alloc_map.to_alloc.lock_shard_by_value(&id).insert(id, GlobalAlloc::Memory(mem))
-        {
+        if let Some(old) = self.alloc_map.to_alloc.insert(id, GlobalAlloc::Memory(mem)) {
             bug!("tried to set allocation ID {id:?}, but it was already existing as {old:#?}");
         }
     }
@@ -539,11 +555,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Freezes an `AllocId` created with `reserve` by pointing it at a static item. Trying to
     /// call this function twice, even with the same `DefId` will ICE the compiler.
     pub fn set_nested_alloc_id_static(self, id: AllocId, def_id: LocalDefId) {
-        if let Some(old) = self
-            .alloc_map
-            .to_alloc
-            .lock_shard_by_value(&id)
-            .insert(id, GlobalAlloc::Static(def_id.to_def_id()))
+        if let Some(old) =
+            self.alloc_map.to_alloc.insert(id, GlobalAlloc::Static(def_id.to_def_id()))
         {
             bug!("tried to set allocation ID {id:?}, but it was already existing as {old:#?}");
         }
@@ -573,7 +586,7 @@ pub fn write_target_uint(
 #[inline]
 pub fn read_target_uint(endianness: Endian, mut source: &[u8]) -> Result<u128, io::Error> {
     // This u128 holds an "any-size uint" (since smaller uints can fits in it)
-    let mut buf = [0u8; std::mem::size_of::<u128>()];
+    let mut buf = [0u8; size_of::<u128>()];
     // So we do not read exactly 16 bytes into the u128, just the "payload".
     let uint = match endianness {
         Endian::Little => {

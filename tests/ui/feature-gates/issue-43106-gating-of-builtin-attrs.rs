@@ -174,16 +174,16 @@ mod macro_use {
     mod inner { #![macro_use] }
 
     #[macro_use] fn f() { }
-    //~^ `#[macro_use]` only has an effect
+    //~^ WARN `#[macro_use]` only has an effect
 
     #[macro_use] struct S;
-    //~^ `#[macro_use]` only has an effect
+    //~^ WARN `#[macro_use]` only has an effect
 
     #[macro_use] type T = S;
-    //~^ `#[macro_use]` only has an effect
+    //~^ WARN `#[macro_use]` only has an effect
 
     #[macro_use] impl S { }
-    //~^ `#[macro_use]` only has an effect
+    //~^ WARN `#[macro_use]` only has an effect
 }
 
 #[macro_export]
@@ -269,7 +269,13 @@ mod automatically_derived {
     #[automatically_derived] type T = S;
     //~^ WARN `#[automatically_derived]
 
+    #[automatically_derived] trait W { }
+    //~^ WARN `#[automatically_derived]
+
     #[automatically_derived] impl S { }
+    //~^ WARN `#[automatically_derived]
+
+    #[automatically_derived] impl W for S { }
 }
 
 #[no_mangle]

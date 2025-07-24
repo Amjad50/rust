@@ -112,7 +112,12 @@ impl Timespec {
 
             // __clock_gettime64 was added to 32-bit arches in glibc 2.34,
             // and it handles both vDSO calls and ENOSYS fallbacks itself.
-            weak!(fn __clock_gettime64(libc::clockid_t, *mut __timespec64) -> libc::c_int);
+            weak!(
+                fn __clock_gettime64(
+                    clockid: libc::clockid_t,
+                    tp: *mut __timespec64,
+                ) -> libc::c_int;
+            );
 
             if let Some(clock_gettime64) = __clock_gettime64.get() {
                 let mut t = MaybeUninit::uninit();
@@ -256,6 +261,10 @@ pub struct Instant {
 }
 
 impl Instant {
+    #[cfg(target_vendor = "apple")]
+    pub(crate) const CLOCK_ID: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_vendor = "apple"))]
+    pub(crate) const CLOCK_ID: libc::clockid_t = libc::CLOCK_MONOTONIC;
     pub fn now() -> Instant {
         // https://www.manpagez.com/man/3/clock_gettime/
         //
@@ -268,11 +277,7 @@ impl Instant {
         //
         // Instant on macos was historically implemented using mach_absolute_time;
         // we preserve this value domain out of an abundance of caution.
-        #[cfg(target_vendor = "apple")]
-        const clock_id: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
-        #[cfg(not(target_vendor = "apple"))]
-        const clock_id: libc::clockid_t = libc::CLOCK_MONOTONIC;
-        Instant { t: Timespec::now(clock_id) }
+        Instant { t: Timespec::now(Self::CLOCK_ID) }
     }
 
     pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
@@ -285,6 +290,14 @@ impl Instant {
 
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
         Some(Instant { t: self.t.checked_sub_duration(other)? })
+    }
+
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(unused, reason = "needed by the `sleep_until` on some unix platforms")
+    )]
+    pub(crate) fn into_timespec(self) -> Timespec {
+        self.t
     }
 }
 

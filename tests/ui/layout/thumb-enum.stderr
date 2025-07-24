@@ -1,10 +1,9 @@
 error: layout_of(A) = Layout {
            size: Size(1 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(1 bytes),
-               pref: Align(4 bytes),
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I8,
@@ -45,11 +44,10 @@ error: layout_of(A) = Layout {
                variants: [
                    Layout {
                        size: Size(1 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: Align(4 bytes),
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -78,11 +76,10 @@ LL | enum A { Apple }
 
 error: layout_of(B) = Layout {
            size: Size(1 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(1 bytes),
-               pref: Align(4 bytes),
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I8,
@@ -123,11 +120,10 @@ error: layout_of(B) = Layout {
                variants: [
                    Layout {
                        size: Size(1 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(1 bytes),
-                           pref: Align(4 bytes),
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -156,11 +152,10 @@ LL | enum B { Banana = 255, }
 
 error: layout_of(C) = Layout {
            size: Size(2 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(2 bytes),
-               pref: Align(4 bytes),
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I16,
@@ -201,11 +196,10 @@ error: layout_of(C) = Layout {
                variants: [
                    Layout {
                        size: Size(2 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(2 bytes),
-                           pref: Align(4 bytes),
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -234,11 +228,10 @@ LL | enum C { Chaenomeles = 256, }
 
 error: layout_of(P) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: Align(4 bytes),
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I32,
@@ -279,11 +272,10 @@ error: layout_of(P) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: Align(4 bytes),
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {
@@ -312,11 +304,10 @@ LL | enum P { Peach = 0x1000_0000isize, }
 
 error: layout_of(T) = Layout {
            size: Size(4 bytes),
-           align: AbiAndPrefAlign {
+           align: AbiAlign {
                abi: Align(4 bytes),
-               pref: Align(4 bytes),
            },
-           abi: Scalar(
+           backend_repr: Scalar(
                Initialized {
                    value: Int(
                        I32,
@@ -357,11 +348,10 @@ error: layout_of(T) = Layout {
                variants: [
                    Layout {
                        size: Size(4 bytes),
-                       align: AbiAndPrefAlign {
+                       align: AbiAlign {
                            abi: Align(4 bytes),
-                           pref: Align(4 bytes),
                        },
-                       abi: Memory {
+                       backend_repr: Memory {
                            sized: true,
                        },
                        fields: Arbitrary {

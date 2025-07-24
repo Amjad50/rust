@@ -13,5 +13,15 @@
 #![feature(no_core, lang_items)]
 #![no_core]
 
+#[lang = "pointee_sized"]
+pub trait PointeeSized {}
+
+#[lang = "meta_sized"]
+pub trait MetaSized: PointeeSized {}
+
 #[lang = "sized"]
-trait Sized {}
+pub trait Sized: MetaSized {}
+
+//[BADFLAGS]~? ERROR incorrect value `leaf` for unstable option `branch-protection`
+//[BADFLAGSPC]~? ERROR incorrect value `pc` for unstable option `branch-protection`
+//[BADTARGET]~? ERROR `-Zbranch-protection` is only supported on aarch64

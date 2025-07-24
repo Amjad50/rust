@@ -105,6 +105,10 @@ build/
       debuginfo/
       ...
 
+    # Host tools (which are always compiled with the stage0 compiler)
+    # are stored here.
+    bootstrap-tools/
+
     # Location where the stage0 Cargo and Rust compiler are unpacked. This
     # directory is purely an extracted and overlaid tarball of these two (done
     # by the bootstrap Python script). In theory, the build system does not
@@ -163,7 +167,7 @@ compiler, which will then build the bootstrap binary written in Rust.
 
 Because there are two separate codebases behind `x.py`, they need to
 be kept in sync. In particular, both `bootstrap.py` and the bootstrap binary
-parse `config.toml` and read the same command line arguments. `bootstrap.py`
+parse `bootstrap.toml` and read the same command line arguments. `bootstrap.py`
 keeps these in sync by setting various environment variables, and the
 programs sometimes have to add arguments that are explicitly ignored, to be
 read by the other.
@@ -199,6 +203,10 @@ please file issues on the [Rust issue tracker][rust-issue-tracker].
 
 [rust-bootstrap-zulip]: https://rust-lang.zulipchat.com/#narrow/stream/t-infra.2Fbootstrap
 [rust-issue-tracker]: https://github.com/rust-lang/rust/issues
+
+## Testing
+
+To run bootstrap tests, execute `x test bootstrap`. If you want to bless snapshot tests, then install `cargo-insta` (`cargo install cargo-insta`) and then run `cargo insta review --manifest-path src/bootstrap/Cargo.toml`.
 
 ## Changelog
 

@@ -17,7 +17,7 @@ fn def_path_hash_depends_on_crate_id() {
     // the crate by changing the crate disambiguator (e.g. via bumping the
     // crate's version number).
 
-    create_session_globals_then(Edition::Edition2024, None, || {
+    create_session_globals_then(Edition::Edition2024, &[], None, || {
         let id0 = StableCrateId::new(Symbol::intern("foo"), false, vec!["1".to_string()], "");
         let id1 = StableCrateId::new(Symbol::intern("foo"), false, vec!["2".to_string()], "");
 
@@ -28,7 +28,8 @@ fn def_path_hash_depends_on_crate_id() {
         assert_ne!(h0.local_hash(), h1.local_hash());
 
         fn mk_test_hash(stable_crate_id: StableCrateId) -> DefPathHash {
-            let parent_hash = DefPathHash::new(stable_crate_id, Hash64::ZERO);
+            let parent_hash =
+                DefPathHash::new(stable_crate_id, Hash64::new(stable_crate_id.as_u64()));
 
             let key = DefKey {
                 parent: None,

@@ -23,7 +23,7 @@ pub(crate) fn synthesize_blanket_impls(
     let ty = tcx.type_of(item_def_id);
 
     let mut blanket_impls = Vec::new();
-    for trait_def_id in tcx.all_traits() {
+    for trait_def_id in tcx.visible_traits() {
         if !cx.cache.effective_visibilities.is_reachable(tcx, trait_def_id)
             || cx.generated_synthetics.contains(&(ty.skip_binder(), trait_def_id))
         {
@@ -83,18 +83,14 @@ pub(crate) fn synthesize_blanket_impls(
             cx.generated_synthetics.insert((ty.skip_binder(), trait_def_id));
 
             blanket_impls.push(clean::Item {
-                name: None,
-                item_id: clean::ItemId::Blanket { impl_id: impl_def_id, for_: item_def_id },
                 inner: Box::new(clean::ItemInner {
+                    name: None,
+                    item_id: clean::ItemId::Blanket { impl_id: impl_def_id, for_: item_def_id },
                     attrs: Default::default(),
                     stability: None,
                     kind: clean::ImplItem(Box::new(clean::Impl {
                         safety: hir::Safety::Safe,
-                        generics: clean_ty_generics(
-                            cx,
-                            tcx.generics_of(impl_def_id),
-                            tcx.explicit_predicates_of(impl_def_id),
-                        ),
+                        generics: clean_ty_generics(cx, impl_def_id),
                         // FIXME(eddyb) compute both `trait_` and `for_` from
                         // the post-inference `trait_ref`, as it's more accurate.
                         trait_: Some(clean_trait_ref_with_constraints(
@@ -122,9 +118,9 @@ pub(crate) fn synthesize_blanket_impls(
                             None,
                         ))),
                     })),
+                    cfg: None,
+                    inline_stmt_id: None,
                 }),
-                cfg: None,
-                inline_stmt_id: None,
             });
         }
     }

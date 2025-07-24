@@ -6,35 +6,36 @@ use std::time::{Duration, Instant};
 use itertools::Itertools;
 use rustc_abi::FIRST_VARIANT;
 use rustc_ast as ast;
-use rustc_ast::expand::allocator::{ALLOCATOR_METHODS, AllocatorKind, global_fn_name};
-use rustc_attr_parsing::OptimizeAttr;
+use rustc_ast::expand::allocator::AllocatorKind;
+use rustc_attr_data_structures::OptimizeAttr;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_data_structures::profiling::{get_resident_set_size, print_time_passes_entry};
-use rustc_data_structures::sync::par_map;
+use rustc_data_structures::sync::{IntoDynSyncSend, par_map};
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::lang_items::LangItem;
-use rustc_metadata::EncodedMetadata;
-use rustc_middle::bug;
+use rustc_hir::{ItemId, Target};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::middle::debugger_visualizer::{DebuggerVisualizerFile, DebuggerVisualizerType};
-use rustc_middle::middle::exported_symbols::SymbolExportKind;
-use rustc_middle::middle::{exported_symbols, lang_items};
+use rustc_middle::middle::exported_symbols::{self, SymbolExportKind};
+use rustc_middle::middle::lang_items;
 use rustc_middle::mir::BinOp;
+use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::mir::mono::{CodegenUnit, CodegenUnitNameBuilder, MonoItem, MonoItemPartitions};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
 use rustc_session::Session;
-use rustc_session::config::{self, CrateType, EntryFnType, OutputType};
+use rustc_session::config::{self, CrateType, EntryFnType};
 use rustc_span::{DUMMY_SP, Symbol, sym};
+use rustc_symbol_mangling::mangle_internal_symbol;
 use rustc_trait_selection::infer::{BoundRegionConversionTime, TyCtxtInferExt};
 use rustc_trait_selection::traits::{ObligationCause, ObligationCtxt};
 use tracing::{debug, info};
 
 use crate::assert_module_sources::CguReuse;
 use crate::back::link::are_upstream_rust_objects_already_included;
-use crate::back::metadata::create_compressed_metadata_file;
 use crate::back::write::{
     ComputedLtoType, OngoingCodegen, compute_per_cgu_lto_type, start_async_codegen,
     submit_codegened_module_to_llvm, submit_post_lto_module_to_llvm, submit_pre_lto_module_to_llvm,
@@ -45,8 +46,7 @@ use crate::mir::operand::OperandValue;
 use crate::mir::place::PlaceRef;
 use crate::traits::*;
 use crate::{
-    CachedModuleCodegen, CodegenLintLevels, CompiledModule, CrateInfo, ModuleCodegen, ModuleKind,
-    errors, meth, mir,
+    CachedModuleCodegen, CodegenLintLevels, CrateInfo, ModuleCodegen, ModuleKind, errors, meth, mir,
 };
 
 pub(crate) fn bin_op_to_icmp_predicate(op: BinOp, signed: bool) -> IntPredicate {
@@ -200,7 +200,7 @@ fn unsized_info<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
             let vptr_entry_idx = cx.tcx().supertrait_vtable_slot((source, target));
 
             if let Some(entry_idx) = vptr_entry_idx {
-                let ptr_size = bx.data_layout().pointer_size;
+                let ptr_size = bx.data_layout().pointer_size();
                 let vtable_byte_offset = u64::try_from(entry_idx).unwrap() * ptr_size.bytes();
                 load_vtable(bx, old_info, bx.type_ptr(), vtable_byte_offset, source, true)
             } else {
@@ -260,28 +260,6 @@ pub(crate) fn unsize_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         }
         _ => bug!("unsize_ptr: called on bad types"),
     }
-}
-
-/// Coerces `src` to `dst_ty` which is guaranteed to be a `dyn*` type.
-pub(crate) fn cast_to_dyn_star<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
-    bx: &mut Bx,
-    src: Bx::Value,
-    src_ty_and_layout: TyAndLayout<'tcx>,
-    dst_ty: Ty<'tcx>,
-    old_info: Option<Bx::Value>,
-) -> (Bx::Value, Bx::Value) {
-    debug!("cast_to_dyn_star: {:?} => {:?}", src_ty_and_layout.ty, dst_ty);
-    assert!(
-        matches!(dst_ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
-        "destination type must be a dyn*"
-    );
-    let src = match bx.cx().type_kind(bx.cx().backend_type(src_ty_and_layout)) {
-        TypeKind::Pointer => src,
-        TypeKind::Integer => bx.inttoptr(src, bx.type_ptr()),
-        // FIXME(dyn-star): We probably have to do a bitcast first, then inttoptr.
-        kind => bug!("unexpected TypeKind for left-hand side of `dyn*` cast: {kind:?}"),
-    };
-    (src, unsized_info(bx, src_ty_and_layout.ty, dst_ty, old_info))
 }
 
 /// Coerces `src`, which is a reference to a value of type `src_ty`,
@@ -416,10 +394,80 @@ pub(crate) fn codegen_instance<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
     mir::codegen_mir::<Bx>(cx, instance);
 }
 
+pub fn codegen_global_asm<'tcx, Cx>(cx: &mut Cx, item_id: ItemId)
+where
+    Cx: LayoutOf<'tcx, LayoutOfResult = TyAndLayout<'tcx>> + AsmCodegenMethods<'tcx>,
+{
+    let item = cx.tcx().hir_item(item_id);
+    if let rustc_hir::ItemKind::GlobalAsm { asm, .. } = item.kind {
+        let operands: Vec<_> = asm
+            .operands
+            .iter()
+            .map(|(op, op_sp)| match *op {
+                rustc_hir::InlineAsmOperand::Const { ref anon_const } => {
+                    match cx.tcx().const_eval_poly(anon_const.def_id.to_def_id()) {
+                        Ok(const_value) => {
+                            let ty =
+                                cx.tcx().typeck_body(anon_const.body).node_type(anon_const.hir_id);
+                            let string = common::asm_const_to_str(
+                                cx.tcx(),
+                                *op_sp,
+                                const_value,
+                                cx.layout_of(ty),
+                            );
+                            GlobalAsmOperandRef::Const { string }
+                        }
+                        Err(ErrorHandled::Reported { .. }) => {
+                            // An error has already been reported and
+                            // compilation is guaranteed to fail if execution
+                            // hits this path. So an empty string instead of
+                            // a stringified constant value will suffice.
+                            GlobalAsmOperandRef::Const { string: String::new() }
+                        }
+                        Err(ErrorHandled::TooGeneric(_)) => {
+                            span_bug!(*op_sp, "asm const cannot be resolved; too generic")
+                        }
+                    }
+                }
+                rustc_hir::InlineAsmOperand::SymFn { expr } => {
+                    let ty = cx.tcx().typeck(item_id.owner_id).expr_ty(expr);
+                    let instance = match ty.kind() {
+                        &ty::FnDef(def_id, args) => Instance::expect_resolve(
+                            cx.tcx(),
+                            ty::TypingEnv::fully_monomorphized(),
+                            def_id,
+                            args,
+                            expr.span,
+                        ),
+                        _ => span_bug!(*op_sp, "asm sym is not a function"),
+                    };
+
+                    GlobalAsmOperandRef::SymFn { instance }
+                }
+                rustc_hir::InlineAsmOperand::SymStatic { path: _, def_id } => {
+                    GlobalAsmOperandRef::SymStatic { def_id }
+                }
+                rustc_hir::InlineAsmOperand::In { .. }
+                | rustc_hir::InlineAsmOperand::Out { .. }
+                | rustc_hir::InlineAsmOperand::InOut { .. }
+                | rustc_hir::InlineAsmOperand::SplitInOut { .. }
+                | rustc_hir::InlineAsmOperand::Label { .. } => {
+                    span_bug!(*op_sp, "invalid operand type for global_asm!")
+                }
+            })
+            .collect();
+
+        cx.codegen_global_asm(asm.template, &operands, asm.options, asm.line_spans);
+    } else {
+        span_bug!(item.span, "Mismatch between hir::Item type and MonoItem type")
+    }
+}
+
 /// Creates the `main` function which will initialize the rust runtime and call
 /// users main function.
 pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     cx: &'a Bx::CodegenCx,
+    cgu: &CodegenUnit<'tcx>,
 ) -> Option<Bx::Function> {
     let (main_def_id, entry_type) = cx.tcx().entry_fn(())?;
     let main_is_local = main_def_id.is_local();
@@ -428,10 +476,10 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     if main_is_local {
         // We want to create the wrapper in the same codegen unit as Rust's main
         // function.
-        if !cx.codegen_unit().contains_item(&MonoItem::Fn(instance)) {
+        if !cgu.contains_item(&MonoItem::Fn(instance)) {
             return None;
         }
-    } else if !cx.codegen_unit().is_primary() {
+    } else if !cgu.is_primary() {
         // We want to create the wrapper only when the codegen unit is the primary one
         return None;
     }
@@ -488,7 +536,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
         let EntryFnType::Main { sigpipe } = entry_type;
         let (start_fn, start_ty, args, instance) = {
-            let start_def_id = cx.tcx().require_lang_item(LangItem::Start, None);
+            let start_def_id = cx.tcx().require_lang_item(LangItem::Start, DUMMY_SP);
             let start_instance = ty::Instance::expect_resolve(
                 cx.tcx(),
                 cx.typing_env(),
@@ -529,8 +577,8 @@ fn get_argc_argv<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(bx: &mut Bx) -> (Bx::Va
         // Params for UEFI
         let param_handle = bx.get_param(0);
         let param_system_table = bx.get_param(1);
-        let ptr_size = bx.tcx().data_layout.pointer_size;
-        let ptr_align = bx.tcx().data_layout.pointer_align.abi;
+        let ptr_size = bx.tcx().data_layout.pointer_size();
+        let ptr_align = bx.tcx().data_layout.pointer_align().abi;
         let arg_argc = bx.const_int(bx.cx().type_isize(), 2);
         let arg_argv = bx.alloca(2 * ptr_size, ptr_align);
         bx.store(param_handle, arg_argv, ptr_align);
@@ -596,12 +644,10 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
     target_cpu: String,
-    metadata: EncodedMetadata,
-    need_metadata_module: bool,
 ) -> OngoingCodegen<B> {
     // Skip crate items and just output metadata in -Z no-codegen mode.
     if tcx.sess.opts.unstable_opts.no_codegen || !tcx.sess.opts.output_types.should_codegen() {
-        let ongoing_codegen = start_async_codegen(backend, tcx, target_cpu, metadata, None);
+        let ongoing_codegen = start_async_codegen(backend, tcx, target_cpu, &[]);
 
         ongoing_codegen.codegen_finished(tcx);
 
@@ -621,7 +667,6 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
     // codegen units.
     let MonoItemPartitions { codegen_units, autodiff_items, .. } =
         tcx.collect_and_partition_mono_items(());
-    let autodiff_fncs = autodiff_items.to_vec();
 
     // Force all codegen_unit queries so they are already either red or green
     // when compile_codegen_unit accesses them. We are not able to re-execute
@@ -634,35 +679,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         }
     }
 
-    let metadata_module = need_metadata_module.then(|| {
-        // Emit compressed metadata object.
-        let metadata_cgu_name =
-            cgu_name_builder.build_cgu_name(LOCAL_CRATE, &["crate"], Some("metadata")).to_string();
-        tcx.sess.time("write_compressed_metadata", || {
-            let file_name =
-                tcx.output_filenames(()).temp_path(OutputType::Metadata, Some(&metadata_cgu_name));
-            let data = create_compressed_metadata_file(
-                tcx.sess,
-                &metadata,
-                &exported_symbols::metadata_symbol_name(tcx),
-            );
-            if let Err(error) = std::fs::write(&file_name, data) {
-                tcx.dcx().emit_fatal(errors::MetadataObjectFileWrite { error });
-            }
-            CompiledModule {
-                name: metadata_cgu_name,
-                kind: ModuleKind::Metadata,
-                object: Some(file_name),
-                dwarf_object: None,
-                bytecode: None,
-                assembly: None,
-                llvm_ir: None,
-            }
-        })
-    });
-
-    let ongoing_codegen =
-        start_async_codegen(backend.clone(), tcx, target_cpu, metadata, metadata_module);
+    let ongoing_codegen = start_async_codegen(backend.clone(), tcx, target_cpu, autodiff_items);
 
     // Codegen an allocator shim, if necessary.
     if let Some(kind) = allocator_kind_for_codegen(tcx) {
@@ -690,10 +707,6 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
             ModuleCodegen::new_allocator(llmod_id, module_llvm),
             cost,
         );
-    }
-
-    if !autodiff_fncs.is_empty() {
-        ongoing_codegen.submit_autodiff_items(autodiff_fncs);
     }
 
     // For better throughput during parallel processing by LLVM, we used to sort
@@ -755,7 +768,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
 
             let pre_compiled_cgus = par_map(cgus, |(i, _)| {
                 let module = backend.compile_codegen_unit(tcx, codegen_units[i].name());
-                (i, module)
+                (i, IntoDynSyncSend(module))
             });
 
             total_codegen_time += start_time.elapsed();
@@ -775,7 +788,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         match cgu_reuse {
             CguReuse::No => {
                 let (module, cost) = if let Some(cgu) = pre_compiled_cgus.remove(&i) {
-                    cgu
+                    cgu.0
                 } else {
                     let start_time = Instant::now();
                     let module = backend.compile_codegen_unit(tcx, cgu.name());
@@ -876,7 +889,7 @@ impl CrateInfo {
         let linked_symbols =
             crate_types.iter().map(|&c| (c, crate::back::linker::linked_symbols(tcx, c))).collect();
         let local_crate_name = tcx.crate_name(LOCAL_CRATE);
-        let crate_attrs = tcx.hir().attrs(rustc_hir::CRATE_HIR_ID);
+        let crate_attrs = tcx.hir_attrs(rustc_hir::CRATE_HIR_ID);
         let subsystem =
             ast::attr::first_attr_value_str_by_name(crate_attrs, sym::windows_subsystem);
         let windows_subsystem = subsystem.map(|subsystem| {
@@ -933,6 +946,7 @@ impl CrateInfo {
             windows_subsystem,
             natvis_debugger_visualizers: Default::default(),
             lint_levels: CodegenLintLevels::from_tcx(tcx),
+            metadata_symbol: exported_symbols::metadata_symbol_name(tcx),
         };
 
         info.native_libraries.reserve(n_crates);
@@ -962,21 +976,35 @@ impl CrateInfo {
         // by the compiler, but that's ok because all this stuff is unstable anyway.
         let target = &tcx.sess.target;
         if !are_upstream_rust_objects_already_included(tcx.sess) {
-            let missing_weak_lang_items: FxIndexSet<Symbol> = info
+            let add_prefix = match (target.is_like_windows, target.arch.as_ref()) {
+                (true, "x86") => |name: String, _: SymbolExportKind| format!("_{name}"),
+                (true, "arm64ec") => {
+                    // Only functions are decorated for arm64ec.
+                    |name: String, export_kind: SymbolExportKind| match export_kind {
+                        SymbolExportKind::Text => format!("#{name}"),
+                        _ => name,
+                    }
+                }
+                _ => |name: String, _: SymbolExportKind| name,
+            };
+            let missing_weak_lang_items: FxIndexSet<(Symbol, SymbolExportKind)> = info
                 .used_crates
                 .iter()
                 .flat_map(|&cnum| tcx.missing_lang_items(cnum))
                 .filter(|l| l.is_weak())
                 .filter_map(|&l| {
                     let name = l.link_name()?;
-                    lang_items::required(tcx, l).then_some(name)
+                    let export_kind = match l.target() {
+                        Target::Fn => SymbolExportKind::Text,
+                        Target::Static => SymbolExportKind::Data,
+                        _ => bug!(
+                            "Don't know what the export kind is for lang item of kind {:?}",
+                            l.target()
+                        ),
+                    };
+                    lang_items::required(tcx, l).then_some((name, export_kind))
                 })
                 .collect();
-            let prefix = match (target.is_like_windows, target.arch.as_ref()) {
-                (true, "x86") => "_",
-                (true, "arm64ec") => "#",
-                _ => "",
-            };
 
             // This loop only adds new items to values of the hash map, so the order in which we
             // iterate over the values is not important.
@@ -989,29 +1017,23 @@ impl CrateInfo {
                 .for_each(|(_, linked_symbols)| {
                     let mut symbols = missing_weak_lang_items
                         .iter()
-                        .map(|item| (format!("{prefix}{item}"), SymbolExportKind::Text))
+                        .map(|(item, export_kind)| {
+                            (
+                                add_prefix(
+                                    mangle_internal_symbol(tcx, item.as_str()),
+                                    *export_kind,
+                                ),
+                                *export_kind,
+                            )
+                        })
                         .collect::<Vec<_>>();
                     symbols.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                     linked_symbols.extend(symbols);
-                    if tcx.allocator_kind(()).is_some() {
-                        // At least one crate needs a global allocator. This crate may be placed
-                        // after the crate that defines it in the linker order, in which case some
-                        // linkers return an error. By adding the global allocator shim methods to
-                        // the linked_symbols list, linking the generated symbols.o will ensure that
-                        // circular dependencies involving the global allocator don't lead to linker
-                        // errors.
-                        linked_symbols.extend(ALLOCATOR_METHODS.iter().map(|method| {
-                            (
-                                format!("{prefix}{}", global_fn_name(method.name).as_str()),
-                                SymbolExportKind::Text,
-                            )
-                        }));
-                    }
                 });
         }
 
         let embed_visualizers = tcx.crate_types().iter().any(|&crate_type| match crate_type {
-            CrateType::Executable | CrateType::Dylib | CrateType::Cdylib => {
+            CrateType::Executable | CrateType::Dylib | CrateType::Cdylib | CrateType::Sdylib => {
                 // These are crate types for which we invoke the linker and can embed
                 // NatVis visualizers.
                 true
@@ -1092,11 +1114,12 @@ pub fn determine_cgu_reuse<'tcx>(tcx: TyCtxt<'tcx>, cgu: &CodegenUnit<'tcx>) -> 
     // know that later). If we are not doing LTO, there is only one optimized
     // version of each module, so we re-use that.
     let dep_node = cgu.codegen_dep_node(tcx);
-    assert!(
-        !tcx.dep_graph.dep_node_exists(&dep_node),
-        "CompileCodegenUnit dep-node for CGU `{}` already exists before marking.",
-        cgu.name()
-    );
+    tcx.dep_graph.assert_dep_node_not_yet_allocated_in_current_session(&dep_node, || {
+        format!(
+            "CompileCodegenUnit dep-node for CGU `{}` already exists before marking.",
+            cgu.name()
+        )
+    });
 
     if tcx.try_mark_green(&dep_node) {
         // We can re-use either the pre- or the post-thinlto state. If no LTO is

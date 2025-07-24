@@ -2,13 +2,17 @@
 
 use crate::helpers::mod_path_to_ast;
 use either::Either;
-use hir::{AsAssocItem, HirDisplay, ImportPathConfig, ModuleDef, SemanticsScope};
+use hir::{
+    AsAssocItem, HirDisplay, HirFileId, ImportPathConfig, ModuleDef, SemanticsScope,
+    prettify_macro_expansion,
+};
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use span::Edition;
 use syntax::{
-    ast::{self, make, AstNode, HasGenericArgs},
-    ted, NodeOrToken, SyntaxNode,
+    NodeOrToken, SyntaxNode,
+    ast::{self, AstNode, HasGenericArgs, make},
+    ted,
 };
 
 #[derive(Default)]
@@ -135,6 +139,25 @@ impl<'a> PathTransform<'a> {
         }
     }
 
+    fn prettify_target_node(&self, node: SyntaxNode) -> SyntaxNode {
+        match self.target_scope.file_id() {
+            HirFileId::FileId(_) => node,
+            HirFileId::MacroFile(file_id) => {
+                let db = self.target_scope.db;
+                prettify_macro_expansion(
+                    db,
+                    node,
+                    &db.expansion_span_map(file_id),
+                    self.target_scope.module().krate().into(),
+                )
+            }
+        }
+    }
+
+    fn prettify_target_ast<N: AstNode>(&self, node: N) -> N {
+        N::cast(self.prettify_target_node(node.syntax().clone())).unwrap()
+    }
+
     fn build_ctx(&self) -> Ctx<'a> {
         let db = self.source_scope.db;
         let target_module = self.target_scope.module();
@@ -162,7 +185,7 @@ impl<'a> PathTransform<'a> {
             .for_each(|(k, v)| match (k.split(db), v) {
                 (Either::Right(k), Some(TypeOrConst::Either(v))) => {
                     if let Some(ty) = v.ty() {
-                        type_substs.insert(k, ty);
+                        type_substs.insert(k, self.prettify_target_ast(ty));
                     }
                 }
                 (Either::Right(k), None) => {
@@ -177,7 +200,7 @@ impl<'a> PathTransform<'a> {
                 }
                 (Either::Left(k), Some(TypeOrConst::Either(v))) => {
                     if let Some(ty) = v.ty() {
-                        const_substs.insert(k, ty.syntax().clone());
+                        const_substs.insert(k, self.prettify_target_node(ty.syntax().clone()));
                     }
                 }
                 (Either::Left(k), Some(TypeOrConst::Const(v))) => {
@@ -188,11 +211,13 @@ impl<'a> PathTransform<'a> {
                         // and sometimes require slight modifications; see
                         // https://doc.rust-lang.org/reference/statements.html#expression-statements
                         // (default values in curly brackets can cause the same problem)
-                        const_substs.insert(k, expr.syntax().clone());
+                        const_substs.insert(k, self.prettify_target_node(expr.syntax().clone()));
                     }
                 }
                 (Either::Left(k), None) => {
-                    if let Some(default) = k.default(db, target_edition) {
+                    if let Some(default) =
+                        k.default(db, target_module.krate().to_display_target(db))
+                    {
                         if let Some(default) = default.expr() {
                             const_substs.insert(k, default.syntax().clone_for_update());
                             defaulted_params.push(Either::Right(k));
@@ -201,13 +226,14 @@ impl<'a> PathTransform<'a> {
                 }
                 _ => (), // ignore mismatching params
             });
+        // No need to prettify lifetimes, there's nothing to prettify.
         let lifetime_substs: FxHashMap<_, _> = self
             .generic_def
             .into_iter()
             .flat_map(|it| it.lifetime_params(db))
             .zip(self.substs.lifetimes.clone())
             .filter_map(|(k, v)| {
-                Some((k.name(db).display(db.upcast(), target_edition).to_string(), v.lifetime()?))
+                Some((k.name(db).display(db, target_edition).to_string(), v.lifetime()?))
             })
             .collect();
         let ctx = Ctx {
@@ -322,7 +348,7 @@ impl Ctx<'_> {
                                 allow_unstable: true,
                             };
                             let found_path = self.target_module.find_path(
-                                self.source_scope.db.upcast(),
+                                self.source_scope.db,
                                 hir::ModuleDef::Trait(trait_ref),
                                 cfg,
                             )?;
@@ -381,8 +407,7 @@ impl Ctx<'_> {
                     prefer_absolute: false,
                     allow_unstable: true,
                 };
-                let found_path =
-                    self.target_module.find_path(self.source_scope.db.upcast(), def, cfg)?;
+                let found_path = self.target_module.find_path(self.source_scope.db, def, cfg)?;
                 let res = mod_path_to_ast(&found_path, self.target_edition).clone_for_update();
                 if let Some(args) = path.segment().and_then(|it| it.generic_arg_list()) {
                     if let Some(segment) = res.segment() {
@@ -422,7 +447,7 @@ impl Ctx<'_> {
                             allow_unstable: true,
                         };
                         let found_path = self.target_module.find_path(
-                            self.source_scope.db.upcast(),
+                            self.source_scope.db,
                             ModuleDef::from(adt),
                             cfg,
                         )?;

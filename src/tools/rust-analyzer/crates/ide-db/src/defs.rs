@@ -5,24 +5,25 @@
 
 // FIXME: this badly needs rename/rewrite (matklad, 2020-02-06).
 
-use crate::documentation::{Documentation, HasDocs};
-use crate::famous_defs::FamousDefs;
 use crate::RootDatabase;
+use crate::documentation::{DocsRangeMap, Documentation, HasDocs};
+use crate::famous_defs::FamousDefs;
 use arrayvec::ArrayVec;
 use either::Either;
 use hir::{
     Adt, AsAssocItem, AsExternAssocItem, AssocItem, AttributeTemplate, BuiltinAttr, BuiltinType,
-    Const, Crate, DefWithBody, DeriveHelper, DocLinkDef, ExternAssocItem, ExternCrateDecl, Field,
-    Function, GenericDef, GenericParam, GenericSubstitution, HasContainer, HasVisibility,
-    HirDisplay, Impl, InlineAsmOperand, ItemContainer, Label, Local, Macro, Module, ModuleDef,
-    Name, PathResolution, Semantics, Static, StaticLifetime, Struct, ToolModule, Trait, TraitAlias,
-    TupleField, TypeAlias, Variant, VariantDef, Visibility,
+    Const, Crate, DefWithBody, DeriveHelper, DisplayTarget, DocLinkDef, ExternAssocItem,
+    ExternCrateDecl, Field, Function, GenericDef, GenericParam, GenericSubstitution, HasContainer,
+    HasVisibility, HirDisplay, Impl, InlineAsmOperand, ItemContainer, Label, Local, Macro, Module,
+    ModuleDef, Name, PathResolution, Semantics, Static, StaticLifetime, Struct, ToolModule, Trait,
+    TraitAlias, TupleField, TypeAlias, Variant, VariantDef, Visibility,
 };
 use span::Edition;
 use stdx::{format_to, impl_from};
 use syntax::{
+    SyntaxKind, SyntaxNode, SyntaxToken, TextSize,
     ast::{self, AstNode},
-    match_ast, SyntaxKind, SyntaxNode, SyntaxToken,
+    match_ast,
 };
 
 // FIXME: a more precise name would probably be `Symbol`?
@@ -207,69 +208,87 @@ impl Definition {
         &self,
         db: &RootDatabase,
         famous_defs: Option<&FamousDefs<'_, '_>>,
-        edition: Edition,
+        display_target: DisplayTarget,
     ) -> Option<Documentation> {
+        self.docs_with_rangemap(db, famous_defs, display_target).map(|(docs, _)| docs)
+    }
+
+    pub fn docs_with_rangemap(
+        &self,
+        db: &RootDatabase,
+        famous_defs: Option<&FamousDefs<'_, '_>>,
+        display_target: DisplayTarget,
+    ) -> Option<(Documentation, Option<DocsRangeMap>)> {
         let docs = match self {
-            Definition::Macro(it) => it.docs(db),
-            Definition::Field(it) => it.docs(db),
-            Definition::Module(it) => it.docs(db),
-            Definition::Crate(it) => it.docs(db),
-            Definition::Function(it) => it.docs(db),
-            Definition::Adt(it) => it.docs(db),
-            Definition::Variant(it) => it.docs(db),
-            Definition::Const(it) => it.docs(db),
-            Definition::Static(it) => it.docs(db),
-            Definition::Trait(it) => it.docs(db),
-            Definition::TraitAlias(it) => it.docs(db),
+            Definition::Macro(it) => it.docs_with_rangemap(db),
+            Definition::Field(it) => it.docs_with_rangemap(db),
+            Definition::Module(it) => it.docs_with_rangemap(db),
+            Definition::Crate(it) => it.docs_with_rangemap(db),
+            Definition::Function(it) => it.docs_with_rangemap(db),
+            Definition::Adt(it) => it.docs_with_rangemap(db),
+            Definition::Variant(it) => it.docs_with_rangemap(db),
+            Definition::Const(it) => it.docs_with_rangemap(db),
+            Definition::Static(it) => it.docs_with_rangemap(db),
+            Definition::Trait(it) => it.docs_with_rangemap(db),
+            Definition::TraitAlias(it) => it.docs_with_rangemap(db),
             Definition::TypeAlias(it) => {
-                it.docs(db).or_else(|| {
+                it.docs_with_rangemap(db).or_else(|| {
                     // docs are missing, try to fall back to the docs of the aliased item.
                     let adt = it.ty(db).as_adt()?;
-                    let docs = adt.docs(db)?;
-                    let docs = format!(
-                        "*This is the documentation for* `{}`\n\n{}",
-                        adt.display(db, edition),
-                        docs.as_str()
+                    let (docs, range_map) = adt.docs_with_rangemap(db)?;
+                    let header_docs = format!(
+                        "*This is the documentation for* `{}`\n\n",
+                        adt.display(db, display_target)
                     );
-                    Some(Documentation::new(docs))
+                    let offset = TextSize::new(header_docs.len() as u32);
+                    let range_map = range_map.shift_docstring_line_range(offset);
+                    let docs = header_docs + docs.as_str();
+                    Some((Documentation::new(docs), range_map))
                 })
             }
             Definition::BuiltinType(it) => {
                 famous_defs.and_then(|fd| {
                     // std exposes prim_{} modules with docstrings on the root to document the builtins
-                    let primitive_mod = format!("prim_{}", it.name().display(fd.0.db, edition));
-                    let doc_owner = find_std_module(fd, &primitive_mod, edition)?;
-                    doc_owner.docs(fd.0.db)
+                    let primitive_mod =
+                        format!("prim_{}", it.name().display(fd.0.db, display_target.edition));
+                    let doc_owner = find_std_module(fd, &primitive_mod, display_target.edition)?;
+                    doc_owner.docs_with_rangemap(fd.0.db)
                 })
             }
             Definition::BuiltinLifetime(StaticLifetime) => None,
             Definition::Local(_) => None,
             Definition::SelfType(impl_def) => {
-                impl_def.self_ty(db).as_adt().map(|adt| adt.docs(db))?
+                impl_def.self_ty(db).as_adt().map(|adt| adt.docs_with_rangemap(db))?
             }
             Definition::GenericParam(_) => None,
             Definition::Label(_) => None,
-            Definition::ExternCrateDecl(it) => it.docs(db),
+            Definition::ExternCrateDecl(it) => it.docs_with_rangemap(db),
 
             Definition::BuiltinAttr(it) => {
                 let name = it.name(db);
                 let AttributeTemplate { word, list, name_value_str } = it.template(db)?;
                 let mut docs = "Valid forms are:".to_owned();
                 if word {
-                    format_to!(docs, "\n - #\\[{}]", name.display(db, edition));
+                    format_to!(docs, "\n - #\\[{}]", name.display(db, display_target.edition));
                 }
                 if let Some(list) = list {
-                    format_to!(docs, "\n - #\\[{}({})]", name.display(db, edition), list);
+                    format_to!(
+                        docs,
+                        "\n - #\\[{}({})]",
+                        name.display(db, display_target.edition),
+                        list
+                    );
                 }
                 if let Some(name_value_str) = name_value_str {
                     format_to!(
                         docs,
                         "\n - #\\[{} = {}]",
-                        name.display(db, edition),
+                        name.display(db, display_target.edition),
                         name_value_str
                     );
                 }
-                Some(Documentation::new(docs.replace('*', "\\*")))
+
+                return Some((Documentation::new(docs.replace('*', "\\*")), None));
             }
             Definition::ToolModule(_) => None,
             Definition::DeriveHelper(_) => None,
@@ -284,53 +303,65 @@ impl Definition {
             let trait_ = assoc.implemented_trait(db)?;
             let name = Some(assoc.name(db)?);
             let item = trait_.items(db).into_iter().find(|it| it.name(db) == name)?;
-            item.docs(db)
+            item.docs_with_rangemap(db)
         })
+        .map(|(docs, range_map)| (docs, Some(range_map)))
     }
 
-    pub fn label(&self, db: &RootDatabase, edition: Edition) -> String {
+    pub fn label(&self, db: &RootDatabase, display_target: DisplayTarget) -> String {
         match *self {
-            Definition::Macro(it) => it.display(db, edition).to_string(),
-            Definition::Field(it) => it.display(db, edition).to_string(),
-            Definition::TupleField(it) => it.display(db, edition).to_string(),
-            Definition::Module(it) => it.display(db, edition).to_string(),
-            Definition::Crate(it) => it.display(db, edition).to_string(),
-            Definition::Function(it) => it.display(db, edition).to_string(),
-            Definition::Adt(it) => it.display(db, edition).to_string(),
-            Definition::Variant(it) => it.display(db, edition).to_string(),
-            Definition::Const(it) => it.display(db, edition).to_string(),
-            Definition::Static(it) => it.display(db, edition).to_string(),
-            Definition::Trait(it) => it.display(db, edition).to_string(),
-            Definition::TraitAlias(it) => it.display(db, edition).to_string(),
-            Definition::TypeAlias(it) => it.display(db, edition).to_string(),
-            Definition::BuiltinType(it) => it.name().display(db, edition).to_string(),
-            Definition::BuiltinLifetime(it) => it.name().display(db, edition).to_string(),
+            Definition::Macro(it) => it.display(db, display_target).to_string(),
+            Definition::Field(it) => it.display(db, display_target).to_string(),
+            Definition::TupleField(it) => it.display(db, display_target).to_string(),
+            Definition::Module(it) => it.display(db, display_target).to_string(),
+            Definition::Crate(it) => it.display(db, display_target).to_string(),
+            Definition::Function(it) => it.display(db, display_target).to_string(),
+            Definition::Adt(it) => it.display(db, display_target).to_string(),
+            Definition::Variant(it) => it.display(db, display_target).to_string(),
+            Definition::Const(it) => it.display(db, display_target).to_string(),
+            Definition::Static(it) => it.display(db, display_target).to_string(),
+            Definition::Trait(it) => it.display(db, display_target).to_string(),
+            Definition::TraitAlias(it) => it.display(db, display_target).to_string(),
+            Definition::TypeAlias(it) => it.display(db, display_target).to_string(),
+            Definition::BuiltinType(it) => {
+                it.name().display(db, display_target.edition).to_string()
+            }
+            Definition::BuiltinLifetime(it) => {
+                it.name().display(db, display_target.edition).to_string()
+            }
             Definition::Local(it) => {
                 let ty = it.ty(db);
-                let ty_display = ty.display_truncated(db, None, edition);
+                let ty_display = ty.display_truncated(db, None, display_target);
                 let is_mut = if it.is_mut(db) { "mut " } else { "" };
                 if it.is_self(db) {
                     format!("{is_mut}self: {ty_display}")
                 } else {
                     let name = it.name(db);
                     let let_kw = if it.is_param(db) { "" } else { "let " };
-                    format!("{let_kw}{is_mut}{}: {ty_display}", name.display(db, edition))
+                    format!(
+                        "{let_kw}{is_mut}{}: {ty_display}",
+                        name.display(db, display_target.edition)
+                    )
                 }
             }
             Definition::SelfType(impl_def) => {
                 let self_ty = &impl_def.self_ty(db);
                 match self_ty.as_adt() {
-                    Some(it) => it.display(db, edition).to_string(),
-                    None => self_ty.display(db, edition).to_string(),
+                    Some(it) => it.display(db, display_target).to_string(),
+                    None => self_ty.display(db, display_target).to_string(),
                 }
             }
-            Definition::GenericParam(it) => it.display(db, edition).to_string(),
-            Definition::Label(it) => it.name(db).display(db, edition).to_string(),
-            Definition::ExternCrateDecl(it) => it.display(db, edition).to_string(),
-            Definition::BuiltinAttr(it) => format!("#[{}]", it.name(db).display(db, edition)),
-            Definition::ToolModule(it) => it.name(db).display(db, edition).to_string(),
+            Definition::GenericParam(it) => it.display(db, display_target).to_string(),
+            Definition::Label(it) => it.name(db).display(db, display_target.edition).to_string(),
+            Definition::ExternCrateDecl(it) => it.display(db, display_target).to_string(),
+            Definition::BuiltinAttr(it) => {
+                format!("#[{}]", it.name(db).display(db, display_target.edition))
+            }
+            Definition::ToolModule(it) => {
+                it.name(db).display(db, display_target.edition).to_string()
+            }
             Definition::DeriveHelper(it) => {
-                format!("derive_helper {}", it.name(db).display(db, edition))
+                format!("derive_helper {}", it.name(db).display(db, display_target.edition))
             }
             // FIXME
             Definition::InlineAsmRegOrRegClass(_) => "inline_asm_reg_or_reg_class".to_owned(),
@@ -354,17 +385,17 @@ fn find_std_module(
 
 // FIXME: IdentClass as a name no longer fits
 #[derive(Debug)]
-pub enum IdentClass {
-    NameClass(NameClass),
-    NameRefClass(NameRefClass),
+pub enum IdentClass<'db> {
+    NameClass(NameClass<'db>),
+    NameRefClass(NameRefClass<'db>),
     Operator(OperatorClass),
 }
 
-impl IdentClass {
+impl<'db> IdentClass<'db> {
     pub fn classify_node(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         node: &SyntaxNode,
-    ) -> Option<IdentClass> {
+    ) -> Option<IdentClass<'db>> {
         match_ast! {
             match node {
                 ast::Name(name) => NameClass::classify(sema, &name).map(IdentClass::NameClass),
@@ -387,23 +418,23 @@ impl IdentClass {
     }
 
     pub fn classify_token(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         token: &SyntaxToken,
-    ) -> Option<IdentClass> {
+    ) -> Option<IdentClass<'db>> {
         let parent = token.parent()?;
         Self::classify_node(sema, &parent)
     }
 
     pub fn classify_lifetime(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         lifetime: &ast::Lifetime,
-    ) -> Option<IdentClass> {
+    ) -> Option<IdentClass<'db>> {
         NameRefClass::classify_lifetime(sema, lifetime)
             .map(IdentClass::NameRefClass)
             .or_else(|| NameClass::classify_lifetime(sema, lifetime).map(IdentClass::NameClass))
     }
 
-    pub fn definitions(self) -> ArrayVec<(Definition, Option<GenericSubstitution>), 2> {
+    pub fn definitions(self) -> ArrayVec<(Definition, Option<GenericSubstitution<'db>>), 2> {
         let mut res = ArrayVec::new();
         match self {
             IdentClass::NameClass(NameClass::Definition(it) | NameClass::ConstReference(it)) => {
@@ -487,7 +518,7 @@ impl IdentClass {
 ///
 /// A model special case is `None` constant in pattern.
 #[derive(Debug)]
-pub enum NameClass {
+pub enum NameClass<'db> {
     Definition(Definition),
     /// `None` in `if let None = Some(82) {}`.
     /// Syntactically, it is a name, but semantically it is a reference.
@@ -497,11 +528,11 @@ pub enum NameClass {
     PatFieldShorthand {
         local_def: Local,
         field_ref: Field,
-        adt_subst: GenericSubstitution,
+        adt_subst: GenericSubstitution<'db>,
     },
 }
 
-impl NameClass {
+impl<'db> NameClass<'db> {
     /// `Definition` defined by this name.
     pub fn defined(self) -> Option<Definition> {
         let res = match self {
@@ -514,7 +545,10 @@ impl NameClass {
         Some(res)
     }
 
-    pub fn classify(sema: &Semantics<'_, RootDatabase>, name: &ast::Name) -> Option<NameClass> {
+    pub fn classify(
+        sema: &Semantics<'db, RootDatabase>,
+        name: &ast::Name,
+    ) -> Option<NameClass<'db>> {
         let _p = tracing::info_span!("NameClass::classify").entered();
 
         let parent = name.syntax().parent()?;
@@ -566,10 +600,10 @@ impl NameClass {
             Some(definition)
         }
 
-        fn classify_ident_pat(
-            sema: &Semantics<'_, RootDatabase>,
+        fn classify_ident_pat<'db>(
+            sema: &Semantics<'db, RootDatabase>,
             ident_pat: ast::IdentPat,
-        ) -> Option<NameClass> {
+        ) -> Option<NameClass<'db>> {
             if let Some(def) = sema.resolve_bind_pat_to_const(&ident_pat) {
                 return Some(NameClass::ConstReference(Definition::from(def)));
             }
@@ -607,9 +641,9 @@ impl NameClass {
     }
 
     pub fn classify_lifetime(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         lifetime: &ast::Lifetime,
-    ) -> Option<NameClass> {
+    ) -> Option<NameClass<'db>> {
         let _p = tracing::info_span!("NameClass::classify_lifetime", ?lifetime).entered();
         let parent = lifetime.syntax().parent()?;
 
@@ -692,12 +726,12 @@ impl OperatorClass {
 /// A model special case is field shorthand syntax, which uses a single
 /// reference to point to two different defs.
 #[derive(Debug)]
-pub enum NameRefClass {
-    Definition(Definition, Option<GenericSubstitution>),
+pub enum NameRefClass<'db> {
+    Definition(Definition, Option<GenericSubstitution<'db>>),
     FieldShorthand {
         local_ref: Local,
         field_ref: Field,
-        adt_subst: GenericSubstitution,
+        adt_subst: GenericSubstitution<'db>,
     },
     /// The specific situation where we have an extern crate decl without a rename
     /// Here we have both a declaration and a reference.
@@ -710,13 +744,13 @@ pub enum NameRefClass {
     },
 }
 
-impl NameRefClass {
+impl<'db> NameRefClass<'db> {
     // Note: we don't have unit-tests for this rather important function.
     // It is primarily exercised via goto definition tests in `ide`.
     pub fn classify(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         name_ref: &ast::NameRef,
-    ) -> Option<NameRefClass> {
+    ) -> Option<NameRefClass<'db>> {
         let _p = tracing::info_span!("NameRefClass::classify", ?name_ref).entered();
 
         let parent = name_ref.syntax().parent()?;
@@ -821,15 +855,23 @@ impl NameRefClass {
                 ast::AsmRegSpec(_) => {
                     Some(NameRefClass::Definition(Definition::InlineAsmRegOrRegClass(()), None))
                 },
+                ast::OffsetOfExpr(_) => {
+                    let (def, subst) = sema.resolve_offset_of_field(name_ref)?;
+                    let def = match def {
+                        Either::Left(variant) => Definition::Variant(variant),
+                        Either::Right(field) => Definition::Field(field),
+                    };
+                    Some(NameRefClass::Definition(def, Some(subst)))
+                },
                 _ => None
             }
         }
     }
 
     pub fn classify_lifetime(
-        sema: &Semantics<'_, RootDatabase>,
+        sema: &Semantics<'db, RootDatabase>,
         lifetime: &ast::Lifetime,
-    ) -> Option<NameRefClass> {
+    ) -> Option<NameRefClass<'db>> {
         let _p = tracing::info_span!("NameRefClass::classify_lifetime", ?lifetime).entered();
         if lifetime.text() == "'static" {
             return Some(NameRefClass::Definition(
@@ -971,7 +1013,6 @@ impl TryFrom<DefWithBody> for Definition {
             DefWithBody::Static(it) => Ok(it.into()),
             DefWithBody::Const(it) => Ok(it.into()),
             DefWithBody::Variant(it) => Ok(it.into()),
-            DefWithBody::InTypeConst(_) => Err(()),
         }
     }
 }

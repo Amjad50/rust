@@ -1,5 +1,3 @@
-#![allow(rustc::usage_of_ty_tykind)]
-
 /// This higher-order macro declares a list of types which can be allocated by `Arena`.
 ///
 /// Specifying the `decode` modifier will add decode impls for `&T` and `&[T]` where `T` is the type
@@ -9,6 +7,7 @@ macro_rules! arena_types {
     ($macro:path) => (
         $macro!([
             [] layout: rustc_abi::LayoutData<rustc_abi::FieldIdx, rustc_abi::VariantIdx>,
+            [] proxy_coroutine_layout: rustc_middle::mir::CoroutineLayout<'tcx>,
             [] fn_abi: rustc_target::callconv::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>,
             // AdtDef are interned and compared by address
             [decode] adt_def: rustc_middle::ty::AdtDefData,
@@ -28,7 +27,7 @@ macro_rules! arena_types {
                     rustc_middle::mir::Body<'tcx>
                 >,
             [decode] typeck_results: rustc_middle::ty::TypeckResults<'tcx>,
-            [decode] borrowck_result: rustc_middle::mir::BorrowCheckResult<'tcx>,
+            [decode] borrowck_result: rustc_middle::mir::ConcreteOpaqueTypes<'tcx>,
             [] resolver: rustc_data_structures::steal::Steal<(
                 rustc_middle::ty::ResolverAstLowering,
                 std::sync::Arc<rustc_ast::Crate>,
@@ -89,8 +88,9 @@ macro_rules! arena_types {
             [] name_set: rustc_data_structures::unord::UnordSet<rustc_span::Symbol>,
             [] autodiff_item: rustc_ast::expand::autodiff_attrs::AutoDiffItem,
             [] ordered_name_set: rustc_data_structures::fx::FxIndexSet<rustc_span::Symbol>,
-            [] pats: rustc_middle::ty::PatternKind<'tcx>,
             [] valtree: rustc_middle::ty::ValTreeKind<'tcx>,
+            [] stable_order_of_exportable_impls:
+                rustc_data_structures::fx::FxIndexMap<rustc_hir::def_id::DefId, usize>,
 
             // Note that this deliberately duplicates items in the `rustc_hir::arena`,
             // since we need to allocate this type on both the `rustc_hir` arena
@@ -110,7 +110,7 @@ macro_rules! arena_types {
             [] external_constraints: rustc_middle::traits::solve::ExternalConstraintsData<rustc_middle::ty::TyCtxt<'tcx>>,
             [] predefined_opaques_in_body: rustc_middle::traits::solve::PredefinedOpaquesData<rustc_middle::ty::TyCtxt<'tcx>>,
             [decode] doc_link_resolutions: rustc_hir::def::DocLinkResMap,
-            [] stripped_cfg_items: rustc_ast::expand::StrippedCfgItem,
+            [] stripped_cfg_items: rustc_attr_data_structures::StrippedCfgItem,
             [] mod_child: rustc_middle::metadata::ModChild,
             [] features: rustc_feature::Features,
             [decode] specialization_graph: rustc_middle::traits::specialization_graph::Graph,

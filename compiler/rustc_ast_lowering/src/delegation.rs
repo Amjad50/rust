@@ -47,7 +47,8 @@ use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def_id::DefId;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{Asyncness, ResolverAstLowering};
-use rustc_span::{Ident, Span};
+use rustc_span::symbol::kw;
+use rustc_span::{Ident, Span, Symbol};
 use {rustc_ast as ast, rustc_hir as hir};
 
 use super::{GenericArgsMode, ImplTraitContext, LoweringContext, ParamMode};
@@ -56,29 +57,23 @@ use crate::{AllowReturnTypeNotation, ImplTraitPosition, ResolverAstLoweringExt};
 pub(crate) struct DelegationResults<'hir> {
     pub body_id: hir::BodyId,
     pub sig: hir::FnSig<'hir>,
+    pub ident: Ident,
     pub generics: &'hir hir::Generics<'hir>,
 }
 
 impl<'hir> LoweringContext<'_, 'hir> {
-    pub(crate) fn delegation_has_self(&self, item_id: NodeId, path_id: NodeId, span: Span) -> bool {
-        let sig_id = self.get_delegation_sig_id(item_id, path_id, span);
-        let Ok(sig_id) = sig_id else {
-            return false;
-        };
-        self.has_self(sig_id, span)
-    }
-
-    fn has_self(&self, def_id: DefId, span: Span) -> bool {
-        if let Some(local_sig_id) = def_id.as_local() {
-            // The value may be missing due to recursive delegation.
-            // Error will be emitted later during HIR ty lowering.
-            self.resolver.delegation_fn_sigs.get(&local_sig_id).is_some_and(|sig| sig.has_self)
-        } else {
-            match self.tcx.def_kind(def_id) {
-                DefKind::Fn => false,
-                DefKind::AssocFn => self.tcx.associated_item(def_id).fn_has_self_parameter,
-                _ => span_bug!(span, "unexpected DefKind for delegation item"),
-            }
+    fn is_method(&self, def_id: DefId, span: Span) -> bool {
+        match self.tcx.def_kind(def_id) {
+            DefKind::Fn => false,
+            DefKind::AssocFn => match def_id.as_local() {
+                Some(local_def_id) => self
+                    .resolver
+                    .delegation_fn_sigs
+                    .get(&local_def_id)
+                    .is_some_and(|sig| sig.has_self),
+                None => self.tcx.associated_item(def_id).is_method(),
+            },
+            _ => span_bug!(span, "unexpected DefKind for delegation item"),
         }
     }
 
@@ -86,18 +81,20 @@ impl<'hir> LoweringContext<'_, 'hir> {
         &mut self,
         delegation: &Delegation,
         item_id: NodeId,
+        is_in_trait_impl: bool,
     ) -> DelegationResults<'hir> {
         let span = self.lower_span(delegation.path.segments.last().unwrap().ident.span);
-        let sig_id = self.get_delegation_sig_id(item_id, delegation.id, span);
+        let sig_id = self.get_delegation_sig_id(item_id, delegation.id, span, is_in_trait_impl);
         match sig_id {
             Ok(sig_id) => {
+                let is_method = self.is_method(sig_id, span);
                 let (param_count, c_variadic) = self.param_count(sig_id);
                 let decl = self.lower_delegation_decl(sig_id, param_count, c_variadic, span);
                 let sig = self.lower_delegation_sig(sig_id, decl, span);
-                let body_id = self.lower_delegation_body(delegation, param_count, span);
-
+                let body_id = self.lower_delegation_body(delegation, is_method, param_count, span);
+                let ident = self.lower_ident(delegation.ident);
                 let generics = self.lower_delegation_generics(span);
-                DelegationResults { body_id, sig, generics }
+                DelegationResults { body_id, sig, ident, generics }
             }
             Err(err) => self.generate_delegation_error(err, span),
         }
@@ -108,8 +105,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
         item_id: NodeId,
         path_id: NodeId,
         span: Span,
+        is_in_trait_impl: bool,
     ) -> Result<DefId, ErrorGuaranteed> {
-        let sig_id = if self.is_in_trait_impl { item_id } else { path_id };
+        let sig_id = if is_in_trait_impl { item_id } else { path_id };
         self.get_resolution_id(sig_id, span)
     }
 
@@ -188,14 +186,19 @@ impl<'hir> LoweringContext<'_, 'hir> {
     ) -> hir::FnSig<'hir> {
         let header = if let Some(local_sig_id) = sig_id.as_local() {
             match self.resolver.delegation_fn_sigs.get(&local_sig_id) {
-                Some(sig) => self.lower_fn_header(
-                    sig.header,
+                Some(sig) => {
+                    let parent = self.tcx.parent(sig_id);
                     // HACK: we override the default safety instead of generating attributes from the ether.
                     // We are not forwarding the attributes, as the delegation fn sigs are collected on the ast,
                     // and here we need the hir attributes.
-                    if sig.target_feature { hir::Safety::Unsafe } else { hir::Safety::Safe },
-                    &[],
-                ),
+                    let default_safety =
+                        if sig.target_feature || self.tcx.def_kind(parent) == DefKind::ForeignMod {
+                            hir::Safety::Unsafe
+                        } else {
+                            hir::Safety::Safe
+                        };
+                    self.lower_fn_header(sig.header, default_safety, &[])
+                }
                 None => self.generate_header_error(),
             }
         } else {
@@ -218,12 +221,24 @@ impl<'hir> LoweringContext<'_, 'hir> {
         hir::FnSig { decl, header, span }
     }
 
-    fn generate_param(&mut self, span: Span) -> (hir::Param<'hir>, NodeId) {
+    fn generate_param(
+        &mut self,
+        is_method: bool,
+        idx: usize,
+        span: Span,
+    ) -> (hir::Param<'hir>, NodeId) {
         let pat_node_id = self.next_node_id();
         let pat_id = self.lower_node_id(pat_node_id);
+        // FIXME(cjgillot) AssocItem currently relies on self parameter being exactly named `self`.
+        let name = if is_method && idx == 0 {
+            kw::SelfLower
+        } else {
+            Symbol::intern(&format!("arg{idx}"))
+        };
+        let ident = Ident::with_dummy_span(name);
         let pat = self.arena.alloc(hir::Pat {
             hir_id: pat_id,
-            kind: hir::PatKind::Binding(hir::BindingMode::NONE, pat_id, Ident::empty(), None),
+            kind: hir::PatKind::Binding(hir::BindingMode::NONE, pat_id, ident, None),
             span,
             default_binding_modes: false,
         });
@@ -231,9 +246,21 @@ impl<'hir> LoweringContext<'_, 'hir> {
         (hir::Param { hir_id: self.next_id(), pat, ty_span: span, span }, pat_node_id)
     }
 
-    fn generate_arg(&mut self, param_id: HirId, span: Span) -> hir::Expr<'hir> {
+    fn generate_arg(
+        &mut self,
+        is_method: bool,
+        idx: usize,
+        param_id: HirId,
+        span: Span,
+    ) -> hir::Expr<'hir> {
+        // FIXME(cjgillot) AssocItem currently relies on self parameter being exactly named `self`.
+        let name = if is_method && idx == 0 {
+            kw::SelfLower
+        } else {
+            Symbol::intern(&format!("arg{idx}"))
+        };
         let segments = self.arena.alloc_from_iter(iter::once(hir::PathSegment {
-            ident: Ident::empty(),
+            ident: Ident::with_dummy_span(name),
             hir_id: self.next_id(),
             res: Res::Local(param_id),
             args: None,
@@ -247,6 +274,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
     fn lower_delegation_body(
         &mut self,
         delegation: &Delegation,
+        is_method: bool,
         param_count: usize,
         span: Span,
     ) -> BodyId {
@@ -257,7 +285,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             let mut args: Vec<hir::Expr<'_>> = Vec::with_capacity(param_count);
 
             for idx in 0..param_count {
-                let (param, pat_node_id) = this.generate_param(span);
+                let (param, pat_node_id) = this.generate_param(is_method, idx, span);
                 parameters.push(param);
 
                 let arg = if let Some(block) = block
@@ -273,7 +301,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     this.ident_and_label_to_local_id.insert(pat_node_id, param.pat.hir_id.local_id);
                     this.lower_target_expr(&block)
                 } else {
-                    this.generate_arg(param.pat.hir_id, span)
+                    this.generate_arg(is_method, idx, param.pat.hir_id, span)
                 };
                 args.push(arg);
             }
@@ -324,10 +352,11 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
         let call = if self
             .get_resolution_id(delegation.id, span)
-            .and_then(|def_id| Ok(self.has_self(def_id, span)))
+            .and_then(|def_id| Ok(self.is_method(def_id, span)))
             .unwrap_or_default()
             && delegation.qself.is_none()
             && !has_generic_args
+            && !args.is_empty()
         {
             let ast_segment = delegation.path.segments.last().unwrap();
             let segment = self.lower_path_segment(
@@ -389,8 +418,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let header = self.generate_header_error();
         let sig = hir::FnSig { decl, header, span };
 
+        let ident = Ident::dummy();
         let body_id = self.lower_body(|this| (&[], this.mk_expr(hir::ExprKind::Err(err), span)));
-        DelegationResults { generics, body_id, sig }
+        DelegationResults { ident, generics, body_id, sig }
     }
 
     fn generate_header_error(&self) -> hir::FnHeader {
@@ -427,13 +457,7 @@ impl<'a> SelfResolver<'a> {
 }
 
 impl<'ast, 'a> Visitor<'ast> for SelfResolver<'a> {
-    fn visit_path(&mut self, path: &'ast Path, id: NodeId) {
+    fn visit_id(&mut self, id: NodeId) {
         self.try_replace_id(id);
-        visit::walk_path(self, path);
-    }
-
-    fn visit_path_segment(&mut self, seg: &'ast PathSegment) {
-        self.try_replace_id(seg.id);
-        visit::walk_path_segment(self, seg);
     }
 }

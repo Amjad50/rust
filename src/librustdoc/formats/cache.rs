@@ -1,6 +1,7 @@
 use std::mem;
 
-use rustc_attr_parsing::StabilityLevel;
+use rustc_ast::join_path_syms;
+use rustc_attr_data_structures::StabilityLevel;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, DefIdSet};
 use rustc_middle::ty::{self, TyCtxt};
@@ -13,7 +14,6 @@ use crate::core::DocContext;
 use crate::fold::DocFolder;
 use crate::formats::Impl;
 use crate::formats::item_type::ItemType;
-use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
 use crate::html::render::IndexItem;
 use crate::html::render::search_index::get_function_type_for_search;
@@ -288,7 +288,7 @@ impl DocFolder for CacheBuilder<'_, '_> {
 
         // Keep track of the fully qualified path for this item.
         let pushed = match item.name {
-            Some(n) if !n.is_empty() => {
+            Some(n) => {
                 self.cache.stack.push(n);
                 true
             }
@@ -385,7 +385,6 @@ impl DocFolder for CacheBuilder<'_, '_> {
         // implementations elsewhere.
         let ret = if let clean::Item {
             inner: box clean::ItemInner { kind: clean::ImplItem(ref i), .. },
-            ..
         } = item
         {
             // Figure out the id of this impl. This may map to a
@@ -419,7 +418,9 @@ impl DocFolder for CacheBuilder<'_, '_> {
                 }
             }
 
-            if let Some(generics) = i.trait_.as_ref().and_then(|t| t.generics()) {
+            if let Some(trait_) = &i.trait_
+                && let Some(generics) = trait_.generics()
+            {
                 for bound in generics {
                     dids.extend(bound.def_id(self.cache));
                 }
@@ -557,7 +558,7 @@ fn add_item_to_search_index(tcx: TyCtxt<'_>, cache: &mut Cache, item: &clean::It
         clean::ItemKind::ImportItem(import) => import.source.did.unwrap_or(item_def_id),
         _ => item_def_id,
     };
-    let path = join_with_double_colon(parent_path);
+    let path = join_path_syms(parent_path);
     let impl_id = if let Some(ParentStackItem::Impl { item_id, .. }) = cache.parent_stack.last() {
         item_id.as_def_id()
     } else {

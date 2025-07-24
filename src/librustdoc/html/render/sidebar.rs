@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::fmt;
 
-use rinja::Template;
+use askama::Template;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::{DefIdMap, DefIdSet};
@@ -79,7 +80,7 @@ impl<'a> LinkBlock<'a> {
 }
 
 /// A link to an item. Content should not be escaped.
-#[derive(Ord, PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub(crate) struct Link<'a> {
     /// The content for the anchor tag and title attr
     name: Cow<'a, str>,
@@ -91,17 +92,23 @@ pub(crate) struct Link<'a> {
     children: Vec<Link<'a>>,
 }
 
-impl PartialOrd for Link<'_> {
-    fn partial_cmp(&self, other: &Link<'_>) -> Option<Ordering> {
+impl Ord for Link<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
         match compare_names(&self.name, &other.name) {
-            Ordering::Equal => (),
-            result => return Some(result),
+            Ordering::Equal => {}
+            result => return result,
         }
-        (&self.name_html, &self.href, &self.children).partial_cmp(&(
+        (&self.name_html, &self.href, &self.children).cmp(&(
             &other.name_html,
             &other.href,
             &other.children,
         ))
+    }
+}
+
+impl PartialOrd for Link<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -117,10 +124,10 @@ impl<'a> Link<'a> {
 pub(crate) mod filters {
     use std::fmt::{self, Display};
 
-    use rinja::filters::Safe;
+    use askama::filters::Safe;
 
     use crate::html::escape::EscapeBodyTextWithWbr;
-    pub(crate) fn wrapped<T>(v: T) -> rinja::Result<Safe<impl Display>>
+    pub(crate) fn wrapped<T, V: askama::Values>(v: T, _: V) -> askama::Result<Safe<impl Display>>
     where
         T: Display,
     {
@@ -129,7 +136,11 @@ pub(crate) mod filters {
     }
 }
 
-pub(super) fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut String) {
+pub(super) fn print_sidebar(
+    cx: &Context<'_>,
+    it: &clean::Item,
+    mut buffer: impl fmt::Write,
+) -> fmt::Result {
     let mut ids = IdMap::new();
     let mut blocks: Vec<LinkBlock<'_>> = docblock_toc(cx, it, &mut ids).into_iter().collect();
     let deref_id_map = cx.deref_id_map.borrow();
@@ -189,7 +200,8 @@ pub(super) fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut Str
         blocks,
         path,
     };
-    sidebar.render_into(buffer).unwrap();
+    sidebar.render_into(&mut buffer)?;
+    Ok(())
 }
 
 fn get_struct_fields_name<'a>(fields: &'a [clean::Item]) -> Vec<Link<'a>> {
@@ -527,7 +539,10 @@ fn sidebar_deref_methods<'a>(
             debug!("found inner_impl: {impls:?}");
             let mut ret = impls
                 .iter()
-                .filter(|i| i.inner_impl().trait_.is_none())
+                .filter(|i| {
+                    i.inner_impl().trait_.is_none()
+                        && real_target.is_doc_subtype_of(&i.inner_impl().for_, c)
+                })
                 .flat_map(|i| get_methods(i.inner_impl(), true, used_links, deref_mut, cx.tcx()))
                 .collect::<Vec<_>>();
             if !ret.is_empty() {
@@ -584,7 +599,7 @@ fn sidebar_enum<'a>(
     deref_id_map: &'a DefIdMap<String>,
 ) {
     let mut variants = e
-        .variants()
+        .non_stripped_variants()
         .filter_map(|v| v.name)
         .map(|name| Link::new(format!("variant.{name}"), name.to_string()))
         .collect::<Vec<_>>();
@@ -725,20 +740,20 @@ fn get_methods<'a>(
 ) -> Vec<Link<'a>> {
     i.items
         .iter()
-        .filter_map(|item| match item.name {
-            Some(ref name) if !name.is_empty() && item.is_method() => {
-                if !for_deref || super::should_render_item(item, deref_mut, tcx) {
-                    Some(Link::new(
-                        get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::Method)),
-                        name.as_str(),
-                    ))
-                } else {
-                    None
-                }
+        .filter_map(|item| {
+            if let Some(ref name) = item.name
+                && item.is_method()
+                && (!for_deref || super::should_render_item(item, deref_mut, tcx))
+            {
+                Some(Link::new(
+                    get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::Method)),
+                    name.as_str(),
+                ))
+            } else {
+                None
             }
-            _ => None,
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 fn get_associated_constants<'a>(
@@ -747,14 +762,19 @@ fn get_associated_constants<'a>(
 ) -> Vec<Link<'a>> {
     i.items
         .iter()
-        .filter_map(|item| match item.name {
-            Some(ref name) if !name.is_empty() && item.is_associated_const() => Some(Link::new(
-                get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::AssocConst)),
-                name.as_str(),
-            )),
-            _ => None,
+        .filter_map(|item| {
+            if let Some(ref name) = item.name
+                && item.is_associated_const()
+            {
+                Some(Link::new(
+                    get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::AssocConst)),
+                    name.as_str(),
+                ))
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 fn get_associated_types<'a>(
@@ -763,12 +783,17 @@ fn get_associated_types<'a>(
 ) -> Vec<Link<'a>> {
     i.items
         .iter()
-        .filter_map(|item| match item.name {
-            Some(ref name) if !name.is_empty() && item.is_associated_type() => Some(Link::new(
-                get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::AssocType)),
-                name.as_str(),
-            )),
-            _ => None,
+        .filter_map(|item| {
+            if let Some(ref name) = item.name
+                && item.is_associated_type()
+            {
+                Some(Link::new(
+                    get_next_url(used_links, format!("{typ}.{name}", typ = ItemType::AssocType)),
+                    name.as_str(),
+                ))
+            } else {
+                None
+            }
         })
-        .collect::<Vec<_>>()
+        .collect()
 }

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use libc::c_uint;
-use rustc_abi::{Align, Endian, Size, TagEncoding, VariantIdx, Variants};
+use rustc_abi::{Align, Endian, FieldIdx, Size, TagEncoding, VariantIdx, Variants};
 use rustc_codegen_ssa::debuginfo::type_names::compute_debuginfo_type_name;
 use rustc_codegen_ssa::debuginfo::{tag_base_type, wants_c_like_enum_debuginfo};
 use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods};
@@ -17,8 +17,8 @@ use crate::debuginfo::metadata::enums::DiscrResult;
 use crate::debuginfo::metadata::type_map::{self, Stub, UniqueTypeId};
 use crate::debuginfo::metadata::{
     DINodeCreationResult, NO_GENERICS, NO_SCOPE_METADATA, SmallVec, UNKNOWN_LINE_NUMBER,
-    build_field_di_node, file_metadata, file_metadata_from_def_id, size_and_align_of, type_di_node,
-    unknown_file_metadata, visibility_di_flags,
+    build_field_di_node, create_member_type, file_metadata, file_metadata_from_def_id,
+    size_and_align_of, type_di_node, unknown_file_metadata, visibility_di_flags,
 };
 use crate::debuginfo::utils::DIB;
 use crate::llvm::debuginfo::{DIFile, DIFlags, DIType};
@@ -370,9 +370,9 @@ fn build_single_variant_union_fields<'ll, 'tcx>(
             cx,
             enum_type_di_node,
             &variant_union_field_name(variant_index),
-            // NOTE: We use the size and align of the entire type, not from variant_layout
+            // NOTE: We use the layout of the entire type, not from variant_layout
             //       since the later is sometimes smaller (if it has fewer fields).
-            size_and_align_of(enum_type_and_layout),
+            enum_type_and_layout,
             Size::ZERO,
             visibility_flags,
             variant_struct_type_wrapper_di_node,
@@ -401,7 +401,7 @@ fn build_union_fields_for_enum<'ll, 'tcx>(
     enum_type_and_layout: TyAndLayout<'tcx>,
     enum_type_di_node: &'ll DIType,
     variant_indices: impl Iterator<Item = VariantIdx> + Clone,
-    tag_field: usize,
+    tag_field: FieldIdx,
     untagged_variant_index: Option<VariantIdx>,
 ) -> SmallVec<&'ll DIType> {
     let tag_base_type = tag_base_type(cx.tcx, enum_type_and_layout);
@@ -560,7 +560,7 @@ fn build_variant_struct_wrapper_type_di_node<'ll, 'tcx>(
                 cx,
                 wrapper_struct_type_di_node,
                 "value",
-                size_and_align_of(enum_or_coroutine_type_and_layout),
+                enum_or_coroutine_type_and_layout,
                 Size::ZERO,
                 DIFlags::FlagZero,
                 variant_struct_type_di_node,
@@ -721,8 +721,7 @@ fn build_union_fields_for_direct_tag_coroutine<'ll, 'tcx>(
         _ => unreachable!(),
     };
 
-    let coroutine_layout =
-        cx.tcx.coroutine_layout(coroutine_def_id, coroutine_args.kind_ty()).unwrap();
+    let coroutine_layout = cx.tcx.coroutine_layout(coroutine_def_id, coroutine_args.args).unwrap();
 
     let common_upvar_names = cx.tcx.closure_saved_names_of_captured_variables(coroutine_def_id);
     let variant_range = coroutine_args.variant_range(coroutine_def_id, cx.tcx);
@@ -806,7 +805,7 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
     variant_field_infos: &[VariantFieldInfo<'ll>],
     discr_type_di_node: &'ll DIType,
     tag_base_type: Ty<'tcx>,
-    tag_field: usize,
+    tag_field: FieldIdx,
     untagged_variant_index: Option<VariantIdx>,
     di_flags: DIFlags,
 ) -> SmallVec<&'ll DIType> {
@@ -820,7 +819,6 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
             .unwrap_or_else(|| (unknown_file_metadata(cx), UNKNOWN_LINE_NUMBER));
 
         let field_name = variant_union_field_name(variant_member_info.variant_index);
-        let (size, align) = size_and_align_of(enum_type_and_layout);
 
         let variant_struct_type_wrapper = build_variant_struct_wrapper_type_di_node(
             cx,
@@ -840,31 +838,27 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
             },
         );
 
-        // We use LLVMRustDIBuilderCreateMemberType() member type directly because
+        // We use create_member_type() member type directly because
         // the build_field_di_node() function does not support specifying a source location,
         // which is something that we don't do anywhere else.
-        unsafe {
-            llvm::LLVMRustDIBuilderCreateMemberType(
-                DIB(cx),
-                enum_type_di_node,
-                field_name.as_c_char_ptr(),
-                field_name.len(),
-                file_di_node,
-                line_number,
-                // NOTE: We use the size and align of the entire type, not from variant_layout
-                //       since the later is sometimes smaller (if it has fewer fields).
-                size.bits(),
-                align.bits() as u32,
-                // Union fields are always at offset zero
-                Size::ZERO.bits(),
-                di_flags,
-                variant_struct_type_wrapper,
-            )
-        }
+        create_member_type(
+            cx,
+            enum_type_di_node,
+            &field_name,
+            file_di_node,
+            line_number,
+            // NOTE: We use the layout of the entire type, not from variant_layout
+            //       since the later is sometimes smaller (if it has fewer fields).
+            enum_type_and_layout,
+            // Union fields are always at offset zero
+            Size::ZERO,
+            di_flags,
+            variant_struct_type_wrapper,
+        )
     }));
 
     assert_eq!(
-        cx.size_and_align_of(enum_type_and_layout.field(cx, tag_field).ty),
+        cx.size_and_align_of(enum_type_and_layout.field(cx, tag_field.as_usize()).ty),
         cx.size_and_align_of(self::tag_base_type(cx.tcx, enum_type_and_layout))
     );
 
@@ -874,14 +868,14 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
 
     if is_128_bits {
         let type_di_node = type_di_node(cx, cx.tcx.types.u64);
-        let size_and_align = cx.size_and_align_of(cx.tcx.types.u64);
+        let u64_layout = cx.layout_of(cx.tcx.types.u64);
 
         let (lo_offset, hi_offset) = match cx.tcx.data_layout.endian {
             Endian::Little => (0, 8),
             Endian::Big => (8, 0),
         };
 
-        let tag_field_offset = enum_type_and_layout.fields.offset(tag_field).bytes();
+        let tag_field_offset = enum_type_and_layout.fields.offset(tag_field.as_usize()).bytes();
         let lo_offset = Size::from_bytes(tag_field_offset + lo_offset);
         let hi_offset = Size::from_bytes(tag_field_offset + hi_offset);
 
@@ -889,7 +883,7 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
             cx,
             enum_type_di_node,
             TAG_FIELD_NAME_128_LO,
-            size_and_align,
+            u64_layout,
             lo_offset,
             di_flags,
             type_di_node,
@@ -900,7 +894,7 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
             cx,
             enum_type_di_node,
             TAG_FIELD_NAME_128_HI,
-            size_and_align,
+            u64_layout,
             hi_offset,
             DIFlags::FlagZero,
             type_di_node,
@@ -911,8 +905,8 @@ fn build_union_fields_for_direct_tag_enum_or_coroutine<'ll, 'tcx>(
             cx,
             enum_type_di_node,
             TAG_FIELD_NAME,
-            cx.size_and_align_of(enum_type_and_layout.field(cx, tag_field).ty),
-            enum_type_and_layout.fields.offset(tag_field),
+            enum_type_and_layout.field(cx, tag_field.as_usize()),
+            enum_type_and_layout.fields.offset(tag_field.as_usize()),
             di_flags,
             tag_base_type_di_node,
             None,

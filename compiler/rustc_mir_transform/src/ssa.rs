@@ -32,12 +32,6 @@ pub(super) struct SsaLocals {
     borrowed_locals: DenseBitSet<Local>,
 }
 
-pub(super) enum AssignedValue<'a, 'tcx> {
-    Arg,
-    Rvalue(&'a mut Rvalue<'tcx>),
-    Terminator,
-}
-
 impl SsaLocals {
     pub(super) fn new<'tcx>(
         tcx: TyCtxt<'tcx>,
@@ -150,38 +144,6 @@ impl SsaLocals {
                 None
             }
         })
-    }
-
-    pub(super) fn for_each_assignment_mut<'tcx>(
-        &self,
-        basic_blocks: &mut IndexSlice<BasicBlock, BasicBlockData<'tcx>>,
-        mut f: impl FnMut(Local, AssignedValue<'_, 'tcx>, Location),
-    ) {
-        for &local in &self.assignment_order {
-            match self.assignments[local] {
-                Set1::One(DefLocation::Argument) => f(
-                    local,
-                    AssignedValue::Arg,
-                    Location { block: START_BLOCK, statement_index: 0 },
-                ),
-                Set1::One(DefLocation::Assignment(loc)) => {
-                    let bb = &mut basic_blocks[loc.block];
-                    // `loc` must point to a direct assignment to `local`.
-                    let stmt = &mut bb.statements[loc.statement_index];
-                    let StatementKind::Assign(box (target, ref mut rvalue)) = stmt.kind else {
-                        bug!()
-                    };
-                    assert_eq!(target.as_local(), Some(local));
-                    f(local, AssignedValue::Rvalue(rvalue), loc)
-                }
-                Set1::One(DefLocation::CallReturn { call, .. }) => {
-                    let bb = &mut basic_blocks[call];
-                    let loc = Location { block: call, statement_index: bb.statements.len() };
-                    f(local, AssignedValue::Terminator, loc)
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Compute the equivalence classes for locals, based on copy statements.
@@ -355,6 +317,15 @@ fn compute_copy_classes(ssa: &mut SsaLocals, body: &Body<'_>) {
         // We visit in `assignment_order`, ie. reverse post-order, so `rhs` has been
         // visited before `local`, and we just have to copy the representing local.
         let head = copies[rhs];
+
+        // When propagating from `head` to `local` we need to ensure that changes to the address
+        // are not observable, so at most one the locals involved can be borrowed. Additionally, we
+        // need to ensure that the definition of `head` dominates all uses of `local`. When `local`
+        // is borrowed, there might exist an indirect use of `local` that isn't dominated by the
+        // definition, so we have to reject copy propagation.
+        if ssa.borrowed_locals().contains(local) {
+            continue;
+        }
 
         if local == RETURN_PLACE {
             // `_0` is special, we cannot rename it. Instead, rename the class of `rhs` to

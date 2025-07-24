@@ -1,5 +1,3 @@
-use std::ffi::OsString;
-
 use crate::debuggers::{extract_gdb_version, extract_lldb_version};
 use crate::is_test;
 
@@ -60,20 +58,16 @@ fn test_extract_lldb_version() {
 
 #[test]
 fn is_test_test() {
-    assert!(is_test(&OsString::from("a_test.rs")));
-    assert!(!is_test(&OsString::from(".a_test.rs")));
-    assert!(!is_test(&OsString::from("a_cat.gif")));
-    assert!(!is_test(&OsString::from("#a_dog_gif")));
-    assert!(!is_test(&OsString::from("~a_temp_file")));
+    assert!(is_test("a_test.rs"));
+    assert!(!is_test(".a_test.rs"));
+    assert!(!is_test("a_cat.gif"));
+    assert!(!is_test("#a_dog_gif"));
+    assert!(!is_test("~a_temp_file"));
 }
 
 #[test]
 fn string_enums() {
-    // These imports are needed for the macro-generated code
-    use std::fmt;
-    use std::str::FromStr;
-
-    crate::common::string_enum! {
+    crate::util::string_enum! {
         #[derive(Clone, Copy, Debug, PartialEq)]
         enum Animal {
             Cat => "meow",

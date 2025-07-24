@@ -11,7 +11,7 @@
 //! This is because `sys_common` not only contains platform-independent code,
 //! but also code that is shared between the different platforms in `sys`.
 //! Ideally all that shared code should be moved to `sys::common`,
-//! and the dependencies between `std`, `sys_common` and `sys` all would form a dag.
+//! and the dependencies between `std`, `sys_common` and `sys` all would form a DAG.
 //! Progress on this is tracked in #84187.
 
 #![allow(missing_docs)]
@@ -20,8 +20,6 @@
 #[cfg(test)]
 mod tests;
 
-pub mod fs;
-pub mod process;
 pub mod wstr;
 pub mod wtf8;
 

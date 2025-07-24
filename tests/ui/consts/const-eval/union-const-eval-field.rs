@@ -1,3 +1,6 @@
+//@ dont-require-annotations: NOTE
+//@ normalize-stderr: "(the raw bytes of the constant) \(size: [0-9]*, align: [0-9]*\)" -> "$1 (size: $$SIZE, align: $$ALIGN)"
+
 type Field1 = i32;
 type Field2 = f32;
 type Field3 = i64;
@@ -24,8 +27,7 @@ const fn read_field2() -> Field2 {
 
 const fn read_field3() -> Field3 {
     const FIELD3: Field3 = unsafe { UNION.field3 };
-    //~^ ERROR evaluation of constant value failed
-    //~| uninitialized
+    //~^ ERROR uninitialized
     FIELD3
 }
 

@@ -38,7 +38,7 @@ fn dir_entry_is_file(dir_entry: &fs::DirEntry) -> bool {
 pub fn collect_unstable_feature_names(features: &Features) -> BTreeSet<String> {
     features
         .iter()
-        .filter(|&(_, ref f)| f.level == Status::Unstable)
+        .filter(|&(_, f)| f.level == Status::Unstable)
         .map(|(name, _)| name.replace('_', "-"))
         .collect()
 }
@@ -72,12 +72,25 @@ fn collect_unstable_book_lib_features_section_file_names(base_src_path: &Path) -
     collect_unstable_book_section_file_names(&unstable_book_lib_features_path(base_src_path))
 }
 
+/// Would switching underscores for dashes work?
+fn maybe_suggest_dashes(names: &BTreeSet<String>, feature_name: &str, bad: &mut bool) {
+    let with_dashes = feature_name.replace('_', "-");
+    if names.contains(&with_dashes) {
+        tidy_error!(
+            bad,
+            "the file `{}.md` contains underscores; use dashes instead: `{}.md`",
+            feature_name,
+            with_dashes,
+        );
+    }
+}
+
 pub fn check(path: &Path, features: CollectedFeatures, bad: &mut bool) {
     let lang_features = features.lang;
     let lib_features = features
         .lib
         .into_iter()
-        .filter(|&(ref name, _)| !lang_features.contains_key(name))
+        .filter(|(name, _)| !lang_features.contains_key(name))
         .collect::<Features>();
 
     // Library features
@@ -93,14 +106,13 @@ pub fn check(path: &Path, features: CollectedFeatures, bad: &mut bool) {
     // Check for Unstable Book sections that don't have a corresponding unstable feature
     for feature_name in &unstable_book_lib_features_section_file_names - &unstable_lib_feature_names
     {
-        if !unstable_lang_feature_names.contains(&feature_name) {
-            tidy_error!(
-                bad,
-                "The Unstable Book has a 'library feature' section '{}' which doesn't \
+        tidy_error!(
+            bad,
+            "The Unstable Book has a 'library feature' section '{}' which doesn't \
                          correspond to an unstable library feature",
-                feature_name
-            );
-        }
+            feature_name
+        );
+        maybe_suggest_dashes(&unstable_lib_feature_names, &feature_name, bad);
     }
 
     // Check for Unstable Book sections that don't have a corresponding unstable feature.
@@ -112,7 +124,8 @@ pub fn check(path: &Path, features: CollectedFeatures, bad: &mut bool) {
             "The Unstable Book has a 'language feature' section '{}' which doesn't \
                      correspond to an unstable language feature",
             feature_name
-        )
+        );
+        maybe_suggest_dashes(&unstable_lang_feature_names, &feature_name, bad);
     }
 
     // List unstable features that don't have Unstable Book sections.

@@ -5,10 +5,9 @@ use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::def_id::DefId;
 use rustc_middle::bug;
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::visit::MaxUniverse;
 use rustc_middle::ty::{
-    self, AliasRelationDirection, InferConst, Term, Ty, TyCtxt, TypeVisitable, TypeVisitableExt,
-    TypingMode,
+    self, AliasRelationDirection, InferConst, MaxUniverse, Term, Ty, TyCtxt, TypeVisitable,
+    TypeVisitableExt, TypingMode,
 };
 use rustc_span::Span;
 use tracing::{debug, instrument, warn};
@@ -114,7 +113,7 @@ impl<'tcx> InferCtxt<'tcx> {
                         }]);
                     }
                     // The old solver only accepts projection predicates for associated types.
-                    ty::Alias(ty::Inherent | ty::Weak | ty::Opaque, _) => {
+                    ty::Alias(ty::Inherent | ty::Free | ty::Opaque, _) => {
                         return Err(TypeError::CyclicTy(source_ty));
                     }
                     _ => bug!("generalized `{source_ty:?} to infer, not an alias"),
@@ -330,7 +329,7 @@ struct Generalizer<'me, 'tcx> {
 impl<'tcx> Generalizer<'_, 'tcx> {
     /// Create an error that corresponds to the term kind in `root_term`
     fn cyclic_term_error(&self) -> TypeError<'tcx> {
-        match self.root_term.unpack() {
+        match self.root_term.kind() {
             ty::TermKind::Ty(ty) => TypeError::CyclicTy(ty),
             ty::TermKind::Const(ct) => TypeError::CyclicConst(ct),
         }
@@ -572,7 +571,7 @@ impl<'tcx> TypeRelation<TyCtxt<'tcx>> for Generalizer<'_, 'tcx> {
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
         assert_eq!(r, r2); // we are misusing TypeRelation here; both LHS and RHS ought to be ==
 
-        match *r {
+        match r.kind() {
             // Never make variables for regions bound within the type itself,
             // nor for erased regions.
             ty::ReBound(..) | ty::ReErased => {
@@ -604,10 +603,9 @@ impl<'tcx> TypeRelation<TyCtxt<'tcx>> for Generalizer<'_, 'tcx> {
             }
         }
 
-        Ok(self.infcx.next_region_var_in_universe(
-            RegionVariableOrigin::MiscVariable(self.span),
-            self.for_universe,
-        ))
+        Ok(self
+            .infcx
+            .next_region_var_in_universe(RegionVariableOrigin::Misc(self.span), self.for_universe))
     }
 
     #[instrument(level = "debug", skip(self, c2), ret)]

@@ -480,3 +480,69 @@ fn issue12337() {
         //~^ manual_let_else
     };
 }
+
+mod issue13768 {
+    enum Foo {
+        Str(String),
+        None,
+    }
+
+    fn foo(value: Foo) {
+        let signature = match value {
+            //~^ manual_let_else
+            Foo::Str(ref val) => val,
+            _ => {
+                println!("No signature found");
+                return;
+            },
+        };
+    }
+
+    enum Bar {
+        Str { inner: String },
+        None,
+    }
+
+    fn bar(mut value: Bar) {
+        let signature = match value {
+            //~^ manual_let_else
+            Bar::Str { ref mut inner } => inner,
+            _ => {
+                println!("No signature found");
+                return;
+            },
+        };
+    }
+}
+
+mod issue14598 {
+    fn bar() -> Result<bool, &'static str> {
+        let value = match foo() {
+            //~^ manual_let_else
+            Err(_) => return Err("abc"),
+            Ok(value) => value,
+        };
+
+        let w = Some(0);
+        let v = match w {
+            //~^ manual_let_else
+            None => return Err("abc"),
+            Some(x) => x,
+        };
+
+        enum Foo<T> {
+            Foo(T),
+        }
+
+        let v = match Foo::Foo(Some(())) {
+            Foo::Foo(Some(_)) => return Err("abc"),
+            Foo::Foo(v) => v,
+        };
+
+        Ok(value == 42)
+    }
+
+    fn foo() -> Result<u32, &'static str> {
+        todo!()
+    }
+}

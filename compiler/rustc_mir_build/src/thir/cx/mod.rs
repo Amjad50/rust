@@ -27,8 +27,8 @@ pub(crate) fn thir_body(
     if let Some(reported) = cx.typeck_results.tainted_by_errors {
         return Err(reported);
     }
-    let expr = cx.mirror_expr(body.value);
 
+    // Lower the params before the body's expression so errors from params are shown first.
     let owner_id = tcx.local_def_id_to_hir_id(owner_def);
     if let Some(fn_decl) = tcx.hir_fn_decl_by_hir_id(owner_id) {
         let closure_env_param = cx.closure_env_param(owner_def, owner_id);
@@ -48,6 +48,7 @@ pub(crate) fn thir_body(
         }
     }
 
+    let expr = cx.mirror_expr(body.value);
     Ok((tcx.alloc_steal_thir(cx.thir), expr))
 }
 
@@ -73,7 +74,6 @@ struct ThirBuildCx<'tcx> {
 impl<'tcx> ThirBuildCx<'tcx> {
     fn new(tcx: TyCtxt<'tcx>, def: LocalDefId) -> Self {
         let typeck_results = tcx.typeck(def);
-        let hir = tcx.hir();
         let hir_id = tcx.local_def_id_to_hir_id(def);
 
         let body_type = match tcx.hir_body_owner_kind(def) {
@@ -111,10 +111,10 @@ impl<'tcx> ThirBuildCx<'tcx> {
             typeck_results,
             rvalue_scopes: &typeck_results.rvalue_scopes,
             body_owner: def.to_def_id(),
-            apply_adjustments: hir
-                .attrs(hir_id)
+            apply_adjustments: tcx
+                .hir_attrs(hir_id)
                 .iter()
-                .all(|attr| attr.name_or_empty() != rustc_span::sym::custom_mir),
+                .all(|attr| !attr.has_name(rustc_span::sym::custom_mir)),
         }
     }
 
@@ -189,7 +189,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
             // C-variadic fns also have a `VaList` input that's not listed in `fn_sig`
             // (as it's created inside the body itself, not passed in from outside).
             let ty = if fn_decl.c_variadic && index == fn_decl.inputs.len() {
-                let va_list_did = self.tcx.require_lang_item(LangItem::VaList, Some(param.span));
+                let va_list_did = self.tcx.require_lang_item(LangItem::VaList, param.span);
 
                 self.tcx
                     .type_of(va_list_did)
@@ -207,7 +207,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
         &self,
         hir_id: HirId,
     ) -> Option<ty::CanonicalUserType<'tcx>> {
-        crate::thir::util::user_args_applied_to_ty_of_hir_id(self.typeck_results, hir_id)
+        crate::thir::util::user_args_applied_to_ty_of_hir_id(self.tcx, self.typeck_results, hir_id)
     }
 }
 

@@ -14,17 +14,12 @@ pub mod compat;
 
 pub mod api;
 
-pub mod args;
 pub mod c;
-pub mod env;
-pub mod fs;
 #[cfg(not(target_vendor = "win7"))]
 pub mod futex;
 pub mod handle;
 pub mod os;
 pub mod pipe;
-pub mod process;
-pub mod stdio;
 pub mod thread;
 pub mod time;
 cfg_if::cfg_if! {
@@ -37,7 +32,7 @@ cfg_if::cfg_if! {
 }
 
 /// Map a [`Result<T, WinError>`] to [`io::Result<T>`](crate::io::Result<T>).
-trait IoResult<T> {
+pub trait IoResult<T> {
     fn io_result(self) -> crate::io::Result<T>;
 }
 impl<T> IoResult<T> for Result<T, api::WinError> {
@@ -289,6 +284,14 @@ pub fn truncate_utf16_at_nul(v: &[u16]) -> &[u16] {
     }
 }
 
+pub fn ensure_no_nuls<T: AsRef<OsStr>>(s: T) -> crate::io::Result<T> {
+    if s.as_ref().encode_wide().any(|b| b == 0) {
+        Err(crate::io::const_error!(ErrorKind::InvalidInput, "nul byte found in provided data"))
+    } else {
+        Ok(s)
+    }
+}
+
 pub trait IsZero {
     fn is_zero(&self) -> bool;
 }
@@ -325,8 +328,12 @@ pub fn dur2timeout(dur: Duration) -> u32 {
 
 /// Use `__fastfail` to abort the process
 ///
-/// This is the same implementation as in libpanic_abort's `__rust_start_panic`. See
-/// that function for more information on `__fastfail`
+/// In Windows 8 and later, this will terminate the process immediately without
+/// running any in-process exception handlers. In earlier versions of Windows,
+/// this sequence of instructions will be treated as an access violation, which
+/// will still terminate the process but might run some exception handlers.
+///
+/// https://docs.microsoft.com/en-us/cpp/intrinsics/fastfail
 #[cfg(not(miri))] // inline assembly does not work in Miri
 pub fn abort_internal() -> ! {
     unsafe {

@@ -2,9 +2,7 @@
 #![feature(decl_macro)]
 #![feature(file_buffered)]
 #![feature(iter_intersperse)]
-#![feature(let_chains)]
 #![feature(try_blocks)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 mod callbacks;

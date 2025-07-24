@@ -19,7 +19,7 @@ use {rustc_ast as ast, rustc_hir as hir};
 use crate::diagnostic::DiagLocation;
 use crate::{
     Diag, DiagArgValue, DiagCtxtHandle, Diagnostic, EmissionGuarantee, ErrCode, IntoDiagArg, Level,
-    SubdiagMessageOp, Subdiagnostic, fluent_generated as fluent,
+    Subdiagnostic, fluent_generated as fluent,
 };
 
 pub struct DiagArgFromDisplay<'a>(pub &'a dyn fmt::Display);
@@ -374,6 +374,10 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for TargetDataLayoutErrors<'_> {
             TargetDataLayoutErrors::InvalidBitsSize { err } => {
                 Diag::new(dcx, level, fluent::errors_target_invalid_bits_size).with_arg("err", err)
             }
+            TargetDataLayoutErrors::UnknownPointerSpecification { err } => {
+                Diag::new(dcx, level, fluent::errors_target_invalid_datalayout_pointer_spec)
+                    .with_arg("err", err)
+            }
         }
     }
 }
@@ -384,11 +388,7 @@ pub struct SingleLabelManySpans {
     pub label: &'static str,
 }
 impl Subdiagnostic for SingleLabelManySpans {
-    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
-        self,
-        diag: &mut Diag<'_, G>,
-        _: &F,
-    ) {
+    fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         diag.span_labels(self.spans, self.label);
     }
 }

@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use rustc_abi::{FIRST_VARIANT, FieldIdx};
 use rustc_ast::UnsafeBinderCastKind;
+use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
@@ -9,7 +10,7 @@ use rustc_middle::hir::place::{
     Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
 };
 use rustc_middle::middle::region;
-use rustc_middle::mir::{self, BinOp, BorrowKind, UnOp};
+use rustc_middle::mir::{self, AssignOp, BinOp, BorrowKind, UnOp};
 use rustc_middle::thir::*;
 use rustc_middle::ty::adjustment::{
     Adjust, Adjustment, AutoBorrow, AutoBorrowMutability, PointerCoercion,
@@ -21,6 +22,7 @@ use rustc_middle::{bug, span_bug};
 use rustc_span::{Span, sym};
 use tracing::{debug, info, instrument, trace};
 
+use crate::errors::*;
 use crate::thir::cx::ThirBuildCx;
 
 impl<'tcx> ThirBuildCx<'tcx> {
@@ -38,7 +40,10 @@ impl<'tcx> ThirBuildCx<'tcx> {
     }
 
     pub(crate) fn mirror_exprs(&mut self, exprs: &'tcx [hir::Expr<'tcx>]) -> Box<[ExprId]> {
-        exprs.iter().map(|expr| self.mirror_expr_inner(expr)).collect()
+        // `mirror_exprs` may also recurse deeply, so it needs protection from stack overflow.
+        // Note that we *could* forward to `mirror_expr` for that, but we can consolidate the
+        // overhead of stack growth by doing it outside the iteration.
+        ensure_sufficient_stack(|| exprs.iter().map(|expr| self.mirror_expr_inner(expr)).collect())
     }
 
     #[instrument(level = "trace", skip(self, hir_expr))]
@@ -191,7 +196,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 let pointer_target = ExprKind::Field {
                     lhs: self.thir.exprs.push(expr),
                     variant_index: FIRST_VARIANT,
-                    name: FieldIdx::from(0u32),
+                    name: FieldIdx::ZERO,
                 };
                 let arg = Expr { temp_lifetime, ty: pin_ty, span, kind: pointer_target };
                 let arg = self.thir.exprs.push(arg);
@@ -220,13 +225,13 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 });
 
                 // kind = Pin { __pointer: pointer }
-                let pin_did = self.tcx.require_lang_item(rustc_hir::LangItem::Pin, Some(span));
+                let pin_did = self.tcx.require_lang_item(rustc_hir::LangItem::Pin, span);
                 let args = self.tcx.mk_args(&[new_pin_target.into()]);
                 let kind = ExprKind::Adt(Box::new(AdtExpr {
                     adt_def: self.tcx.adt_def(pin_did),
                     variant_index: FIRST_VARIANT,
                     args,
-                    fields: Box::new([FieldExpr { name: FieldIdx::from(0u32), expr }]),
+                    fields: Box::new([FieldExpr { name: FieldIdx::ZERO, expr }]),
                     user_ty: None,
                     base: AdtExprBase::None,
                 }));
@@ -464,6 +469,10 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 }
             }
 
+            hir::ExprKind::Use(expr, span) => {
+                ExprKind::ByUse { expr: self.mirror_expr(expr), span }
+            }
+
             hir::ExprKind::AddrOf(hir::BorrowKind::Ref, mutbl, arg) => {
                 ExprKind::Borrow { borrow_kind: mutbl.to_borrow_kind(), arg: self.mirror_expr(arg) }
             }
@@ -471,6 +480,55 @@ impl<'tcx> ThirBuildCx<'tcx> {
             hir::ExprKind::AddrOf(hir::BorrowKind::Raw, mutability, arg) => {
                 ExprKind::RawBorrow { mutability, arg: self.mirror_expr(arg) }
             }
+
+            // Make `&pin mut $expr` and `&pin const $expr` into
+            // `Pin { __pointer: &mut { $expr } }` and `Pin { __pointer: &$expr }`.
+            hir::ExprKind::AddrOf(hir::BorrowKind::Pin, mutbl, arg_expr) => match expr_ty.kind() {
+                &ty::Adt(adt_def, args) if tcx.is_lang_item(adt_def.did(), hir::LangItem::Pin) => {
+                    let ty = args.type_at(0);
+                    let arg_ty = self.typeck_results.expr_ty(arg_expr);
+                    let mut arg = self.mirror_expr(arg_expr);
+                    // For `&pin mut $place` where `$place` is not `Unpin`, move the place
+                    // `$place` to ensure it will not be used afterwards.
+                    if mutbl.is_mut() && !arg_ty.is_unpin(self.tcx, self.typing_env) {
+                        let block = self.thir.blocks.push(Block {
+                            targeted_by_break: false,
+                            region_scope: region::Scope {
+                                local_id: arg_expr.hir_id.local_id,
+                                data: region::ScopeData::Node,
+                            },
+                            span: arg_expr.span,
+                            stmts: Box::new([]),
+                            expr: Some(arg),
+                            safety_mode: BlockSafety::Safe,
+                        });
+                        let (temp_lifetime, backwards_incompatible) = self
+                            .rvalue_scopes
+                            .temporary_scope(self.region_scope_tree, arg_expr.hir_id.local_id);
+                        arg = self.thir.exprs.push(Expr {
+                            temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
+                            ty: arg_ty,
+                            span: arg_expr.span,
+                            kind: ExprKind::Block { block },
+                        });
+                    }
+                    let expr = self.thir.exprs.push(Expr {
+                        temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
+                        ty,
+                        span: expr.span,
+                        kind: ExprKind::Borrow { borrow_kind: mutbl.to_borrow_kind(), arg },
+                    });
+                    ExprKind::Adt(Box::new(AdtExpr {
+                        adt_def,
+                        variant_index: FIRST_VARIANT,
+                        args,
+                        fields: Box::new([FieldExpr { name: FieldIdx::from(0u32), expr }]),
+                        user_ty: None,
+                        base: AdtExprBase::None,
+                    }))
+                }
+                _ => span_bug!(expr.span, "unexpected type for pinned borrow: {:?}", expr_ty),
+            },
 
             hir::ExprKind::Block(blk, _) => ExprKind::Block { block: self.mirror_block(blk) },
 
@@ -485,7 +543,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                     self.overloaded_operator(expr, Box::new([lhs, rhs]))
                 } else {
                     ExprKind::AssignOp {
-                        op: bin_op(op.node),
+                        op: assign_op(op.node),
                         lhs: self.mirror_expr(lhs),
                         rhs: self.mirror_expr(rhs),
                     }
@@ -648,7 +706,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 }
             },
 
-            hir::ExprKind::Closure { .. } => {
+            hir::ExprKind::Closure(hir::Closure { .. }) => {
                 let closure_ty = self.typeck_results.expr_ty(expr);
                 let (def_id, args, movability) = match *closure_ty.kind() {
                     ty::Closure(def_id, args) => (def_id, UpvarArgs::Closure(args), None),
@@ -789,16 +847,38 @@ impl<'tcx> ThirBuildCx<'tcx> {
             }
             hir::ExprKind::Ret(v) => ExprKind::Return { value: v.map(|v| self.mirror_expr(v)) },
             hir::ExprKind::Become(call) => ExprKind::Become { value: self.mirror_expr(call) },
-            hir::ExprKind::Break(dest, ref value) => match dest.target_id {
-                Ok(target_id) => ExprKind::Break {
-                    label: region::Scope {
-                        local_id: target_id.local_id,
-                        data: region::ScopeData::Node,
-                    },
-                    value: value.map(|value| self.mirror_expr(value)),
-                },
-                Err(err) => bug!("invalid loop id for break: {}", err),
-            },
+            hir::ExprKind::Break(dest, ref value) => {
+                if find_attr!(self.tcx.hir_attrs(expr.hir_id), AttributeKind::ConstContinue(_)) {
+                    match dest.target_id {
+                        Ok(target_id) => {
+                            let Some(value) = value else {
+                                let span = expr.span;
+                                self.tcx.dcx().emit_fatal(ConstContinueMissingValue { span })
+                            };
+
+                            ExprKind::ConstContinue {
+                                label: region::Scope {
+                                    local_id: target_id.local_id,
+                                    data: region::ScopeData::Node,
+                                },
+                                value: self.mirror_expr(value),
+                            }
+                        }
+                        Err(err) => bug!("invalid loop id for break: {}", err),
+                    }
+                } else {
+                    match dest.target_id {
+                        Ok(target_id) => ExprKind::Break {
+                            label: region::Scope {
+                                local_id: target_id.local_id,
+                                data: region::ScopeData::Node,
+                            },
+                            value: value.map(|value| self.mirror_expr(value)),
+                        },
+                        Err(err) => bug!("invalid loop id for break: {}", err),
+                    }
+                }
+            }
             hir::ExprKind::Continue(dest) => match dest.target_id {
                 Ok(loop_id) => ExprKind::Continue {
                     label: region::Scope {
@@ -833,18 +913,96 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 match_source,
             },
             hir::ExprKind::Loop(body, ..) => {
-                let block_ty = self.typeck_results.node_type(body.hir_id);
-                let (temp_lifetime, backwards_incompatible) = self
-                    .rvalue_scopes
-                    .temporary_scope(self.region_scope_tree, body.hir_id.local_id);
-                let block = self.mirror_block(body);
-                let body = self.thir.exprs.push(Expr {
-                    ty: block_ty,
-                    temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
-                    span: self.thir[block].span,
-                    kind: ExprKind::Block { block },
-                });
-                ExprKind::Loop { body }
+                if find_attr!(self.tcx.hir_attrs(expr.hir_id), AttributeKind::LoopMatch(_)) {
+                    let dcx = self.tcx.dcx();
+
+                    // Accept either `state = expr` or `state = expr;`.
+                    let loop_body_expr = match body.stmts {
+                        [] => match body.expr {
+                            Some(expr) => expr,
+                            None => dcx.emit_fatal(LoopMatchMissingAssignment { span: body.span }),
+                        },
+                        [single] if body.expr.is_none() => match single.kind {
+                            hir::StmtKind::Expr(expr) | hir::StmtKind::Semi(expr) => expr,
+                            _ => dcx.emit_fatal(LoopMatchMissingAssignment { span: body.span }),
+                        },
+                        [first @ last] | [first, .., last] => dcx
+                            .emit_fatal(LoopMatchBadStatements { span: first.span.to(last.span) }),
+                    };
+
+                    let hir::ExprKind::Assign(state, rhs_expr, _) = loop_body_expr.kind else {
+                        dcx.emit_fatal(LoopMatchMissingAssignment { span: loop_body_expr.span })
+                    };
+
+                    let hir::ExprKind::Block(block_body, _) = rhs_expr.kind else {
+                        dcx.emit_fatal(LoopMatchBadRhs { span: rhs_expr.span })
+                    };
+
+                    // The labeled block should contain one match expression, but defining items is
+                    // allowed.
+                    for stmt in block_body.stmts {
+                        if !matches!(stmt.kind, rustc_hir::StmtKind::Item(_)) {
+                            dcx.emit_fatal(LoopMatchBadStatements { span: stmt.span })
+                        }
+                    }
+
+                    let Some(block_body_expr) = block_body.expr else {
+                        dcx.emit_fatal(LoopMatchBadRhs { span: block_body.span })
+                    };
+
+                    let hir::ExprKind::Match(scrutinee, arms, _match_source) = block_body_expr.kind
+                    else {
+                        dcx.emit_fatal(LoopMatchBadRhs { span: block_body_expr.span })
+                    };
+
+                    fn local(expr: &rustc_hir::Expr<'_>) -> Option<hir::HirId> {
+                        if let hir::ExprKind::Path(hir::QPath::Resolved(_, path)) = expr.kind {
+                            if let Res::Local(hir_id) = path.res {
+                                return Some(hir_id);
+                            }
+                        }
+
+                        None
+                    }
+
+                    let Some(scrutinee_hir_id) = local(scrutinee) else {
+                        dcx.emit_fatal(LoopMatchInvalidMatch { span: scrutinee.span })
+                    };
+
+                    if local(state) != Some(scrutinee_hir_id) {
+                        dcx.emit_fatal(LoopMatchInvalidUpdate {
+                            scrutinee: scrutinee.span,
+                            lhs: state.span,
+                        })
+                    }
+
+                    ExprKind::LoopMatch {
+                        state: self.mirror_expr(state),
+                        region_scope: region::Scope {
+                            local_id: block_body.hir_id.local_id,
+                            data: region::ScopeData::Node,
+                        },
+
+                        match_data: Box::new(LoopMatchMatchData {
+                            scrutinee: self.mirror_expr(scrutinee),
+                            arms: arms.iter().map(|a| self.convert_arm(a)).collect(),
+                            span: block_body_expr.span,
+                        }),
+                    }
+                } else {
+                    let block_ty = self.typeck_results.node_type(body.hir_id);
+                    let (temp_lifetime, backwards_incompatible) = self
+                        .rvalue_scopes
+                        .temporary_scope(self.region_scope_tree, body.hir_id.local_id);
+                    let block = self.mirror_block(body);
+                    let body = self.thir.exprs.push(Expr {
+                        ty: block_ty,
+                        temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
+                        span: self.thir[block].span,
+                        kind: ExprKind::Block { block },
+                    });
+                    ExprKind::Loop { body }
+                }
             }
             hir::ExprKind::Field(source, ..) => ExprKind::Field {
                 lhs: self.mirror_expr(source),
@@ -1037,7 +1195,7 @@ impl<'tcx> ThirBuildCx<'tcx> {
                         "Should have already errored about late bound consts: {def_id:?}"
                     );
                 };
-                let name = self.tcx.hir().name(hir_id);
+                let name = self.tcx.hir_name(hir_id);
                 let param = ty::ParamConst::new(index, name);
 
                 ExprKind::ConstParam { param, def_id }
@@ -1216,6 +1374,9 @@ impl<'tcx> ThirBuildCx<'tcx> {
                 HirProjectionKind::OpaqueCast => {
                     ExprKind::Use { source: self.thir.exprs.push(captured_place_expr) }
                 }
+                HirProjectionKind::UnwrapUnsafeBinder => ExprKind::PlaceUnwrapUnsafeBinder {
+                    source: self.thir.exprs.push(captured_place_expr),
+                },
                 HirProjectionKind::Index | HirProjectionKind::Subslice => {
                     // We don't capture these projections, so we can ignore them here
                     continue;
@@ -1248,6 +1409,17 @@ impl<'tcx> ThirBuildCx<'tcx> {
 
         match upvar_capture {
             ty::UpvarCapture::ByValue => captured_place_expr,
+            ty::UpvarCapture::ByUse => {
+                let span = captured_place_expr.span;
+                let expr_id = self.thir.exprs.push(captured_place_expr);
+
+                Expr {
+                    temp_lifetime: TempLifetime { temp_lifetime, backwards_incompatible },
+                    ty: upvar_ty,
+                    span: closure_expr.span,
+                    kind: ExprKind::ByUse { expr: expr_id, span },
+                }
+            }
             ty::UpvarCapture::ByRef(upvar_borrow) => {
                 let borrow_kind = match upvar_borrow {
                     ty::BorrowKind::Immutable => BorrowKind::Shared,
@@ -1330,5 +1502,20 @@ fn bin_op(op: hir::BinOpKind) -> BinOp {
         hir::BinOpKind::Ge => BinOp::Ge,
         hir::BinOpKind::Gt => BinOp::Gt,
         _ => bug!("no equivalent for ast binop {:?}", op),
+    }
+}
+
+fn assign_op(op: hir::AssignOpKind) -> AssignOp {
+    match op {
+        hir::AssignOpKind::AddAssign => AssignOp::AddAssign,
+        hir::AssignOpKind::SubAssign => AssignOp::SubAssign,
+        hir::AssignOpKind::MulAssign => AssignOp::MulAssign,
+        hir::AssignOpKind::DivAssign => AssignOp::DivAssign,
+        hir::AssignOpKind::RemAssign => AssignOp::RemAssign,
+        hir::AssignOpKind::BitXorAssign => AssignOp::BitXorAssign,
+        hir::AssignOpKind::BitAndAssign => AssignOp::BitAndAssign,
+        hir::AssignOpKind::BitOrAssign => AssignOp::BitOrAssign,
+        hir::AssignOpKind::ShlAssign => AssignOp::ShlAssign,
+        hir::AssignOpKind::ShrAssign => AssignOp::ShrAssign,
     }
 }

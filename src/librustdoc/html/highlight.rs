@@ -6,10 +6,10 @@
 //! Use the `render_with_highlighting` to highlight some rust code.
 
 use std::collections::VecDeque;
-use std::fmt::{Display, Write};
+use std::fmt::{self, Display, Write};
 
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_lexer::{Cursor, LiteralKind, TokenKind};
+use rustc_lexer::{Cursor, FrontmatterAllowed, LiteralKind, TokenKind};
 use rustc_span::edition::Edition;
 use rustc_span::symbol::Symbol;
 use rustc_span::{BytePos, DUMMY_SP, Span};
@@ -36,9 +36,10 @@ pub(crate) struct HrefContext<'a, 'tcx> {
 #[derive(Default)]
 pub(crate) struct DecorationInfo(pub(crate) FxIndexMap<&'static str, Vec<(u32, u32)>>);
 
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Eq, PartialEq, Clone)]
 pub(crate) enum Tooltip {
-    Ignore,
+    IgnoreAll,
+    IgnoreSome(Vec<String>),
     CompileFail,
     ShouldPanic,
     Edition(Edition),
@@ -70,7 +71,7 @@ fn write_header(
         format_args!(
             "<div class=\"example-wrap{}\">",
             match tooltip {
-                Tooltip::Ignore => " ignore",
+                Tooltip::IgnoreAll | Tooltip::IgnoreSome(_) => " ignore",
                 Tooltip::CompileFail => " compile_fail",
                 Tooltip::ShouldPanic => " should_panic",
                 Tooltip::Edition(_) => " edition",
@@ -80,27 +81,33 @@ fn write_header(
     );
 
     if tooltip != Tooltip::None {
-        let edition_code;
-        write_str(
-            out,
-            format_args!(
-                "<a href=\"#\" class=\"tooltip\" title=\"{}\">ⓘ</a>",
-                match tooltip {
-                    Tooltip::Ignore => "This example is not tested",
-                    Tooltip::CompileFail => "This example deliberately fails to compile",
-                    Tooltip::ShouldPanic => "This example panics",
-                    Tooltip::Edition(edition) => {
-                        edition_code = format!("This example runs with edition {edition}");
-                        &edition_code
+        let tooltip = fmt::from_fn(|f| match &tooltip {
+            Tooltip::IgnoreAll => f.write_str("This example is not tested"),
+            Tooltip::IgnoreSome(platforms) => {
+                f.write_str("This example is not tested on ")?;
+                match &platforms[..] {
+                    [] => unreachable!(),
+                    [platform] => f.write_str(platform)?,
+                    [first, second] => write!(f, "{first} or {second}")?,
+                    [platforms @ .., last] => {
+                        for platform in platforms {
+                            write!(f, "{platform}, ")?;
+                        }
+                        write!(f, "or {last}")?;
                     }
-                    Tooltip::None => unreachable!(),
                 }
-            ),
-        );
+                Ok(())
+            }
+            Tooltip::CompileFail => f.write_str("This example deliberately fails to compile"),
+            Tooltip::ShouldPanic => f.write_str("This example panics"),
+            Tooltip::Edition(edition) => write!(f, "This example runs with edition {edition}"),
+            Tooltip::None => unreachable!(),
+        });
+        write_str(out, format_args!("<a href=\"#\" class=\"tooltip\" title=\"{tooltip}\">ⓘ</a>"));
     }
 
     if let Some(extra) = extra_content {
-        out.push_str(&extra);
+        out.push_str(extra);
     }
     if class.is_empty() {
         write_str(
@@ -131,7 +138,7 @@ fn write_header(
 /// * If the other `Class` is unclassified and only contains white characters (backline,
 ///   whitespace, etc), it can be merged.
 /// * `Class::Ident` is considered the same as unclassified (because it doesn't have an associated
-///    CSS class).
+///   CSS class).
 fn can_merge(class1: Option<Class>, class2: Option<Class>, text: &str) -> bool {
     match (class1, class2) {
         (Some(c1), Some(c2)) => c1.is_equal_to(c2),
@@ -233,7 +240,7 @@ impl<F: Write> TokenHandler<'_, '_, F> {
 
     #[inline]
     fn write_line_number(&mut self, line: u32, extra: &'static str) {
-        (self.write_line_number)(&mut self.out, line, extra);
+        (self.write_line_number)(self.out, line, extra);
     }
 }
 
@@ -540,7 +547,7 @@ impl<'a> Iterator for TokenIter<'a> {
 fn get_real_ident_class(text: &str, allow_path_keywords: bool) -> Option<Class> {
     let ignore: &[&str] =
         if allow_path_keywords { &["self", "Self", "super", "crate"] } else { &["self", "Self"] };
-    if ignore.iter().any(|k| *k == text) {
+    if ignore.contains(&text) {
         return None;
     }
     Some(match text {
@@ -610,7 +617,7 @@ impl Decorations {
         let (mut starts, mut ends): (Vec<_>, Vec<_>) = info
             .0
             .iter()
-            .flat_map(|(&kind, ranges)| ranges.into_iter().map(move |&(lo, hi)| ((lo, kind), hi)))
+            .flat_map(|(&kind, ranges)| ranges.iter().map(move |&(lo, hi)| ((lo, kind), hi)))
             .unzip();
 
         // Sort the sequences in document order.
@@ -638,7 +645,8 @@ impl<'src> Classifier<'src> {
     /// Takes as argument the source code to HTML-ify, the rust edition to use and the source code
     /// file span which will be used later on by the `span_correspondence_map`.
     fn new(src: &'src str, file_span: Span, decoration_info: Option<&DecorationInfo>) -> Self {
-        let tokens = PeekIter::new(TokenIter { src, cursor: Cursor::new(src) });
+        let tokens =
+            PeekIter::new(TokenIter { src, cursor: Cursor::new(src, FrontmatterAllowed::Yes) });
         let decorations = decoration_info.map(Decorations::new);
         Classifier {
             tokens,
@@ -884,6 +892,7 @@ impl<'src> Classifier<'src> {
             | TokenKind::At
             | TokenKind::Tilde
             | TokenKind::Colon
+            | TokenKind::Frontmatter { .. }
             | TokenKind::Unknown => return no_highlight(sink),
 
             TokenKind::Question => Class::QuestionMark,
@@ -1102,56 +1111,55 @@ fn string_without_closing_tag<T: Display>(
         });
     }
 
-    if let Some(href_context) = href_context {
-        if let Some(href) =
-            href_context.context.shared.span_correspondence_map.get(&def_span).and_then(|href| {
-                let context = href_context.context;
-                // FIXME: later on, it'd be nice to provide two links (if possible) for all items:
-                // one to the documentation page and one to the source definition.
-                // FIXME: currently, external items only generate a link to their documentation,
-                // a link to their definition can be generated using this:
-                // https://github.com/rust-lang/rust/blob/60f1a2fc4b535ead9c85ce085fdce49b1b097531/src/librustdoc/html/render/context.rs#L315-L338
-                match href {
-                    LinkFromSrc::Local(span) => {
-                        context.href_from_span_relative(*span, &href_context.current_href)
-                    }
-                    LinkFromSrc::External(def_id) => {
-                        format::href_with_root_path(*def_id, context, Some(href_context.root_path))
-                            .ok()
-                            .map(|(url, _, _)| url)
-                    }
-                    LinkFromSrc::Primitive(prim) => format::href_with_root_path(
-                        PrimitiveType::primitive_locations(context.tcx())[prim],
-                        context,
-                        Some(href_context.root_path),
-                    )
-                    .ok()
-                    .map(|(url, _, _)| url),
-                    LinkFromSrc::Doc(def_id) => {
-                        format::href_with_root_path(*def_id, context, Some(href_context.root_path))
-                            .ok()
-                            .map(|(doc_link, _, _)| doc_link)
-                    }
+    if let Some(href_context) = href_context
+        && let Some(href) = href_context.context.shared.span_correspondence_map.get(&def_span)
+        && let Some(href) = {
+            let context = href_context.context;
+            // FIXME: later on, it'd be nice to provide two links (if possible) for all items:
+            // one to the documentation page and one to the source definition.
+            // FIXME: currently, external items only generate a link to their documentation,
+            // a link to their definition can be generated using this:
+            // https://github.com/rust-lang/rust/blob/60f1a2fc4b535ead9c85ce085fdce49b1b097531/src/librustdoc/html/render/context.rs#L315-L338
+            match href {
+                LinkFromSrc::Local(span) => {
+                    context.href_from_span_relative(*span, &href_context.current_href)
                 }
-            })
-        {
-            if !open_tag {
-                // We're already inside an element which has the same klass, no need to give it
-                // again.
-                write!(out, "<a href=\"{href}\">{text_s}").unwrap();
-            } else {
-                let klass_s = klass.as_html();
-                if klass_s.is_empty() {
-                    write!(out, "<a href=\"{href}\">{text_s}").unwrap();
-                } else {
-                    write!(out, "<a class=\"{klass_s}\" href=\"{href}\">{text_s}").unwrap();
+                LinkFromSrc::External(def_id) => {
+                    format::href_with_root_path(*def_id, context, Some(href_context.root_path))
+                        .ok()
+                        .map(|(url, _, _)| url)
+                }
+                LinkFromSrc::Primitive(prim) => format::href_with_root_path(
+                    PrimitiveType::primitive_locations(context.tcx())[prim],
+                    context,
+                    Some(href_context.root_path),
+                )
+                .ok()
+                .map(|(url, _, _)| url),
+                LinkFromSrc::Doc(def_id) => {
+                    format::href_with_root_path(*def_id, context, Some(href_context.root_path))
+                        .ok()
+                        .map(|(doc_link, _, _)| doc_link)
                 }
             }
-            return Some("</a>");
         }
+    {
+        if !open_tag {
+            // We're already inside an element which has the same klass, no need to give it
+            // again.
+            write!(out, "<a href=\"{href}\">{text_s}").unwrap();
+        } else {
+            let klass_s = klass.as_html();
+            if klass_s.is_empty() {
+                write!(out, "<a href=\"{href}\">{text_s}").unwrap();
+            } else {
+                write!(out, "<a class=\"{klass_s}\" href=\"{href}\">{text_s}").unwrap();
+            }
+        }
+        return Some("</a>");
     }
     if !open_tag {
-        write!(out, "{}", text_s).unwrap();
+        out.write_str(&text_s).unwrap();
         return None;
     }
     let klass_s = klass.as_html();

@@ -13,18 +13,20 @@ for a list of Miri maintainers.
 
 [Rust Zulip]: https://rust-lang.zulipchat.com
 
-### Pull review process
+### PR review process
 
 When you get a review, please take care of the requested changes in new commits. Do not amend
 existing commits. Generally avoid force-pushing. The only time you should force push is when there
 is a conflict with the master branch (in that case you should rebase across master, not merge), and
 all the way at the end of the review process when the reviewer tells you that the PR is done and you
-should squash the commits. For the latter case, use `git rebase --keep-base ...` to squash without
-changing the base commit your PR branches off of. Use your own judgment and the reviewer's guidance
-to decide whether the PR should be squashed into a single commit or multiple logically separate
-commits. (All this is to work around the fact that Github is quite bad at dealing with force pushes
-and does not support `git range-diff`. Maybe one day Github will be good at git and then life can
-become easier.)
+should squash the commits. (All this is to work around the fact that Github is quite bad at
+dealing with force pushes and does not support `git range-diff`.)
+
+The recommended way to squash commits is to use `./miri squash`, which will make everything into a
+single commit. You will be asked for the commit message; please ensure it describes the entire PR.
+You can also use `git rebase` manually if you need more control (e.g. if there should be more than
+one commit at the end), but then please use `--keep-base` to ensure the PR remains based on the same
+upstream commit.
 
 Most PRs bounce back and forth between the reviewer and the author several times, so it is good to
 keep track of who is expected to take the next step. We are using the `S-waiting-for-review` and
@@ -153,13 +155,22 @@ MIRI_LOG=rustc_mir::interpret=info,miri::stacked_borrows ./miri run tests/pass/v
 
 Note that you will only get `info`, `warn` or `error` messages if you use a prebuilt compiler.
 In order to get `debug` and `trace` level messages, you need to build miri with a locally built
-compiler that has `debug=true` set in `config.toml`.
+compiler that has `debug=true` set in `bootstrap.toml`.
 
 #### Debugging error messages
 
 You can set `MIRI_BACKTRACE=1` to get a backtrace of where an
 evaluation error was originally raised.
 
+#### Tracing
+
+You can generate a Chrome trace file from a Miri execution by passing `--features=tracing` during the
+build and then setting `MIRI_TRACING=1` when running Miri. This will generate a `.json` file that
+you can visualize in [Perfetto](https://ui.perfetto.dev/). For example:
+
+```sh
+MIRI_TRACING=1 ./miri run --features=tracing tests/pass/hello.rs
+```
 
 ### UI testing
 
@@ -341,6 +352,7 @@ https. Add the following to your `.gitconfig`:
 
 The following environment variables are relevant to `./miri`:
 
+* `CARGO` sets the binary used to execute Cargo; if none is specified, defaults to `cargo`.
 * `MIRI_AUTO_OPS` indicates whether the automatic execution of rustfmt, clippy and toolchain setup
   (as controlled by the `./auto-*` files) should be skipped. If it is set to `no`, they are skipped.
   This is used to allow automated IDE actions to avoid the auto ops.

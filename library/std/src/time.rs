@@ -95,10 +95,10 @@ use crate::sys_common::{FromInner, IntoInner};
 /// let now = Instant::now();
 /// let days_per_10_millennia = 365_2425;
 /// let solar_seconds_per_day = 60 * 60 * 24;
-/// let millenium_in_solar_seconds = 31_556_952_000;
-/// assert_eq!(millenium_in_solar_seconds, days_per_10_millennia * solar_seconds_per_day / 10);
+/// let millennium_in_solar_seconds = 31_556_952_000;
+/// assert_eq!(millennium_in_solar_seconds, days_per_10_millennia * solar_seconds_per_day / 10);
 ///
-/// let duration = Duration::new(millenium_in_solar_seconds, 0);
+/// let duration = Duration::new(millennium_in_solar_seconds, 0);
 /// println!("{:?}", now + duration);
 /// ```
 ///
@@ -205,8 +205,8 @@ pub struct Instant(time::Instant);
 ///            println!("{}", elapsed.as_secs());
 ///        }
 ///        Err(e) => {
-///            // an error occurred!
-///            println!("Error: {e:?}");
+///            // the system clock went backwards!
+///            println!("Great Scott! {e:?}");
 ///        }
 ///    }
 /// }
@@ -245,6 +245,7 @@ pub struct Instant(time::Instant);
 /// > structure cannot represent the new point in time.
 ///
 /// [`add`]: SystemTime::add
+/// [`UNIX_EPOCH`]: SystemTime::UNIX_EPOCH
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[stable(feature = "time2", since = "1.8.0")]
 pub struct SystemTime(time::SystemTime);
@@ -405,6 +406,15 @@ impl Instant {
     #[stable(feature = "time_checked_add", since = "1.34.0")]
     pub fn checked_sub(&self, duration: Duration) -> Option<Instant> {
         self.0.checked_sub_duration(&duration).map(Instant)
+    }
+
+    // Used by platform specific `sleep_until` implementations such as the one used on Linux.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(unused, reason = "not every platform has a specific `sleep_until`")
+    )]
+    pub(crate) fn into_inner(self) -> time::Instant {
+        self.0
     }
 }
 

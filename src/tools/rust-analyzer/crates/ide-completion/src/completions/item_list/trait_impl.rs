@@ -31,20 +31,22 @@
 //! }
 //! ```
 
-use hir::{db::ExpandDatabase, MacroFileId, Name};
+use hir::{MacroCallId, Name, db::ExpandDatabase};
 use ide_db::text_edit::TextEdit;
 use ide_db::{
-    documentation::HasDocs, path_transform::PathTransform,
-    syntax_helpers::prettify_macro_expansion, traits::get_missing_assoc_items, SymbolKind,
+    SymbolKind, documentation::HasDocs, path_transform::PathTransform,
+    syntax_helpers::prettify_macro_expansion, traits::get_missing_assoc_items,
 };
+use syntax::ast::HasGenericParams;
 use syntax::{
-    ast::{self, edit_in_place::AttrsOwnerEdit, make, HasGenericArgs, HasTypeBounds},
-    format_smolstr, ted, AstNode, SmolStr, SyntaxElement, SyntaxKind, TextRange, ToSmolStr, T,
+    AstNode, SmolStr, SyntaxElement, SyntaxKind, T, TextRange, ToSmolStr,
+    ast::{self, HasGenericArgs, HasTypeBounds, edit_in_place::AttrsOwnerEdit, make},
+    format_smolstr, ted,
 };
 
 use crate::{
-    context::PathCompletionCtx, CompletionContext, CompletionItem, CompletionItemKind,
-    CompletionRelevance, Completions,
+    CompletionContext, CompletionItem, CompletionItemKind, CompletionRelevance, Completions,
+    context::PathCompletionCtx,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -121,7 +123,7 @@ fn complete_trait_impl_name(
 pub(crate) fn complete_trait_impl_item_by_name(
     acc: &mut Completions,
     ctx: &CompletionContext<'_>,
-    path_ctx: &PathCompletionCtx,
+    path_ctx: &PathCompletionCtx<'_>,
     name_ref: &Option<ast::NameRef>,
     impl_: &Option<ast::Impl>,
 ) {
@@ -389,6 +391,12 @@ fn add_type_alias_impl(
             } else if let Some(end) = transformed_ty.eq_token().map(|tok| tok.text_range().start())
             {
                 end
+            } else if let Some(end) = transformed_ty
+                .where_clause()
+                .and_then(|wc| wc.where_token())
+                .map(|tok| tok.text_range().start())
+            {
+                end
             } else if let Some(end) =
                 transformed_ty.semicolon_token().map(|tok| tok.text_range().start())
             {
@@ -399,17 +407,29 @@ fn add_type_alias_impl(
 
             let len = end - start;
             let mut decl = transformed_ty.syntax().text().slice(..len).to_string();
-            if !decl.ends_with(' ') {
-                decl.push(' ');
-            }
-            decl.push_str("= ");
+            decl.truncate(decl.trim_end().len());
+            decl.push_str(" = ");
+
+            let wc = transformed_ty
+                .where_clause()
+                .map(|wc| {
+                    let ws = wc
+                        .where_token()
+                        .and_then(|it| it.prev_token())
+                        .filter(|token| token.kind() == SyntaxKind::WHITESPACE)
+                        .map(|token| token.to_string())
+                        .unwrap_or_else(|| " ".into());
+                    format!("{ws}{wc}")
+                })
+                .unwrap_or_default();
 
             match ctx.config.snippet_cap {
                 Some(cap) => {
-                    let snippet = format!("{decl}$0;");
+                    let snippet = format!("{decl}$0{wc};");
                     item.snippet_edit(cap, TextEdit::replace(replacement_range, snippet));
                 }
                 None => {
+                    decl.push_str(&wc);
                     item.text_edit(TextEdit::replace(replacement_range, decl));
                 }
             };
@@ -464,7 +484,7 @@ fn add_const_impl(
 fn make_const_compl_syntax(
     ctx: &CompletionContext<'_>,
     const_: &ast::Const,
-    macro_file: Option<MacroFileId>,
+    macro_file: Option<MacroCallId>,
 ) -> SmolStr {
     let const_ = if let Some(macro_file) = macro_file {
         let span_map = ctx.db.expansion_span_map(macro_file);
@@ -492,7 +512,7 @@ fn make_const_compl_syntax(
 fn function_declaration(
     ctx: &CompletionContext<'_>,
     node: &ast::Fn,
-    macro_file: Option<MacroFileId>,
+    macro_file: Option<MacroCallId>,
 ) -> String {
     let node = if let Some(macro_file) = macro_file {
         let span_map = ctx.db.expansion_span_map(macro_file);
@@ -1435,6 +1455,30 @@ trait Tr<'b> {
 
 impl<'b> Tr<'b> for () {
     type Ty<'a: 'b, T: Copy, const C: usize> = $0;
+}
+"#,
+        );
+    }
+    #[test]
+    fn includes_where_clause() {
+        check_edit(
+            "type Ty",
+            r#"
+trait Tr {
+    type Ty where Self: Copy;
+}
+
+impl Tr for () {
+    $0
+}
+"#,
+            r#"
+trait Tr {
+    type Ty where Self: Copy;
+}
+
+impl Tr for () {
+    type Ty = $0 where Self: Copy;
 }
 "#,
         );

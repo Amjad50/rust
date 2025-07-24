@@ -2,18 +2,18 @@
 
 use hir::ScopeDef;
 use ide_db::{FxHashSet, SymbolKind};
-use syntax::{ast, format_smolstr, AstNode};
+use syntax::{AstNode, ast, format_smolstr};
 
 use crate::{
+    CompletionItem, CompletionItemKind, CompletionRelevance, Completions,
     context::{CompletionContext, PathCompletionCtx, Qualified},
     item::Builder,
-    CompletionItem, CompletionItemKind, CompletionRelevance, Completions,
 };
 
 pub(crate) fn complete_use_path(
     acc: &mut Completions,
     ctx: &CompletionContext<'_>,
-    path_ctx @ PathCompletionCtx { qualified, use_tree_parent, .. }: &PathCompletionCtx,
+    path_ctx @ PathCompletionCtx { qualified, use_tree_parent, .. }: &PathCompletionCtx<'_>,
     name_ref: &Option<ast::NameRef>,
 ) {
     match qualified {

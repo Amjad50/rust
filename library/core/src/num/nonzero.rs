@@ -1,6 +1,7 @@
 //! Definitions of integer that is known not to equal zero.
 
 use super::{IntErrorKind, ParseIntError};
+use crate::clone::UseCloned;
 use crate::cmp::Ordering;
 use crate::hash::{Hash, Hasher};
 use crate::marker::{Freeze, StructuralPartialEq};
@@ -78,6 +79,7 @@ impl_zeroable_primitive!(
     NonZeroI64Inner(i64),
     NonZeroI128Inner(i128),
     NonZeroIsizeInner(isize),
+    NonZeroCharInner(char),
 );
 
 /// A value that is known not to equal zero.
@@ -86,7 +88,7 @@ impl_zeroable_primitive!(
 /// For example, `Option<NonZero<u32>>` is the same size as `u32`:
 ///
 /// ```
-/// use core::{mem::size_of, num::NonZero};
+/// use core::{num::NonZero};
 ///
 /// assert_eq!(size_of::<Option<NonZero<u32>>>(), size_of::<u32>());
 /// ```
@@ -102,7 +104,6 @@ impl_zeroable_primitive!(
 /// `Option<NonZero<T>>` are guaranteed to have the same size and alignment:
 ///
 /// ```
-/// # use std::mem::{size_of, align_of};
 /// use std::num::NonZero;
 ///
 /// assert_eq!(size_of::<NonZero<u32>>(), size_of::<Option<NonZero<u32>>>());
@@ -110,6 +111,15 @@ impl_zeroable_primitive!(
 /// ```
 ///
 /// [null pointer optimization]: crate::option#representation
+///
+/// # Note on generic usage
+///
+/// `NonZero<T>` can only be used with some standard library primitive types
+/// (such as `u8`, `i32`, and etc.). The type parameter `T` must implement the
+/// internal trait [`ZeroablePrimitive`], which is currently permanently unstable
+/// and cannot be implemented by users. Therefore, you cannot use `NonZero<T>`
+/// with your own types, nor can you implement traits for all `NonZero<T>`,
+/// only for concrete types.
 #[stable(feature = "generic_nonzero", since = "1.79.0")]
 #[repr(transparent)]
 #[rustc_nonnull_optimization_guaranteed]
@@ -183,13 +193,17 @@ where
     }
 }
 
+#[unstable(feature = "ergonomic_clones", issue = "132290")]
+impl<T> UseCloned for NonZero<T> where T: ZeroablePrimitive {}
+
 #[stable(feature = "nonzero", since = "1.28.0")]
 impl<T> Copy for NonZero<T> where T: ZeroablePrimitive {}
 
 #[stable(feature = "nonzero", since = "1.28.0")]
-impl<T> PartialEq for NonZero<T>
+#[rustc_const_unstable(feature = "const_cmp", issue = "143800")]
+impl<T> const PartialEq for NonZero<T>
 where
-    T: ZeroablePrimitive + PartialEq,
+    T: ZeroablePrimitive + ~const PartialEq,
 {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
@@ -283,7 +297,8 @@ where
 }
 
 #[stable(feature = "from_nonzero", since = "1.31.0")]
-impl<T> From<NonZero<T>> for T
+#[rustc_const_unstable(feature = "const_try", issue = "74935")]
+impl<T> const From<NonZero<T>> for T
 where
     T: ZeroablePrimitive,
 {
@@ -385,6 +400,7 @@ where
     #[rustc_const_stable(feature = "nonzero", since = "1.28.0")]
     #[must_use]
     #[inline]
+    #[track_caller]
     pub const unsafe fn new_unchecked(n: T) -> Self {
         match Self::new(n) {
             Some(n) => n,
@@ -425,6 +441,7 @@ where
     #[unstable(feature = "nonzero_from_mut", issue = "106290")]
     #[must_use]
     #[inline]
+    #[track_caller]
     pub unsafe fn from_mut_unchecked(n: &mut T) -> &mut Self {
         match Self::from_mut(n) {
             Some(n) => n,
@@ -500,7 +517,6 @@ macro_rules! nonzero_integer {
         #[doc = concat!("For example, `Option<", stringify!($Ty), ">` is the same size as `", stringify!($Int), "`:")]
         ///
         /// ```rust
-        /// use std::mem::size_of;
         #[doc = concat!("assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", stringify!($Int), ">());")]
         /// ```
         ///
@@ -516,7 +532,6 @@ macro_rules! nonzero_integer {
         /// are guaranteed to have the same size and alignment:
         ///
         /// ```
-        /// # use std::mem::{size_of, align_of};
         #[doc = concat!("use std::num::", stringify!($Ty), ";")]
         ///
         #[doc = concat!("assert_eq!(size_of::<", stringify!($Ty), ">(), size_of::<Option<", stringify!($Ty), ">>());")]
@@ -548,8 +563,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// # use std::num::NonZero;
             /// #
@@ -580,8 +593,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// # use std::num::NonZero;
             /// #
@@ -608,8 +619,6 @@ macro_rules! nonzero_integer {
             /// Returns `self` with only the most significant bit set.
             ///
             /// # Example
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// #![feature(isolate_most_least_significant_one)]
@@ -641,8 +650,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Example
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// #![feature(isolate_most_least_significant_one)]
             ///
@@ -672,8 +679,6 @@ macro_rules! nonzero_integer {
             /// Returns the number of ones in the binary representation of `self`.
             ///
             /// # Examples
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// # use std::num::NonZero;
@@ -710,8 +715,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// #![feature(nonzero_bitwise)]
             /// # use std::num::NonZero;
@@ -743,8 +746,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// #![feature(nonzero_bitwise)]
             /// # use std::num::NonZero;
@@ -771,8 +772,6 @@ macro_rules! nonzero_integer {
             /// Reverses the byte order of the integer.
             ///
             /// # Examples
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// #![feature(nonzero_bitwise)]
@@ -801,8 +800,6 @@ macro_rules! nonzero_integer {
             /// second least-significant bit becomes second most-significant bit, etc.
             ///
             /// # Examples
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// #![feature(nonzero_bitwise)]
@@ -833,8 +830,6 @@ macro_rules! nonzero_integer {
             /// swapped.
             ///
             /// # Examples
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// #![feature(nonzero_bitwise)]
@@ -869,8 +864,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// #![feature(nonzero_bitwise)]
             /// # use std::num::NonZero;
@@ -904,8 +897,6 @@ macro_rules! nonzero_integer {
             ///
             /// # Examples
             ///
-            /// Basic usage:
-            ///
             /// ```
             /// #![feature(nonzero_bitwise)]
             /// # use std::num::NonZero;
@@ -938,8 +929,6 @@ macro_rules! nonzero_integer {
             /// swapped.
             ///
             /// # Examples
-            ///
-            /// Basic usage:
             ///
             /// ```
             /// #![feature(nonzero_bitwise)]
@@ -1588,7 +1577,7 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
             super::int_log10::$Int(self.get())
         }
 
-        /// Calculates the middle point of `self` and `rhs`.
+        /// Calculates the midpoint (average) between `self` and `rhs`.
         ///
         /// `midpoint(a, b)` is `(a + b) >> 1` as if it were performed in a
         /// sufficiently-large signed integral type. This implies that the result is
@@ -1614,6 +1603,8 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         #[rustc_const_stable(feature = "num_midpoint", since = "1.85.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
+        #[doc(alias = "average_floor")]
+        #[doc(alias = "average")]
         #[inline]
         pub const fn midpoint(self, rhs: Self) -> Self {
             // SAFETY: The only way to get `0` with midpoint is to have two opposite or
@@ -1629,8 +1620,6 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         /// on the underlying integer type, as special handling of zero can be avoided.
         ///
         /// # Examples
-        ///
-        /// Basic usage:
         ///
         /// ```
         /// # use std::num::NonZero;
@@ -1661,7 +1650,6 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         /// # Examples
         ///
-        /// Basic usage:
         /// ```
         /// # use std::num::NonZero;
         /// #
@@ -1694,8 +1682,6 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         /// # Examples
         ///
-        /// Basic usage:
-        ///
         /// ```
         /// # use std::num::NonZero;
         ///
@@ -1703,8 +1689,8 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         #[doc = concat!("assert_eq!(n.cast_signed(), NonZero::new(-1", stringify!($Sint), ").unwrap());")]
         /// ```
-        #[stable(feature = "integer_sign_cast", since = "CURRENT_RUSTC_VERSION")]
-        #[rustc_const_stable(feature = "integer_sign_cast", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[rustc_const_stable(feature = "integer_sign_cast", since = "1.87.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline(always)]
@@ -2133,8 +2119,6 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         /// # Examples
         ///
-        /// Basic usage:
-        ///
         /// ```
         /// # use std::num::NonZero;
         ///
@@ -2142,8 +2126,8 @@ macro_rules! nonzero_integer_signedness_dependent_methods {
         ///
         #[doc = concat!("assert_eq!(n.cast_unsigned(), NonZero::<", stringify!($Uint), ">::MAX);")]
         /// ```
-        #[stable(feature = "integer_sign_cast", since = "CURRENT_RUSTC_VERSION")]
-        #[rustc_const_stable(feature = "integer_sign_cast", since = "CURRENT_RUSTC_VERSION")]
+        #[stable(feature = "integer_sign_cast", since = "1.87.0")]
+        #[rustc_const_stable(feature = "integer_sign_cast", since = "1.87.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline(always)]

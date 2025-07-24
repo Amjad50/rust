@@ -253,11 +253,37 @@ fn dump_path<'tcx>(
             }));
             s
         }
-        ty::InstanceKind::AsyncDropGlueCtorShim(_, Some(ty)) => {
-            // Unfortunately, pretty-printed typed are not very filename-friendly.
-            // We dome some filtering.
+        ty::InstanceKind::AsyncDropGlueCtorShim(_, ty) => {
             let mut s = ".".to_owned();
             s.extend(ty.to_string().chars().filter_map(|c| match c {
+                ' ' => None,
+                ':' | '<' | '>' => Some('_'),
+                c => Some(c),
+            }));
+            s
+        }
+        ty::InstanceKind::AsyncDropGlue(_, ty) => {
+            let ty::Coroutine(_, args) = ty.kind() else {
+                bug!();
+            };
+            let ty = args.first().unwrap().expect_ty();
+            let mut s = ".".to_owned();
+            s.extend(ty.to_string().chars().filter_map(|c| match c {
+                ' ' => None,
+                ':' | '<' | '>' => Some('_'),
+                c => Some(c),
+            }));
+            s
+        }
+        ty::InstanceKind::FutureDropPollShim(_, proxy_cor, impl_cor) => {
+            let mut s = ".".to_owned();
+            s.extend(proxy_cor.to_string().chars().filter_map(|c| match c {
+                ' ' => None,
+                ':' | '<' | '>' => Some('_'),
+                c => Some(c),
+            }));
+            s.push('.');
+            s.extend(impl_cor.to_string().chars().filter_map(|c| match c {
                 ' ' => None,
                 ':' | '<' | '>' => Some('_'),
                 c => Some(c),
@@ -531,12 +557,12 @@ fn write_mir_intro<'tcx>(
 
     // construct a scope tree and write it out
     let mut scope_tree: FxHashMap<SourceScope, Vec<SourceScope>> = Default::default();
-    for (index, scope_data) in body.source_scopes.iter().enumerate() {
+    for (index, scope_data) in body.source_scopes.iter_enumerated() {
         if let Some(parent) = scope_data.parent_scope {
-            scope_tree.entry(parent).or_default().push(SourceScope::new(index));
+            scope_tree.entry(parent).or_default().push(index);
         } else {
             // Only the argument scope has no parent, because it's the root.
-            assert_eq!(index, OUTERMOST_SOURCE_SCOPE.index());
+            assert_eq!(index, OUTERMOST_SOURCE_SCOPE);
         }
     }
 
@@ -620,9 +646,8 @@ fn write_function_coverage_info(
     function_coverage_info: &coverage::FunctionCoverageInfo,
     w: &mut dyn io::Write,
 ) -> io::Result<()> {
-    let coverage::FunctionCoverageInfo { body_span, mappings, .. } = function_coverage_info;
+    let coverage::FunctionCoverageInfo { mappings, .. } = function_coverage_info;
 
-    writeln!(w, "{INDENT}coverage body span: {body_span:?}")?;
     for coverage::Mapping { kind, span } in mappings {
         writeln!(w, "{INDENT}coverage {kind:?} => {span:?};")?;
     }
@@ -653,7 +678,10 @@ fn write_mir_sig(tcx: TyCtxt<'_>, body: &Body<'_>, w: &mut dyn io::Write) -> io:
             write!(w, "static mut ")?
         }
         (_, _) if is_function => write!(w, "fn ")?,
-        (DefKind::AnonConst | DefKind::InlineConst, _) => {} // things like anon const, not an item
+        // things like anon const, not an item
+        (DefKind::AnonConst | DefKind::InlineConst, _) => {}
+        // `global_asm!` have fake bodies, which we may dump after mir-build
+        (DefKind::GlobalAsm, _) => {}
         _ => bug!("Unexpected def kind {:?}", kind),
     }
 
@@ -857,7 +885,7 @@ impl Debug for Statement<'_> {
             BackwardIncompatibleDropHint { ref place, reason: _ } => {
                 // For now, we don't record the reason because there is only one use case,
                 // which is to report breaking change in drop order by Edition 2024
-                write!(fmt, "backward incompatible drop({place:?})")
+                write!(fmt, "BackwardIncompatibleDropHint({place:?})")
             }
         }
     }
@@ -1048,7 +1076,13 @@ impl<'tcx> TerminatorKind<'tcx> {
             Call { target: None, unwind: _, .. } => vec![],
             Yield { drop: Some(_), .. } => vec!["resume".into(), "drop".into()],
             Yield { drop: None, .. } => vec!["resume".into()],
-            Drop { unwind: UnwindAction::Cleanup(_), .. } => vec!["return".into(), "unwind".into()],
+            Drop { unwind: UnwindAction::Cleanup(_), drop: Some(_), .. } => {
+                vec!["return".into(), "unwind".into(), "drop".into()]
+            }
+            Drop { unwind: UnwindAction::Cleanup(_), drop: None, .. } => {
+                vec!["return".into(), "unwind".into()]
+            }
+            Drop { unwind: _, drop: Some(_), .. } => vec!["return".into(), "drop".into()],
             Drop { unwind: _, .. } => vec!["return".into()],
             Assert { unwind: UnwindAction::Cleanup(_), .. } => {
                 vec!["success".into(), "unwind".into()]
@@ -1200,7 +1234,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             && let Some(upvars) = tcx.upvars_mentioned(def_id)
                         {
                             for (&var_id, place) in iter::zip(upvars.keys(), places) {
-                                let var_name = tcx.hir().name(var_id);
+                                let var_name = tcx.hir_name(var_id);
                                 struct_fmt.field(var_name.as_str(), place);
                             }
                         } else {
@@ -1221,7 +1255,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                             && let Some(upvars) = tcx.upvars_mentioned(def_id)
                         {
                             for (&var_id, place) in iter::zip(upvars.keys(), places) {
-                                let var_name = tcx.hir().name(var_id);
+                                let var_name = tcx.hir_name(var_id);
                                 struct_fmt.field(var_name.as_str(), place);
                             }
                         } else {
@@ -1431,7 +1465,7 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
                 self.push(&format!("+ user_ty: {user_ty:?}"));
             }
 
-            let fmt_val = |val: ConstValue<'tcx>, ty: Ty<'tcx>| {
+            let fmt_val = |val: ConstValue, ty: Ty<'tcx>| {
                 let tcx = self.tcx;
                 rustc_data_structures::make_display(move |fmt| {
                     pretty_print_const_value_tcx(tcx, val, ty, fmt)
@@ -1528,16 +1562,12 @@ pub fn write_allocations<'tcx>(
         alloc.inner().provenance().ptrs().values().map(|p| p.alloc_id())
     }
 
-    fn alloc_id_from_const_val(val: ConstValue<'_>) -> Option<AllocId> {
+    fn alloc_id_from_const_val(val: ConstValue) -> Option<AllocId> {
         match val {
             ConstValue::Scalar(interpret::Scalar::Ptr(ptr, _)) => Some(ptr.provenance.alloc_id()),
             ConstValue::Scalar(interpret::Scalar::Int { .. }) => None,
             ConstValue::ZeroSized => None,
-            ConstValue::Slice { .. } => {
-                // `u8`/`str` slices, shouldn't contain pointers that we want to print.
-                None
-            }
-            ConstValue::Indirect { alloc_id, .. } => {
+            ConstValue::Slice { alloc_id, .. } | ConstValue::Indirect { alloc_id, .. } => {
                 // FIXME: we don't actually want to print all of these, since some are printed nicely directly as values inline in MIR.
                 // Really we'd want `pretty_print_const_value` to decide which allocations to print, instead of having a separate visitor.
                 Some(alloc_id)
@@ -1587,10 +1617,15 @@ pub fn write_allocations<'tcx>(
             Some(GlobalAlloc::VTable(ty, dyn_ty)) => {
                 write!(w, " (vtable: impl {dyn_ty} for {ty})")?
             }
+            Some(GlobalAlloc::TypeId { ty }) => write!(w, " (typeid for {ty})")?,
             Some(GlobalAlloc::Static(did)) if !tcx.is_foreign_item(did) => {
                 write!(w, " (static: {}", tcx.def_path_str(did))?;
                 if body.phase <= MirPhase::Runtime(RuntimePhase::PostCleanup)
-                    && tcx.hir_body_const_context(body.source.def_id()).is_some()
+                    && body
+                        .source
+                        .def_id()
+                        .as_local()
+                        .is_some_and(|def_id| tcx.hir_body_const_context(def_id).is_some())
                 {
                     // Statics may be cyclic and evaluating them too early
                     // in the MIR pipeline may cause cycle errors even though
@@ -1715,7 +1750,7 @@ pub fn write_allocation_bytes<'tcx, Prov: Provenance, Extra, Bytes: AllocBytes>(
     let mut i = Size::ZERO;
     let mut line_start = Size::ZERO;
 
-    let ptr_size = tcx.data_layout.pointer_size;
+    let ptr_size = tcx.data_layout.pointer_size();
 
     let mut ascii = String::new();
 
@@ -1846,7 +1881,7 @@ fn pretty_print_byte_str(fmt: &mut Formatter<'_>, byte_str: &[u8]) -> fmt::Resul
 fn comma_sep<'tcx>(
     tcx: TyCtxt<'tcx>,
     fmt: &mut Formatter<'_>,
-    elems: Vec<(ConstValue<'tcx>, Ty<'tcx>)>,
+    elems: Vec<(ConstValue, Ty<'tcx>)>,
 ) -> fmt::Result {
     let mut first = true;
     for (ct, ty) in elems {
@@ -1861,7 +1896,7 @@ fn comma_sep<'tcx>(
 
 fn pretty_print_const_value_tcx<'tcx>(
     tcx: TyCtxt<'tcx>,
-    ct: ConstValue<'tcx>,
+    ct: ConstValue,
     ty: Ty<'tcx>,
     fmt: &mut Formatter<'_>,
 ) -> fmt::Result {
@@ -1908,7 +1943,7 @@ fn pretty_print_const_value_tcx<'tcx>(
             let ct = tcx.lift(ct).unwrap();
             let ty = tcx.lift(ty).unwrap();
             if let Some(contents) = tcx.try_destructure_mir_constant_for_user_output(ct, ty) {
-                let fields: Vec<(ConstValue<'_>, Ty<'_>)> = contents.fields.to_vec();
+                let fields: Vec<(ConstValue, Ty<'_>)> = contents.fields.to_vec();
                 match *ty.kind() {
                     ty::Array(..) => {
                         fmt.write_str("[")?;
@@ -1989,7 +2024,7 @@ fn pretty_print_const_value_tcx<'tcx>(
 }
 
 pub(crate) fn pretty_print_const_value<'tcx>(
-    ct: ConstValue<'tcx>,
+    ct: ConstValue,
     ty: Ty<'tcx>,
     fmt: &mut Formatter<'_>,
 ) -> fmt::Result {

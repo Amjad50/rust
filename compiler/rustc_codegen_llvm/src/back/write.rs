@@ -15,6 +15,7 @@ use rustc_codegen_ssa::back::write::{
     BitcodeSection, CodegenContext, EmitObj, ModuleConfig, TargetMachineFactoryConfig,
     TargetMachineFactoryFn,
 };
+use rustc_codegen_ssa::base::wants_wasm_eh;
 use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::{CompiledModule, ModuleCodegen, ModuleKind};
 use rustc_data_structures::profiling::SelfProfilerRef;
@@ -119,14 +120,18 @@ pub(crate) fn create_target_machine(tcx: TyCtxt<'_>, mod_name: &str) -> OwnedTar
         tcx.output_filenames(()).split_dwarf_path(
             tcx.sess.split_debuginfo(),
             tcx.sess.opts.unstable_opts.split_dwarf_kind,
-            Some(mod_name),
+            mod_name,
+            tcx.sess.invocation_temp.as_deref(),
         )
     } else {
         None
     };
 
-    let output_obj_file =
-        Some(tcx.output_filenames(()).temp_path(OutputType::Object, Some(mod_name)));
+    let output_obj_file = Some(tcx.output_filenames(()).temp_path_for_cgu(
+        OutputType::Object,
+        mod_name,
+        tcx.sess.invocation_temp.as_deref(),
+    ));
     let config = TargetMachineFactoryConfig { split_dwarf_file, output_obj_file };
 
     target_machine_factory(
@@ -281,6 +286,8 @@ pub(crate) fn target_machine_factory(
     let file_name_display_preference =
         sess.filename_display_preference(RemapPathScopeComponents::DEBUGINFO);
 
+    let use_wasm_eh = wants_wasm_eh(sess);
+
     Arc::new(move |config: TargetMachineFactoryConfig| {
         let path_to_cstring_helper = |path: Option<PathBuf>| -> CString {
             let path = path.unwrap_or_default();
@@ -317,6 +324,7 @@ pub(crate) fn target_machine_factory(
             &debuginfo_compression,
             use_emulated_tls,
             &args_cstr_buff,
+            use_wasm_eh,
         )
     })
 }
@@ -330,8 +338,11 @@ pub(crate) fn save_temp_bitcode(
         return;
     }
     let ext = format!("{name}.bc");
-    let cgu = Some(&module.name[..]);
-    let path = cgcx.output_filenames.temp_path_ext(&ext, cgu);
+    let path = cgcx.output_filenames.temp_path_ext_for_cgu(
+        &ext,
+        &module.name,
+        cgcx.invocation_temp.as_deref(),
+    );
     write_bitcode_to_file(module, &path)
 }
 
@@ -439,12 +450,9 @@ fn report_inline_asm(
     let span = if cookie == 0 || matches!(cgcx.lto, Lto::Fat | Lto::Thin) {
         SpanData::default()
     } else {
-        let lo = BytePos::from_u32(cookie as u32);
-        let hi = BytePos::from_u32((cookie >> 32) as u32);
         SpanData {
-            lo,
-            // LLVM version < 19 silently truncates the cookie to 32 bits in some situations.
-            hi: if hi.to_u32() != 0 { hi } else { lo },
+            lo: BytePos::from_u32(cookie as u32),
+            hi: BytePos::from_u32((cookie >> 32) as u32),
             ctxt: SyntaxContext::root(),
             parent: None,
         }
@@ -568,6 +576,10 @@ pub(crate) unsafe fn llvm_optimize(
 
     let consider_ad = cfg!(llvm_enzyme) && config.autodiff.contains(&config::AutoDiff::Enable);
     let run_enzyme = autodiff_stage == AutodiffStage::DuringAD;
+    let print_before_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModBefore);
+    let print_after_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModAfter);
+    let print_passes = config.autodiff.contains(&config::AutoDiff::PrintPasses);
+    let merge_functions;
     let unroll_loops;
     let vectorize_slp;
     let vectorize_loop;
@@ -575,13 +587,20 @@ pub(crate) unsafe fn llvm_optimize(
     // When we build rustc with enzyme/autodiff support, we want to postpone size-increasing
     // optimizations until after differentiation. Our pipeline is thus: (opt + enzyme), (full opt).
     // We therefore have two calls to llvm_optimize, if autodiff is used.
+    //
+    // We also must disable merge_functions, since autodiff placeholder/dummy bodies tend to be
+    // identical. We run opts before AD, so there is a chance that LLVM will merge our dummies.
+    // In that case, we lack some dummy bodies and can't replace them with the real AD code anymore.
+    // We then would need to abort compilation. This was especially common in test cases.
     if consider_ad && autodiff_stage != AutodiffStage::PostAD {
+        merge_functions = false;
         unroll_loops = false;
         vectorize_slp = false;
         vectorize_loop = false;
     } else {
         unroll_loops =
             opt_level != config::OptLevel::Size && opt_level != config::OptLevel::SizeMin;
+        merge_functions = config.merge_functions;
         vectorize_slp = config.vectorize_slp;
         vectorize_loop = config.vectorize_loop;
     }
@@ -659,13 +678,16 @@ pub(crate) unsafe fn llvm_optimize(
             thin_lto_buffer,
             config.emit_thin_lto,
             config.emit_thin_lto_summary,
-            config.merge_functions,
+            merge_functions,
             unroll_loops,
             vectorize_slp,
             vectorize_loop,
             config.no_builtins,
             config.emit_lifetime_markers,
             run_enzyme,
+            print_before_enzyme,
+            print_after_enzyme,
+            print_passes,
             sanitizer_options.as_ref(),
             pgo_gen_path.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
             pgo_use_path.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
@@ -686,7 +708,7 @@ pub(crate) unsafe fn llvm_optimize(
 }
 
 // Unsafe due to LLVM calls.
-pub(crate) unsafe fn optimize(
+pub(crate) fn optimize(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
     dcx: DiagCtxtHandle<'_>,
     module: &mut ModuleCodegen<ModuleLlvm>,
@@ -697,11 +719,12 @@ pub(crate) unsafe fn optimize(
     let llcx = &*module.module_llvm.llcx;
     let _handlers = DiagnosticHandlers::new(cgcx, dcx, llcx, module, CodegenDiagnosticsStage::Opt);
 
-    let module_name = module.name.clone();
-    let module_name = Some(&module_name[..]);
-
     if config.emit_no_opt_bc {
-        let out = cgcx.output_filenames.temp_path_ext("no-opt.bc", module_name);
+        let out = cgcx.output_filenames.temp_path_ext_for_cgu(
+            "no-opt.bc",
+            &module.name,
+            cgcx.invocation_temp.as_deref(),
+        );
         write_bitcode_to_file(module, &out)
     }
 
@@ -746,8 +769,11 @@ pub(crate) unsafe fn optimize(
         if let Some(thin_lto_buffer) = thin_lto_buffer {
             let thin_lto_buffer = unsafe { ThinBuffer::from_raw_ptr(thin_lto_buffer) };
             module.thin_lto_buffer = Some(thin_lto_buffer.data().to_vec());
-            let bc_summary_out =
-                cgcx.output_filenames.temp_path(OutputType::ThinLinkBitcode, module_name);
+            let bc_summary_out = cgcx.output_filenames.temp_path_for_cgu(
+                OutputType::ThinLinkBitcode,
+                &module.name,
+                cgcx.invocation_temp.as_deref(),
+            );
             if config.emit_thin_lto_summary
                 && let Some(thin_link_bitcode_filename) = bc_summary_out.file_name()
             {
@@ -793,19 +819,19 @@ pub(crate) fn link(
     Ok(modules.remove(0))
 }
 
-pub(crate) unsafe fn codegen(
+pub(crate) fn codegen(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
-    dcx: DiagCtxtHandle<'_>,
     module: ModuleCodegen<ModuleLlvm>,
     config: &ModuleConfig,
 ) -> Result<CompiledModule, FatalError> {
+    let dcx = cgcx.create_dcx();
+    let dcx = dcx.handle();
+
     let _timer = cgcx.prof.generic_activity_with_arg("LLVM_module_codegen", &*module.name);
     {
         let llmod = module.module_llvm.llmod();
         let llcx = &*module.module_llvm.llcx;
         let tm = &*module.module_llvm.tm;
-        let module_name = module.name.clone();
-        let module_name = Some(&module_name[..]);
         let _handlers =
             DiagnosticHandlers::new(cgcx, dcx, llcx, &module, CodegenDiagnosticsStage::Codegen);
 
@@ -817,8 +843,16 @@ pub(crate) unsafe fn codegen(
         // copy it to the .o file, and delete the bitcode if it wasn't
         // otherwise requested.
 
-        let bc_out = cgcx.output_filenames.temp_path(OutputType::Bitcode, module_name);
-        let obj_out = cgcx.output_filenames.temp_path(OutputType::Object, module_name);
+        let bc_out = cgcx.output_filenames.temp_path_for_cgu(
+            OutputType::Bitcode,
+            &module.name,
+            cgcx.invocation_temp.as_deref(),
+        );
+        let obj_out = cgcx.output_filenames.temp_path_for_cgu(
+            OutputType::Object,
+            &module.name,
+            cgcx.invocation_temp.as_deref(),
+        );
 
         if config.bitcode_needed() {
             if config.emit_bc || config.emit_obj == EmitObj::Bitcode {
@@ -851,16 +885,18 @@ pub(crate) unsafe fn codegen(
                     .generic_activity_with_arg("LLVM_module_codegen_embed_bitcode", &*module.name);
                 let thin_bc =
                     module.thin_lto_buffer.as_deref().expect("cannot find embedded bitcode");
-                unsafe {
-                    embed_bitcode(cgcx, llcx, llmod, &config.bc_cmdline, &thin_bc);
-                }
+                embed_bitcode(cgcx, llcx, llmod, &config.bc_cmdline, &thin_bc);
             }
         }
 
         if config.emit_ir {
             let _timer =
                 cgcx.prof.generic_activity_with_arg("LLVM_module_codegen_emit_ir", &*module.name);
-            let out = cgcx.output_filenames.temp_path(OutputType::LlvmAssembly, module_name);
+            let out = cgcx.output_filenames.temp_path_for_cgu(
+                OutputType::LlvmAssembly,
+                &module.name,
+                cgcx.invocation_temp.as_deref(),
+            );
             let out_c = path_to_c_string(&out);
 
             extern "C" fn demangle_callback(
@@ -902,14 +938,18 @@ pub(crate) unsafe fn codegen(
         if config.emit_asm {
             let _timer =
                 cgcx.prof.generic_activity_with_arg("LLVM_module_codegen_emit_asm", &*module.name);
-            let path = cgcx.output_filenames.temp_path(OutputType::Assembly, module_name);
+            let path = cgcx.output_filenames.temp_path_for_cgu(
+                OutputType::Assembly,
+                &module.name,
+                cgcx.invocation_temp.as_deref(),
+            );
 
             // We can't use the same module for asm and object code output,
             // because that triggers various errors like invalid IR or broken
             // binaries. So we must clone the module to produce the asm output
             // if we are also producing object code.
             let llmod = if let EmitObj::ObjectCode(_) = config.emit_obj {
-                unsafe { llvm::LLVMCloneModule(llmod) }
+                llvm::LLVMCloneModule(llmod)
             } else {
                 llmod
             };
@@ -932,7 +972,9 @@ pub(crate) unsafe fn codegen(
                     .prof
                     .generic_activity_with_arg("LLVM_module_codegen_emit_obj", &*module.name);
 
-                let dwo_out = cgcx.output_filenames.temp_path_dwo(module_name);
+                let dwo_out = cgcx
+                    .output_filenames
+                    .temp_path_dwo_for_cgu(&module.name, cgcx.invocation_temp.as_deref());
                 let dwo_out = match (cgcx.split_debuginfo, cgcx.split_dwarf_kind) {
                     // Don't change how DWARF is emitted when disabled.
                     (SplitDebuginfo::Off, _) => None,
@@ -997,6 +1039,7 @@ pub(crate) unsafe fn codegen(
         config.emit_asm,
         config.emit_ir,
         &cgcx.output_filenames,
+        cgcx.invocation_temp.as_deref(),
     ))
 }
 
@@ -1024,7 +1067,7 @@ fn create_section_with_flags_asm(section_name: &str, section_flags: &str, data: 
 }
 
 pub(crate) fn bitcode_section_name(cgcx: &CodegenContext<LlvmCodegenBackend>) -> &'static CStr {
-    if cgcx.target_is_like_osx {
+    if cgcx.target_is_like_darwin {
         c"__LLVM,__bitcode"
     } else if cgcx.target_is_like_aix {
         c".ipa"
@@ -1034,7 +1077,7 @@ pub(crate) fn bitcode_section_name(cgcx: &CodegenContext<LlvmCodegenBackend>) ->
 }
 
 /// Embed the bitcode of an LLVM module for LTO in the LLVM module itself.
-unsafe fn embed_bitcode(
+fn embed_bitcode(
     cgcx: &CodegenContext<LlvmCodegenBackend>,
     llcx: &llvm::Context,
     llmod: &llvm::Module,
@@ -1076,43 +1119,40 @@ unsafe fn embed_bitcode(
     // Unfortunately, LLVM provides no way to set custom section flags. For ELF
     // and COFF we emit the sections using module level inline assembly for that
     // reason (see issue #90326 for historical background).
-    unsafe {
-        if cgcx.target_is_like_osx
-            || cgcx.target_is_like_aix
-            || cgcx.target_arch == "wasm32"
-            || cgcx.target_arch == "wasm64"
-        {
-            // We don't need custom section flags, create LLVM globals.
-            let llconst = common::bytes_in_context(llcx, bitcode);
-            let llglobal =
-                llvm::add_global(llmod, common::val_ty(llconst), c"rustc.embedded.module");
-            llvm::set_initializer(llglobal, llconst);
 
-            llvm::set_section(llglobal, bitcode_section_name(cgcx));
-            llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
-            llvm::LLVMSetGlobalConstant(llglobal, llvm::True);
+    if cgcx.target_is_like_darwin
+        || cgcx.target_is_like_aix
+        || cgcx.target_arch == "wasm32"
+        || cgcx.target_arch == "wasm64"
+    {
+        // We don't need custom section flags, create LLVM globals.
+        let llconst = common::bytes_in_context(llcx, bitcode);
+        let llglobal = llvm::add_global(llmod, common::val_ty(llconst), c"rustc.embedded.module");
+        llvm::set_initializer(llglobal, llconst);
 
-            let llconst = common::bytes_in_context(llcx, cmdline.as_bytes());
-            let llglobal =
-                llvm::add_global(llmod, common::val_ty(llconst), c"rustc.embedded.cmdline");
-            llvm::set_initializer(llglobal, llconst);
-            let section = if cgcx.target_is_like_osx {
-                c"__LLVM,__cmdline"
-            } else if cgcx.target_is_like_aix {
-                c".info"
-            } else {
-                c".llvmcmd"
-            };
-            llvm::set_section(llglobal, section);
-            llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
+        llvm::set_section(llglobal, bitcode_section_name(cgcx));
+        llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
+        llvm::LLVMSetGlobalConstant(llglobal, llvm::True);
+
+        let llconst = common::bytes_in_context(llcx, cmdline.as_bytes());
+        let llglobal = llvm::add_global(llmod, common::val_ty(llconst), c"rustc.embedded.cmdline");
+        llvm::set_initializer(llglobal, llconst);
+        let section = if cgcx.target_is_like_darwin {
+            c"__LLVM,__cmdline"
+        } else if cgcx.target_is_like_aix {
+            c".info"
         } else {
-            // We need custom section flags, so emit module-level inline assembly.
-            let section_flags = if cgcx.is_pe_coff { "n" } else { "e" };
-            let asm = create_section_with_flags_asm(".llvmbc", section_flags, bitcode);
-            llvm::LLVMAppendModuleInlineAsm(llmod, asm.as_c_char_ptr(), asm.len());
-            let asm = create_section_with_flags_asm(".llvmcmd", section_flags, cmdline.as_bytes());
-            llvm::LLVMAppendModuleInlineAsm(llmod, asm.as_c_char_ptr(), asm.len());
-        }
+            c".llvmcmd"
+        };
+        llvm::set_section(llglobal, section);
+        llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
+    } else {
+        // We need custom section flags, so emit module-level inline assembly.
+        let section_flags = if cgcx.is_pe_coff { "n" } else { "e" };
+        let asm = create_section_with_flags_asm(".llvmbc", section_flags, bitcode);
+        llvm::append_module_inline_asm(llmod, &asm);
+        let asm = create_section_with_flags_asm(".llvmcmd", section_flags, cmdline.as_bytes());
+        llvm::append_module_inline_asm(llmod, &asm);
     }
 }
 
@@ -1143,7 +1183,7 @@ fn create_msvc_imps(
         .filter_map(|val| {
             // Exclude some symbols that we know are not Rust symbols.
             let name = llvm::get_value_name(val);
-            if ignored(name) { None } else { Some((val, name)) }
+            if ignored(&name) { None } else { Some((val, name)) }
         })
         .map(move |(val, name)| {
             let mut imp_name = prefix.as_bytes().to_vec();

@@ -8,20 +8,17 @@ use std::hash::Hash;
 
 use rustc_abi::{Align, Size};
 use rustc_apfloat::{Float, FloatConvert};
-use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::{mir, ty};
-use rustc_span::Span;
 use rustc_span::def_id::DefId;
 use rustc_target::callconv::FnAbi;
 
 use super::{
     AllocBytes, AllocId, AllocKind, AllocRange, Allocation, CTFE_ALLOC_SALT, ConstAllocation,
-    CtfeProvenance, FnArg, Frame, ImmTy, InterpCx, InterpResult, MPlaceTy, MemoryKind,
-    Misalignment, OpTy, PlaceTy, Pointer, Provenance, RangeSet, interp_ok, throw_unsup,
-    throw_unsup_format,
+    CtfeProvenance, EnteredTraceSpan, FnArg, Frame, ImmTy, InterpCx, InterpResult, MPlaceTy,
+    MemoryKind, Misalignment, OpTy, PlaceTy, Pointer, Provenance, RangeSet, interp_ok, throw_unsup,
 };
 
 /// Data returned by [`Machine::after_stack_pop`], and consumed by
@@ -185,8 +182,8 @@ pub trait Machine<'tcx>: Sized {
     fn load_mir(
         ecx: &InterpCx<'tcx, Self>,
         instance: ty::InstanceKind<'tcx>,
-    ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
-        interp_ok(ecx.tcx.instance_mir(instance))
+    ) -> &'tcx mir::Body<'tcx> {
+        ecx.tcx.instance_mir(instance)
     }
 
     /// Entry point to all function calls.
@@ -204,7 +201,7 @@ pub trait Machine<'tcx>: Sized {
         instance: ty::Instance<'tcx>,
         abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<(&'tcx mir::Body<'tcx>, ty::Instance<'tcx>)>>;
@@ -216,7 +213,7 @@ pub trait Machine<'tcx>: Sized {
         fn_val: Self::ExtraFnVal,
         abi: &FnAbi<'tcx, Ty<'tcx>>,
         args: &[FnArg<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx>;
@@ -230,7 +227,7 @@ pub trait Machine<'tcx>: Sized {
         ecx: &mut InterpCx<'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx, Self::Provenance>],
-        destination: &MPlaceTy<'tcx, Self::Provenance>,
+        destination: &PlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>>;
@@ -276,6 +273,14 @@ pub trait Machine<'tcx>: Sized {
     ) -> F2 {
         // By default we always return the preferred NaN.
         F2::NAN
+    }
+
+    /// Apply non-determinism to float operations that do not return a precise result.
+    fn apply_float_nondet(
+        _ecx: &mut InterpCx<'tcx, Self>,
+        val: ImmTy<'tcx, Self::Provenance>,
+    ) -> InterpResult<'tcx, ImmTy<'tcx, Self::Provenance>> {
+        interp_ok(val)
     }
 
     /// Determines the result of `min`/`max` on floats when the arguments are equal.
@@ -361,6 +366,19 @@ pub trait Machine<'tcx>: Sized {
         size: i64,
     ) -> Option<(AllocId, Size, Self::ProvenanceExtra)>;
 
+    /// Return a "root" pointer for the given allocation: the one that is used for direct
+    /// accesses to this static/const/fn allocation, or the one returned from the heap allocator.
+    ///
+    /// Not called on `extern` or thread-local statics (those use the methods above).
+    ///
+    /// `kind` is the kind of the allocation the pointer points to; it can be `None` when
+    /// it's a global and `GLOBAL_KIND` is `None`.
+    fn adjust_alloc_root_pointer(
+        ecx: &InterpCx<'tcx, Self>,
+        ptr: Pointer,
+        kind: Option<MemoryKind<Self::MemoryKind>>,
+    ) -> InterpResult<'tcx, Pointer<Self::Provenance>>;
+
     /// Called to adjust global allocations to the Provenance and AllocExtra of this machine.
     ///
     /// If `alloc` contains pointers, then they are all pointing to globals.
@@ -375,11 +393,12 @@ pub trait Machine<'tcx>: Sized {
         alloc: &'b Allocation,
     ) -> InterpResult<'tcx, Cow<'b, Allocation<Self::Provenance, Self::AllocExtra, Self::Bytes>>>;
 
-    /// Initialize the extra state of an allocation.
+    /// Initialize the extra state of an allocation local to this machine.
     ///
-    /// This is guaranteed to be called exactly once on all allocations that are accessed by the
-    /// program.
-    fn init_alloc_extra(
+    /// This is guaranteed to be called exactly once on all allocations local to this machine.
+    /// It will not be called automatically for global allocations; `adjust_global_allocation`
+    /// has to do that itself if that is desired.
+    fn init_local_allocation(
         ecx: &InterpCx<'tcx, Self>,
         id: AllocId,
         kind: MemoryKind<Self::MemoryKind>,
@@ -387,35 +406,9 @@ pub trait Machine<'tcx>: Sized {
         align: Align,
     ) -> InterpResult<'tcx, Self::AllocExtra>;
 
-    /// Return a "root" pointer for the given allocation: the one that is used for direct
-    /// accesses to this static/const/fn allocation, or the one returned from the heap allocator.
-    ///
-    /// Not called on `extern` or thread-local statics (those use the methods above).
-    ///
-    /// `kind` is the kind of the allocation the pointer points to; it can be `None` when
-    /// it's a global and `GLOBAL_KIND` is `None`.
-    fn adjust_alloc_root_pointer(
-        ecx: &InterpCx<'tcx, Self>,
-        ptr: Pointer,
-        kind: Option<MemoryKind<Self::MemoryKind>>,
-    ) -> InterpResult<'tcx, Pointer<Self::Provenance>>;
-
-    /// Evaluate the inline assembly.
-    ///
-    /// This should take care of jumping to the next block (one of `targets`) when asm goto
-    /// is triggered, `targets[0]` when the assembly falls through, or diverge in case of
-    /// naked_asm! or `InlineAsmOptions::NORETURN` being set.
-    fn eval_inline_asm(
-        _ecx: &mut InterpCx<'tcx, Self>,
-        _template: &'tcx [InlineAsmTemplatePiece],
-        _operands: &[mir::InlineAsmOperand<'tcx>],
-        _options: InlineAsmOptions,
-        _targets: &[mir::BasicBlock],
-    ) -> InterpResult<'tcx> {
-        throw_unsup_format!("inline assembly is not supported")
-    }
-
     /// Hook for performing extra checks on a memory read access.
+    /// `ptr` will always be a pointer with the provenance in `prov` pointing to the beginning of
+    /// `range`.
     ///
     /// This will *not* be called during validation!
     ///
@@ -429,6 +422,7 @@ pub trait Machine<'tcx>: Sized {
         _tcx: TyCtxtAt<'tcx>,
         _machine: &Self,
         _alloc_extra: &Self::AllocExtra,
+        _ptr: Pointer<Option<Self::Provenance>>,
         _prov: (AllocId, Self::ProvenanceExtra),
         _range: AllocRange,
     ) -> InterpResult<'tcx> {
@@ -442,17 +436,24 @@ pub trait Machine<'tcx>: Sized {
     ///
     /// Used to prevent statics from self-initializing by reading from their own memory
     /// as it is being initialized.
-    fn before_alloc_read(_ecx: &InterpCx<'tcx, Self>, _alloc_id: AllocId) -> InterpResult<'tcx> {
+    fn before_alloc_access(
+        _tcx: TyCtxtAt<'tcx>,
+        _machine: &Self,
+        _alloc_id: AllocId,
+    ) -> InterpResult<'tcx> {
         interp_ok(())
     }
 
     /// Hook for performing extra checks on a memory write access.
     /// This is not invoked for ZST accesses, as no write actually happens.
+    /// `ptr` will always be a pointer with the provenance in `prov` pointing to the beginning of
+    /// `range`.
     #[inline(always)]
     fn before_memory_write(
         _tcx: TyCtxtAt<'tcx>,
         _machine: &mut Self,
         _alloc_extra: &mut Self::AllocExtra,
+        _ptr: Pointer<Option<Self::Provenance>>,
         _prov: (AllocId, Self::ProvenanceExtra),
         _range: AllocRange,
     ) -> InterpResult<'tcx> {
@@ -460,11 +461,14 @@ pub trait Machine<'tcx>: Sized {
     }
 
     /// Hook for performing extra operations on a memory deallocation.
+    /// `ptr` will always be a pointer with the provenance in `prov` pointing to the beginning of
+    /// the allocation.
     #[inline(always)]
     fn before_memory_deallocation(
         _tcx: TyCtxtAt<'tcx>,
         _machine: &mut Self,
         _alloc_extra: &mut Self::AllocExtra,
+        _ptr: Pointer<Option<Self::Provenance>>,
         _prov: (AllocId, Self::ProvenanceExtra),
         _size: Size,
         _align: Align,
@@ -529,11 +533,9 @@ pub trait Machine<'tcx>: Sized {
         interp_ok(())
     }
 
-    /// Called just before the return value is copied to the caller-provided return place.
-    fn before_stack_pop(
-        _ecx: &InterpCx<'tcx, Self>,
-        _frame: &Frame<'tcx, Self::Provenance, Self::FrameExtra>,
-    ) -> InterpResult<'tcx> {
+    /// Called just before the frame is removed from the stack (followed by return value copy and
+    /// local cleanup).
+    fn before_stack_pop(_ecx: &mut InterpCx<'tcx, Self>) -> InterpResult<'tcx> {
         interp_ok(())
     }
 
@@ -584,27 +586,6 @@ pub trait Machine<'tcx>: Sized {
         interp_ok(())
     }
 
-    /// Evaluate the given constant. The `eval` function will do all the required evaluation,
-    /// but this hook has the chance to do some pre/postprocessing.
-    #[inline(always)]
-    fn eval_mir_constant<F>(
-        ecx: &InterpCx<'tcx, Self>,
-        val: mir::Const<'tcx>,
-        span: Span,
-        layout: Option<TyAndLayout<'tcx>>,
-        eval: F,
-    ) -> InterpResult<'tcx, OpTy<'tcx, Self::Provenance>>
-    where
-        F: Fn(
-            &InterpCx<'tcx, Self>,
-            mir::Const<'tcx>,
-            Span,
-            Option<TyAndLayout<'tcx>>,
-        ) -> InterpResult<'tcx, OpTy<'tcx, Self::Provenance>>,
-    {
-        eval(ecx, val, span, layout)
-    }
-
     /// Returns the salt to be used for a deduplicated global alloation.
     /// If the allocation is for a function, the instance is provided as well
     /// (this lets Miri ensure unique addresses for some functions).
@@ -621,6 +602,21 @@ pub trait Machine<'tcx>: Sized {
         // Default to no caching.
         Cow::Owned(compute_range())
     }
+
+    /// Compute the value passed to the constructors of the `AllocBytes` type for
+    /// abstract machine allocations.
+    fn get_default_alloc_params(&self) -> <Self::Bytes as AllocBytes>::AllocParams;
+
+    /// Allows enabling/disabling tracing calls from within `rustc_const_eval` at compile time, by
+    /// delegating the entering of [tracing::Span]s to implementors of the [Machine] trait. The
+    /// default implementation corresponds to tracing being disabled, meaning the tracing calls will
+    /// supposedly be optimized out completely. To enable tracing, override this trait method and
+    /// return `span.entered()`. Also see [crate::enter_trace_span].
+    #[must_use]
+    #[inline(always)]
+    fn enter_trace_span(_span: impl FnOnce() -> tracing::Span) -> impl EnteredTraceSpan {
+        ()
+    }
 }
 
 /// A lot of the flexibility above is just needed for `Miri`, but all "compile-time" machines
@@ -631,6 +627,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
 
     type ExtraFnVal = !;
 
+    type MemoryKind = $crate::const_eval::MemoryKind;
     type MemoryMap =
         rustc_data_structures::fx::FxIndexMap<AllocId, (MemoryKind<Self::MemoryKind>, Allocation)>;
     const GLOBAL_KIND: Option<Self::MemoryKind> = None; // no copying of globals from `tcx` to machine memory
@@ -668,7 +665,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         fn_val: !,
         _abi: &FnAbi<$tcx, Ty<$tcx>>,
         _args: &[FnArg<$tcx>],
-        _destination: &MPlaceTy<$tcx, Self::Provenance>,
+        _destination: &PlaceTy<$tcx, Self::Provenance>,
         _target: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction,
     ) -> InterpResult<$tcx> {
@@ -699,7 +696,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         interp_ok(Cow::Borrowed(alloc))
     }
 
-    fn init_alloc_extra(
+    fn init_local_allocation(
         _ecx: &InterpCx<$tcx, Self>,
         _id: AllocId,
         _kind: MemoryKind<Self::MemoryKind>,
@@ -734,7 +731,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         // Allow these casts, but make the pointer not dereferenceable.
         // (I.e., they behave like transmutation.)
         // This is correct because no pointers can ever be exposed in compile-time evaluation.
-        interp_ok(Pointer::from_addr_invalid(addr))
+        interp_ok(Pointer::without_provenance(addr))
     }
 
     #[inline(always)]
@@ -743,8 +740,7 @@ pub macro compile_time_machine(<$tcx: lifetime>) {
         ptr: Pointer<CtfeProvenance>,
         _size: i64,
     ) -> Option<(AllocId, Size, Self::ProvenanceExtra)> {
-        // We know `offset` is relative to the allocation, so we can use `into_parts`.
-        let (prov, offset) = ptr.into_parts();
+        let (prov, offset) = ptr.prov_and_relative_offset();
         Some((prov.alloc_id(), offset, prov.immutable()))
     }
 

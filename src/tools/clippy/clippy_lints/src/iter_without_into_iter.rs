@@ -1,14 +1,13 @@
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::get_parent_as_impl;
 use clippy_utils::source::snippet;
 use clippy_utils::ty::{deref_chain, get_adt_inherent_method, implements_trait, make_normalized_projection};
+use clippy_utils::{get_parent_as_impl, sym};
 use rustc_ast::Mutability;
 use rustc_errors::Applicability;
 use rustc_hir::{FnRetTy, ImplItemKind, ImplicitSelfKind, ItemKind, TyKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty};
 use rustc_session::declare_lint_pass;
-use rustc_span::sym;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -140,13 +139,12 @@ impl LateLintPass<'_> for IterWithoutIntoIter {
                 // We can't check inherent impls for slices, but we know that they have an `iter(_mut)` method
                 ty.peel_refs().is_slice() || get_adt_inherent_method(cx, ty, expected_method_name).is_some()
             })
-            && let Some(iter_assoc_span) = imp.items.iter().find_map(|item| {
-                if item.ident.name.as_str() == "IntoIter" {
-                    Some(cx.tcx.hir_impl_item(item.id).expect_type().span)
-                } else {
-                    None
-                }
-            })
+            && let Some(iter_assoc_span) = cx.tcx.associated_items(item.owner_id)
+                .filter_by_name_unhygienic_and_kind(sym::IntoIter, ty::AssocTag::Type)
+                .next()
+                .map(|assoc_item| {
+                    cx.tcx.hir_node_by_def_id(assoc_item.def_id.expect_local()).expect_impl_item().expect_type().span
+                })
             && is_ty_exported(cx, ty)
         {
             span_lint_and_then(

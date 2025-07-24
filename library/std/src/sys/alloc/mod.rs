@@ -17,6 +17,7 @@ const MIN_ALIGN: usize = if cfg!(any(
     target_arch = "arm",
     target_arch = "m68k",
     target_arch = "csky",
+    target_arch = "loongarch32",
     target_arch = "mips",
     target_arch = "mips32r6",
     target_arch = "powerpc",
@@ -72,6 +73,7 @@ cfg_if::cfg_if! {
         target_family = "unix",
         target_os = "wasi",
         target_os = "teeos",
+        target_os = "trusty",
     ))] {
         mod unix;
     } else if #[cfg(target_os = "windows")] {

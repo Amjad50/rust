@@ -10,7 +10,7 @@ use rustc_middle::ty::{self, PseudoCanonicalInput, TyCtxt, TypeVisitableExt};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::traits::{
     ImplSource, Obligation, ObligationCause, ObligationCtxt, ScrubbedTraitError, SelectionContext,
-    Unimplemented,
+    SelectionError,
 };
 use tracing::debug;
 
@@ -40,7 +40,7 @@ pub(crate) fn codegen_select_candidate<'tcx>(
     let selection = match selcx.select(&obligation) {
         Ok(Some(selection)) => selection,
         Ok(None) => return Err(CodegenObligationError::Ambiguity),
-        Err(Unimplemented) => return Err(CodegenObligationError::Unimplemented),
+        Err(SelectionError::Unimplemented) => return Err(CodegenObligationError::Unimplemented),
         Err(e) => {
             bug!("Encountered error `{:?}` selecting `{:?}` during codegen", e, trait_ref)
         }
@@ -51,7 +51,6 @@ pub(crate) fn codegen_select_candidate<'tcx>(
     // Currently, we use a fulfillment context to completely resolve
     // all nested obligations. This is because they can inform the
     // inference of the impl's type parameters.
-    // FIXME(-Znext-solver): Doesn't need diagnostics if new solver.
     let ocx = ObligationCtxt::new(&infcx);
     let impl_source = selection.map(|obligation| {
         ocx.register_obligation(obligation);
@@ -70,7 +69,7 @@ pub(crate) fn codegen_select_candidate<'tcx>(
                 infcx.err_ctxt().report_overflow_obligation_cycle(&cycle);
             }
         }
-        return Err(CodegenObligationError::FulfillmentError);
+        return Err(CodegenObligationError::Unimplemented);
     }
 
     let impl_source = infcx.resolve_vars_if_possible(impl_source);

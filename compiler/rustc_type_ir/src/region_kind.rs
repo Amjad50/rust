@@ -4,7 +4,7 @@ use derive_where::derive_where;
 #[cfg(feature = "nightly")]
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 #[cfg(feature = "nightly")]
-use rustc_macros::{HashStable_NoContext, TyDecodable, TyEncodable};
+use rustc_macros::{Decodable_NoContext, Encodable_NoContext, HashStable_NoContext};
 
 use self::RegionKind::*;
 use crate::{DebruijnIndex, Interner};
@@ -126,7 +126,7 @@ rustc_index::newtype_index! {
 /// [2]: https://smallcultfollowing.com/babysteps/blog/2013/11/04/intermingled-parameter-lists/
 /// [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/traits/hrtb.html
 #[derive_where(Clone, Copy, Hash, PartialEq, Eq; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable))]
+#[cfg_attr(feature = "nightly", derive(Encodable_NoContext, Decodable_NoContext))]
 pub enum RegionKind<I: Interner> {
     /// A region parameter; for example `'a` in `impl<'a> Trait for &'a ()`.
     ///
@@ -193,7 +193,7 @@ impl<I: Interner> fmt::Debug for RegionKind<I> {
 
             ReVar(vid) => write!(f, "{vid:?}"),
 
-            RePlaceholder(placeholder) => write!(f, "{placeholder:?}"),
+            RePlaceholder(placeholder) => write!(f, "'{placeholder:?}"),
 
             // Use `'{erased}` as the output instead of `'erased` so that its more obviously distinct from
             // a `ReEarlyParam` named `'erased`. Technically that would print as `'erased/#IDX` so this is

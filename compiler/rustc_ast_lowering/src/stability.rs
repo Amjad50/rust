@@ -79,10 +79,6 @@ pub fn extern_abi_stability(abi: ExternAbi) -> Result<(), UnstableAbi> {
         | ExternAbi::SysV64 { .. }
         | ExternAbi::System { .. }
         | ExternAbi::EfiApi => Ok(()),
-        // implementation details
-        ExternAbi::RustIntrinsic => {
-            Err(UnstableAbi { abi, feature: sym::intrinsics, explain: GateReason::ImplDetail })
-        }
         ExternAbi::Unadjusted => {
             Err(UnstableAbi { abi, feature: sym::abi_unadjusted, explain: GateReason::ImplDetail })
         }
@@ -99,6 +95,9 @@ pub fn extern_abi_stability(abi: ExternAbi) -> Result<(), UnstableAbi> {
         }),
         ExternAbi::RustCold => {
             Err(UnstableAbi { abi, feature: sym::rust_cold_cc, explain: GateReason::Experimental })
+        }
+        ExternAbi::RustInvalid => {
+            Err(UnstableAbi { abi, feature: sym::rustc_attrs, explain: GateReason::ImplDetail })
         }
         ExternAbi::GpuKernel => Err(UnstableAbi {
             abi,
@@ -128,15 +127,18 @@ pub fn extern_abi_stability(abi: ExternAbi) -> Result<(), UnstableAbi> {
             feature: sym::abi_riscv_interrupt,
             explain: GateReason::Experimental,
         }),
-        ExternAbi::CCmseNonSecureCall => Err(UnstableAbi {
+        ExternAbi::CmseNonSecureCall => Err(UnstableAbi {
             abi,
-            feature: sym::abi_c_cmse_nonsecure_call,
+            feature: sym::abi_cmse_nonsecure_call,
             explain: GateReason::Experimental,
         }),
-        ExternAbi::CCmseNonSecureEntry => Err(UnstableAbi {
+        ExternAbi::CmseNonSecureEntry => Err(UnstableAbi {
             abi,
             feature: sym::cmse_nonsecure_entry,
             explain: GateReason::Experimental,
         }),
+        ExternAbi::Custom => {
+            Err(UnstableAbi { abi, feature: sym::abi_custom, explain: GateReason::Experimental })
+        }
     }
 }

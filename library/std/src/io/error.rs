@@ -48,6 +48,7 @@ use crate::{error, fmt, result, sys};
 /// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
+#[doc(search_unbox)]
 pub type Result<T> = result::Result<T, Error>;
 
 /// The error type for I/O operations of the [`Read`], [`Write`], [`Seek`], and
@@ -218,6 +219,7 @@ struct Custom {
 /// the recognized error kinds and fail in those cases.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "io_errorkind")]
 #[allow(deprecated)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -373,8 +375,8 @@ pub enum ErrorKind {
     TooManyLinks,
     /// A filename was invalid.
     ///
-    /// This error can also cause if it exceeded the filename length limit.
-    #[unstable(feature = "io_error_more", issue = "86442")]
+    /// This error can also occur if a length limit for a name was exceeded.
+    #[stable(feature = "io_error_invalid_filename", since = "1.87.0")]
     InvalidFilename,
     /// Program argument list too long.
     ///
@@ -460,8 +462,8 @@ impl ErrorKind {
             Deadlock => "deadlock",
             DirectoryNotEmpty => "directory not empty",
             ExecutableFileBusy => "executable file busy",
-            FilesystemLoop => "filesystem loop or indirection limit (e.g. symlink loop)",
             FileTooLarge => "file too large",
+            FilesystemLoop => "filesystem loop or indirection limit (e.g. symlink loop)",
             HostUnreachable => "host unreachable",
             InProgress => "in progress",
             Interrupted => "operation interrupted",
@@ -561,6 +563,7 @@ impl Error {
     /// let eof_error = Error::from(ErrorKind::UnexpectedEof);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "io_error_new")]
     #[inline(never)]
     pub fn new<E>(kind: ErrorKind, error: E) -> Error
     where

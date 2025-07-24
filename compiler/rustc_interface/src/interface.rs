@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustc_ast::{LitKind, MetaItemKind, token};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::jobserver;
+use rustc_data_structures::jobserver::{self, Proxy};
 use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_errors::registry::Registry;
 use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed};
@@ -18,7 +18,6 @@ use rustc_parse::parser::attr::AllowLeadingUnsafe;
 use rustc_query_impl::QueryCtxt;
 use rustc_query_system::query::print_query_stack;
 use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
-use rustc_session::filesearch::{self, sysroot_candidates};
 use rustc_session::parse::ParseSess;
 use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, lint};
 use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
@@ -40,17 +39,21 @@ pub struct Compiler {
     pub sess: Session,
     pub codegen_backend: Box<dyn CodegenBackend>,
     pub(crate) override_queries: Option<fn(&Session, &mut Providers)>,
+
+    /// A reference to the current `GlobalCtxt` which we pass on to `GlobalCtxt`.
     pub(crate) current_gcx: CurrentGcx,
+
+    /// A jobserver reference which we pass on to `GlobalCtxt`.
+    pub(crate) jobserver_proxy: Arc<Proxy>,
 }
 
 /// Converts strings provided as `--cfg [cfgspec]` into a `Cfg`.
 pub(crate) fn parse_cfg(dcx: DiagCtxtHandle<'_>, cfgs: Vec<String>) -> Cfg {
     cfgs.into_iter()
         .map(|s| {
-            let psess = ParseSess::with_silent_emitter(
+            let psess = ParseSess::with_fatal_emitter(
                 vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
                 format!("this error occurred on the command line: `--cfg={s}`"),
-                true,
             );
             let filename = FileName::cfg_spec_source_code(&s);
 
@@ -111,10 +114,9 @@ pub(crate) fn parse_check_cfg(dcx: DiagCtxtHandle<'_>, specs: Vec<String>) -> Ch
     let mut check_cfg = CheckCfg { exhaustive_names, exhaustive_values, ..CheckCfg::default() };
 
     for s in specs {
-        let psess = ParseSess::with_silent_emitter(
+        let psess = ParseSess::with_fatal_emitter(
             vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
             format!("this error occurred on the command line: `--check-cfg={s}`"),
-            true,
         );
         let filename = FileName::cfg_spec_source_code(&s);
 
@@ -204,6 +206,14 @@ pub(crate) fn parse_check_cfg(dcx: DiagCtxtHandle<'_>, specs: Vec<String>) -> Ch
                     error!("`cfg()` names cannot be after values");
                 }
                 names.push(ident);
+            } else if let Some(boolean) = arg.boolean_literal() {
+                if values_specified {
+                    error!("`cfg()` names cannot be after values");
+                }
+                names.push(rustc_span::Ident::new(
+                    if boolean { rustc_span::kw::True } else { rustc_span::kw::False },
+                    arg.span(),
+                ));
             } else if arg.has_name(sym::any)
                 && let Some(args) = arg.meta_item_list()
             {
@@ -340,6 +350,10 @@ pub struct Config {
     /// the list of queries.
     pub override_queries: Option<fn(&Session, &mut Providers)>,
 
+    /// An extra set of symbols to add to the symbol interner, the symbol indices
+    /// will start at [`PREDEFINED_SYMBOLS_COUNT`](rustc_span::symbol::PREDEFINED_SYMBOLS_COUNT)
+    pub extra_symbols: Vec<&'static str>,
+
     /// This is a callback from the driver that is called to create a codegen backend.
     ///
     /// Has no uses within this repository, but is used by bjorn3 for "the
@@ -390,8 +404,11 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
     crate::callbacks::setup_callbacks();
 
-    let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
-    let target = config::build_target_config(&early_dcx, &config.opts.target_triple, &sysroot);
+    let target = config::build_target_config(
+        &early_dcx,
+        &config.opts.target_triple,
+        config.opts.sysroot.path(),
+    );
     let file_loader = config.file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
     let path_mapping = config.opts.file_path_mapping();
     let hash_kind = config.opts.unstable_opts.src_hash_algorithm(&target);
@@ -401,8 +418,9 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
         &early_dcx,
         config.opts.edition,
         config.opts.unstable_opts.threads,
+        &config.extra_symbols,
         SourceMapInputs { file_loader, path_mapping, hash_kind, checksum_hash_kind },
-        |current_gcx| {
+        |current_gcx, jobserver_proxy| {
             // The previous `early_dcx` can't be reused here because it doesn't
             // impl `Send`. Creating a new one is fine.
             let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
@@ -410,7 +428,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
             let codegen_backend = match config.make_codegen_backend {
                 None => util::get_codegen_backend(
                     &early_dcx,
-                    &sysroot,
+                    &config.opts.sysroot,
                     config.opts.unstable_opts.codegen_backend.as_deref(),
                     &target,
                 ),
@@ -424,8 +442,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
             let temps_dir = config.opts.unstable_opts.temps_dir.as_deref().map(PathBuf::from);
 
             let bundle = match rustc_errors::fluent_bundle(
-                config.opts.maybe_sysroot.clone(),
-                sysroot_candidates().to_vec(),
+                &config.opts.sysroot.all_paths().collect::<Vec<_>>(),
                 config.opts.unstable_opts.translate_lang.clone(),
                 config.opts.unstable_opts.translate_additional_ftl.as_deref(),
                 config.opts.unstable_opts.translate_directionality_markers,
@@ -454,7 +471,6 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 locale_resources,
                 config.lint_caps,
                 target,
-                sysroot,
                 util::rustc_version_str().unwrap_or("unknown"),
                 config.ice_file,
                 config.using_internal_features,
@@ -498,6 +514,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 codegen_backend,
                 override_queries: config.override_queries,
                 current_gcx,
+                jobserver_proxy,
             };
 
             // There are two paths out of `f`.
