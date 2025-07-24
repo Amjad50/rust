@@ -1,7 +1,7 @@
 use crate::ffi::CStr;
 use crate::io;
 use crate::num::NonZeroUsize;
-use crate::time::Duration;
+use crate::time::{Duration, Instant};
 
 pub struct Thread(!);
 
@@ -29,6 +29,14 @@ impl Thread {
         // be executed normally.
         unsafe {
             emerald_std::clock::sleep(secs, nsecs).expect("Failed to sleep");
+        }
+    }
+
+    pub fn sleep_until(deadline: Instant) {
+        let now = Instant::now();
+
+        if let Some(delay) = deadline.checked_duration_since(now) {
+            Self::sleep(delay);
         }
     }
 

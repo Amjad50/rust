@@ -32,15 +32,15 @@ mod eh_unwinding {
 
 // This function is needed by the panic runtime. The symbol is named in
 // pre-link args for the target specification, so keep that in sync.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __rust_abort() -> ! {
     super::os::exit(0xFF);
 }
-extern "C" {
+unsafe extern "C" {
     fn main(argc: isize, argv: *const *const u8) -> i32;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     #[cfg(not(test))]
     #[cfg(feature = "panic_unwind")]
@@ -142,50 +142,6 @@ pub fn current_exe() -> io::Result<PathBuf> {
     // TODO: `is_absolute` is broken for non-unix since it relies on `cfgs` which I don't want to modify,
     //       I'm opening a PR to fix that, then this will be changed to `is_absolute` but doesn't change much anyway
     if !path.has_root() { getcwd().map(|cwd| cwd.join(path)) } else { Ok(path) }
-}
-
-pub struct Env(!);
-
-impl Env {
-    // FIXME(https://github.com/rust-lang/rust/issues/114583): Remove this when <OsStr as Debug>::fmt matches <str as Debug>::fmt.
-    pub fn str_debug(&self) -> impl fmt::Debug + '_ {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-impl fmt::Debug for Env {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-impl Iterator for Env {
-    type Item = (OsString, OsString);
-    fn next(&mut self) -> Option<(OsString, OsString)> {
-        let Self(inner) = self;
-        match *inner {}
-    }
-}
-
-pub fn env() -> Env {
-    panic!("not supported on this platform")
-}
-
-pub fn getenv(str: &OsStr) -> Option<OsString> {
-    if str == "RUST_BACKTRACE" {
-        return Some("full".into());
-    }
-    None
-}
-
-pub unsafe fn setenv(_: &OsStr, _: &OsStr) -> io::Result<()> {
-    Err(io::const_error!(io::ErrorKind::Unsupported, "cannot set env vars on this platform"))
-}
-
-pub unsafe fn unsetenv(_: &OsStr) -> io::Result<()> {
-    Err(io::const_error!(io::ErrorKind::Unsupported, "cannot unset env vars on this platform"))
 }
 
 pub fn temp_dir() -> PathBuf {

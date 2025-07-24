@@ -2,9 +2,10 @@ use core::ffi::CStr;
 
 use emerald_std::io::{FileStat, SeekWhence};
 
-use super::fd::FileDesc;
-use super::syscall_to_io_error;
+use crate::sys::fd::FileDesc;
+use crate::sys::pal::syscall_to_io_error;
 use crate::ffi::OsString;
+use crate::fs::TryLockError;
 use crate::fmt;
 use crate::hash::Hash;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
@@ -14,7 +15,7 @@ use crate::path::{Path, PathBuf};
 use crate::sys::common::small_c_string::run_path_with_cstr;
 use crate::sys::time::SystemTime;
 use crate::sys::unsupported;
-pub use crate::sys_common::fs::{copy, exists};
+pub use crate::sys::fs::common::{copy, exists};
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 
 pub struct File {
@@ -272,6 +273,10 @@ impl File {
         stat(&self.path)
     }
 
+    pub fn size(&self) -> Option<io::Result<u64>> {
+        Some(self.file_attr().map(|attr| attr.size()))
+    }
+
     pub fn fsync(&self) -> io::Result<()> {
         todo!()
     }
@@ -358,12 +363,12 @@ impl File {
         unsupported()
     }
 
-    pub fn try_lock(&self) -> io::Result<bool> {
-        unsupported()
+    pub fn try_lock(&self) -> Result<(), TryLockError> {
+        unsupported().map_err(TryLockError::Error)
     }
 
-    pub fn try_lock_shared(&self) -> io::Result<bool> {
-        unsupported()
+    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
+        unsupported().map_err(TryLockError::Error)
     }
 
     pub fn unlock(&self) -> io::Result<()> {
@@ -459,7 +464,7 @@ pub fn rmdir(_p: &Path) -> io::Result<()> {
     todo!("rmdir")
 }
 
-pub use crate::sys_common::fs::remove_dir_all;
+pub use crate::sys::fs::common::remove_dir_all;
 
 pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
     todo!("readlink")

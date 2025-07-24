@@ -30,6 +30,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "uefi")] {
         mod uefi;
         use uefi as imp;
+    } else if #[cfg(target_os = "emerald")] {
+        mod emerald;
+        use emerald as imp;
     } else if #[cfg(target_os = "wasi")] {
         mod wasi;
         use wasi as imp;

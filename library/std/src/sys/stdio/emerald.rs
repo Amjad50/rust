@@ -1,7 +1,7 @@
 use core::io::BorrowedCursor;
 use core::mem::ManuallyDrop;
 
-use super::fd::FileDesc;
+use crate::sys::fd::FileDesc;
 use crate::io::{self, IoSlice, IoSliceMut};
 use crate::os::emerald::io::FromRawFd;
 

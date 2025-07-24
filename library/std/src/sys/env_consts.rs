@@ -400,6 +400,18 @@ pub mod os {
     pub const EXE_EXTENSION: &str = "elf";
 }
 
+#[cfg(target_os = "emerald")]
+pub mod os {
+    pub const FAMILY: &str = "";
+    pub const OS: &str = "emerald";
+    pub const DLL_PREFIX: &str = "";
+    pub const DLL_SUFFIX: &str = ".elf";
+    pub const DLL_EXTENSION: &str = ".elf";
+    pub const EXE_SUFFIX: &str = ".elf";
+    pub const EXE_EXTENSION: &str = ".elf";
+}
+
+
 // The fallback when none of the other gates match.
 #[else]
 pub mod os {

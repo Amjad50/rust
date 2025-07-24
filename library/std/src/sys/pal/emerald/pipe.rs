@@ -1,6 +1,6 @@
 use emerald_std::io::syscall_create_pipe;
 
-use super::fd::FileDesc;
+use crate::sys::fd::FileDesc;
 use super::syscall_to_io_error;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::os::emerald::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
@@ -23,10 +23,6 @@ pub fn anon_pipe() -> io::Result<(AnonPipe, AnonPipe)> {
 }
 
 impl AnonPipe {
-    pub fn into_inner(self) -> FileDesc {
-        self.0
-    }
-
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.read(buf)
     }

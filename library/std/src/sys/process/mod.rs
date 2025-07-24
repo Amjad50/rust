@@ -8,6 +8,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "uefi")] {
         mod uefi;
         use uefi as imp;
+    } else if #[cfg(target_os = "emerald")] {
+        mod emerald;
+        use emerald as imp;
     } else {
         mod unsupported;
         use unsupported as imp;
@@ -35,6 +38,7 @@ pub use imp::{
         ))
     ),
     target_os = "windows",
+    target_os = "emerald",
 ))]
 pub fn output(cmd: &mut Command) -> crate::io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     use crate::sys::pipe::read2;
@@ -74,5 +78,6 @@ pub fn output(cmd: &mut Command) -> crate::io::Result<(ExitStatus, Vec<u8>, Vec<
         ))
     ),
     target_os = "windows",
+    target_os = "emerald",
 )))]
 pub use imp::output;

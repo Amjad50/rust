@@ -1,20 +1,14 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod alloc;
-pub mod args;
-pub mod env;
-pub mod fd;
-pub mod fs;
 pub mod os;
 pub mod pipe;
-pub mod process;
-pub mod stdio;
 pub mod thread;
 pub mod time;
 
 mod common;
 pub use common::*;
-use emerald_std::SyscallError;
+pub use emerald_std::SyscallError;
 
 pub fn unsupported<T>() -> crate::io::Result<T> {
     Err(unsupported_err())
@@ -27,7 +21,7 @@ pub fn unsupported_err() -> crate::io::Error {
     )
 }
 
-fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
+pub(crate) fn syscall_to_io_error(e: SyscallError) -> crate::io::Error {
     match e {
         SyscallError::PidNotFound => crate::io::Error::new(
             crate::io::ErrorKind::NotFound,

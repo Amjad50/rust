@@ -4,7 +4,7 @@ use core::cmp;
 
 use emerald_std::io::FileMeta;
 
-use super::syscall_to_io_error;
+use crate::sys::pal::syscall_to_io_error;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, Read};
 use crate::os::emerald::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::sys_common::{AsInner, FromInner, IntoInner};

@@ -6,17 +6,17 @@ use emerald_std::SyscallError;
 use emerald_std::io::{FD_STDERR, FD_STDIN, FD_STDOUT};
 use emerald_std::process::SpawnFileMapping;
 
-use super::fd::FileDesc;
-use super::pipe;
+use crate::sys::fd::FileDesc;
 use crate::ffi::OsStr;
 pub use crate::ffi::OsString as EnvKey;
 use crate::num::NonZeroI32;
 use crate::os::emerald::io::{AsRawFd, IntoRawFd, RawFd};
 use crate::path::Path;
 use crate::sys::fs::File;
-use crate::sys::pal::emerald::syscall_to_io_error;
-use crate::sys::pipe::AnonPipe;
-use crate::sys_common::process::{CommandEnv, CommandEnvs};
+use crate::sys::pal::syscall_to_io_error;
+use crate::sys::pipe::{self, AnonPipe};
+use crate::sys_common::{IntoInner};
+use super::env::{CommandEnv, CommandEnvs};
 use crate::{fmt, io};
 
 struct Argv(Vec<*const c_char>);
@@ -215,11 +215,6 @@ impl Command {
         };
         Ok((Process { pid: pid as u32 }, ours))
     }
-
-    pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-        let (proc, pipes) = self.spawn(Stdio::MakePipe, false)?;
-        crate::sys_common::process::wait_with_output(proc, pipes)
-    }
 }
 
 impl Stdio {
@@ -271,6 +266,12 @@ impl Stdio {
 impl From<AnonPipe> for Stdio {
     fn from(pipe: AnonPipe) -> Stdio {
         Stdio::Fd(pipe.into_inner())
+    }
+}
+
+impl From<FileDesc> for Stdio {
+    fn from(fd: FileDesc) -> Stdio {
+        Stdio::Fd(fd)
     }
 }
 
