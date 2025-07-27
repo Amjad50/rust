@@ -41,6 +41,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(target_os = "zkvm")] {
         mod zkvm;
         pub use zkvm::*;
+    } else if #[cfg(target_os = "emerald")]  {
+        mod emerald;
+        pub use emerald::*;
     } else {
         mod unsupported;
         pub use unsupported::*;

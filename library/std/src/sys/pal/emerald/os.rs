@@ -10,10 +10,11 @@ use crate::sys::pal::emerald::syscall_to_io_error;
 use crate::{fmt, io};
 
 #[cfg(not(test))]
-#[cfg(feature = "panic_unwind")]
+#[cfg(feature = "panic-unwind")]
 mod eh_unwinding {
     pub(crate) struct EhFrameFinder;
     pub(crate) static mut EH_FRAME_ADDRESS: usize = 0;
+    pub(crate) static mut EH_TEXT_ADDRESS: usize = 0;
     pub(crate) static EH_FRAME_SETTINGS: EhFrameFinder = EhFrameFinder;
 
     unsafe impl unwind::EhFrameFinder for EhFrameFinder {
@@ -22,7 +23,7 @@ mod eh_unwinding {
                 None
             } else {
                 Some(unwind::FrameInfo {
-                    text_base: None,
+                    text_base: Some(unsafe { EH_TEXT_ADDRESS }),
                     kind: unwind::FrameInfoKind::EhFrame(unsafe { EH_FRAME_ADDRESS }),
                 })
             }
@@ -43,9 +44,13 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(argc: isize, argv: *const *const u8) -> ! {
     #[cfg(not(test))]
-    #[cfg(feature = "panic_unwind")]
+    #[cfg(feature = "panic-unwind")]
     {
-        unsafe { eh_unwinding::EH_FRAME_ADDRESS = emerald_std::process::process_metadata().eh_frame_address };
+        unsafe {
+            eh_unwinding::EH_FRAME_ADDRESS =
+                emerald_std::process::process_metadata().eh_frame_address;
+            eh_unwinding::EH_TEXT_ADDRESS = emerald_std::process::process_metadata().text_address;
+        }
         unwind::set_custom_eh_frame_finder(&eh_unwinding::EH_FRAME_SETTINGS).ok();
     }
     exit(unsafe { main(argc, argv) });
